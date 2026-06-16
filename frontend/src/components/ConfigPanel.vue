@@ -109,7 +109,7 @@ async function fetchWhitelist() {
 
 async function saveWhitelist() {
   try {
-    await axios.put('/api/config/whitelist', whitelist.value)
+    await axios.put('/api/config/whitelist', { commands: whitelist.value })
     ElMessage.success('保存成功')
   } catch (e) {
     console.error('保存白名单失败', e)

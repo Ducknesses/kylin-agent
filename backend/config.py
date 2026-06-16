@@ -31,5 +31,8 @@ class Settings:
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # 演示模式：无真实 LLM / MCP 时返回 mock 数据，便于阶段 2 联调
+    DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() == "true"
+
 
 settings = Settings()

@@ -2,11 +2,16 @@
   <div class="monitor-panel">
     <div class="monitor-header">
       <span class="title">系统监控大盘</span>
-      <el-radio-group v-model="timeRange" size="small" @change="onRangeChange">
-        <el-radio-button label="5m">最近5分钟</el-radio-button>
-        <el-radio-button label="30m">最近30分钟</el-radio-button>
-        <el-radio-button label="1h">最近1小时</el-radio-button>
-      </el-radio-group>
+      <div class="controls">
+        <el-tag :type="dataSource === 'sse' ? 'success' : 'info'" size="small">
+          {{ dataSource === 'sse' ? '实时数据' : '演示数据' }}
+        </el-tag>
+        <el-radio-group v-model="timeRange" size="small" @change="onRangeChange">
+          <el-radio-button label="5m">最近5分钟</el-radio-button>
+          <el-radio-button label="30m">最近30分钟</el-radio-button>
+          <el-radio-button label="1h">最近1小时</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
     <div class="charts-grid">
       <div ref="cpuChart" class="chart-box" />
@@ -26,6 +31,7 @@ const cpuChart = ref(null)
 const memChart = ref(null)
 const diskChart = ref(null)
 const netChart = ref(null)
+const dataSource = ref('mock')
 
 let charts = {}
 let sseSource = null
@@ -40,7 +46,7 @@ const metrics = {
   netOut: []
 }
 
-function pushPoint() {
+function pushPoint(data) {
   const now = new Date().toLocaleTimeString()
   if (metrics.times.length > 60) {
     metrics.times.shift()
@@ -51,11 +57,11 @@ function pushPoint() {
     metrics.netOut.shift()
   }
   metrics.times.push(now)
-  metrics.cpu.push(+(Math.random() * 30 + 20).toFixed(1))
-  metrics.mem.push(+(Math.random() * 20 + 40).toFixed(1))
-  metrics.disk.push(+(Math.random() * 10 + 50).toFixed(1))
-  metrics.netIn.push(+(Math.random() * 500 + 100).toFixed(0))
-  metrics.netOut.push(+(Math.random() * 300 + 50).toFixed(0))
+  metrics.cpu.push(data.cpu_percent ?? +(Math.random() * 30 + 20).toFixed(1))
+  metrics.mem.push(data.memory_percent ?? +(Math.random() * 20 + 40).toFixed(1))
+  metrics.disk.push(data.disk_percent ?? +(Math.random() * 10 + 50).toFixed(1))
+  metrics.netIn.push(data.net_in_kbps ?? +(Math.random() * 500 + 100).toFixed(0))
+  metrics.netOut.push(data.net_out_kbps ?? +(Math.random() * 300 + 50).toFixed(0))
 }
 
 function baseOption(title, color) {
@@ -110,19 +116,45 @@ function refreshAll() {
 }
 
 function addMockPoint() {
-  pushPoint()
+  pushPoint({})
   refreshAll()
 }
 
 function connectSse() {
-  // 阶段1先用 mock 数据，阶段3再接入真实 SSE
-  // sseSource = new EventSource('/api/monitor/stream')
+  try {
+    sseSource = new EventSource('/api/monitor/stream')
+    sseSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        dataSource.value = 'sse'
+        pushPoint(data)
+        refreshAll()
+      } catch (err) {
+        console.error('解析 SSE 数据失败', err)
+      }
+    }
+    sseSource.onerror = (err) => {
+      console.warn('SSE 连接失败，切换到 mock 数据', err)
+      dataSource.value = 'mock'
+      if (sseSource) {
+        sseSource.close()
+        sseSource = null
+      }
+      startMock()
+    }
+  } catch (e) {
+    console.warn('EventSource 不可用，使用 mock 数据')
+    startMock()
+  }
+}
+
+function startMock() {
+  if (mockTimer) return
   addMockPoint()
   mockTimer = setInterval(addMockPoint, 3000)
 }
 
 function onRangeChange() {
-  // 时间范围切换，后续可过滤历史数据
   console.log('切换时间范围', timeRange.value)
 }
 
@@ -154,6 +186,11 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .title {
   font-size: 16px;

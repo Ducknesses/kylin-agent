@@ -10,6 +10,69 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def _mock_tool_result(tool_name: str, arguments: Dict[str, Any]) -> Dict:
+    """演示模式：返回 MCP 工具 mock 结果"""
+    if tool_name == "sys_info":
+        metric = arguments.get("metric", "all")
+        return {
+            "success": True,
+            "result": {
+                "metric": metric,
+                "cpu_percent": 15.2,
+                "memory_percent": 42.0,
+                "disk_percent": 62.5,
+                "load_avg": [0.3, 0.25, 0.1],
+                "timestamp": "2026-06-16T12:00:00",
+            },
+        }
+    if tool_name == "service_mgr":
+        return {
+            "success": True,
+            "result": {
+                "service": arguments.get("service", "sshd"),
+                "action": arguments.get("action", "status"),
+                "status": "active (running)",
+                "output": "服务运行正常",
+            },
+        }
+    if tool_name == "log_reader":
+        return {
+            "success": True,
+            "result": {
+                "source": arguments.get("source", "/var/log/messages"),
+                "lines": arguments.get("lines", 20),
+                "content": "Jun 16 12:00:00 kylin sshd[1234]: Accepted password for user from 192.168.1.1\n...",
+            },
+        }
+    if tool_name == "net_monitor":
+        return {
+            "success": True,
+            "result": {
+                "iface": arguments.get("iface", "all"),
+                "rx_kbps": 120.5,
+                "tx_kbps": 45.2,
+            },
+        }
+    if tool_name == "file_guard":
+        return {
+            "success": True,
+            "result": {
+                "path": arguments.get("path", "/etc/hosts"),
+                "size": 256,
+                "content": "127.0.0.1 localhost\n::1 localhost",
+            },
+        }
+    if tool_name == "cmd_exec":
+        return {
+            "success": True,
+            "result": {
+                "command": arguments.get("command", ""),
+                "output": "命令执行完成（演示模式）",
+            },
+        }
+    return {"success": True, "result": {"tool": tool_name, "arguments": arguments}}
+
+
 class MCPClient:
     """MCP HTTP JSON-RPC 2.0 客户端"""
 
@@ -32,6 +95,10 @@ class MCPClient:
         返回:
             MCP Server 返回的 result 字段
         """
+        if settings.DEMO_MODE:
+            logger.info(f"[MCP DEMO] 模拟调用 {tool_name}，参数: {arguments}")
+            return _mock_tool_result(tool_name, arguments)
+
         payload = {
             "jsonrpc": "2.0",
             "method": "tools/call",

@@ -17,6 +17,23 @@ SYSTEM_PROMPT = (
 )
 
 
+def _mock_llm_response(messages: List[Dict]) -> str:
+    """演示模式：根据用户输入返回 mock 回复"""
+    user_text = messages[-1].get("content", "") if messages else ""
+    lower = user_text.lower()
+    if any(k in lower for k in ["cpu", "处理器", "负载"]):
+        return "当前 CPU 使用率约 15%，负载较低，系统运行平稳。"
+    if any(k in lower for k in ["内存", "mem"]):
+        return "当前内存使用率 42%，可用内存充足。"
+    if any(k in lower for k in ["磁盘", "disk", "df"]):
+        return "磁盘使用率 62%，主要分区空间充足。"
+    if any(k in lower for k in ["服务", "service", "systemctl"]):
+        return "已查询服务状态，目标服务运行正常。"
+    if any(k in lower for k in ["日志", "log", "journalctl"]):
+        return "已读取最近日志，未发现明显异常。"
+    return f"收到运维请求：{user_text[:30]}... 已为您完成查询。"
+
+
 async def chat_with_llm(
     messages: List[Dict[str, str]],
     stream: bool = True,
@@ -34,9 +51,18 @@ async def chat_with_llm(
         流式返回时：逐块 yield content
         非流式时：yield 完整 content
     """
-    if not settings.DEEPSEEK_API_KEY:
-        logger.error("DeepSeek API Key 未配置")
-        yield "[错误] DeepSeek API Key 未配置，请在环境变量中设置 DEEPSEEK_API_KEY"
+    if settings.DEMO_MODE or not settings.DEEPSEEK_API_KEY:
+        if not settings.DEMO_MODE:
+            logger.error("DeepSeek API Key 未配置")
+            yield "[错误] DeepSeek API Key 未配置，请在环境变量中设置 DEEPSEEK_API_KEY"
+            return
+        # 演示模式：模拟流式输出
+        text = _mock_llm_response(messages)
+        # 按字符流式返回，让前端有实时感
+        chunk_size = 4
+        for i in range(0, len(text), chunk_size):
+            yield text[i : i + chunk_size]
+            await _async_sleep(0.02)
         return
 
     headers = {
@@ -109,6 +135,14 @@ async def analyze_root_cause(logs: str, metrics: str) -> Dict:
     输出:
         {"phenomenon": "...", "causes": [...], "evidence": "...", "fix": "..."}
     """
+    if settings.DEMO_MODE:
+        return {
+            "phenomenon": "演示模式：系统负载偶发升高",
+            "causes": ["定时任务集中执行", "内存缓存未命中"],
+            "evidence": "CPU 使用率 15%，内存 42%，未见异常日志",
+            "fix": "观察定时任务调度，必要时错峰执行",
+        }
+
     prompt = (
         "你是一名资深系统运维工程师，请根据以下异常日志和系统指标进行根因分析。\n"
         "要求输出严格 JSON 格式，不要包含 markdown 代码块标记。\n"
@@ -139,3 +173,10 @@ async def analyze_root_cause(logs: str, metrics: str) -> Dict:
             "evidence": result_text[:500],
             "fix": "请检查输入数据格式",
         }
+
+
+async def _async_sleep(seconds: float):
+    """辅助：演示模式模拟流式延迟"""
+    import asyncio
+
+    await asyncio.sleep(seconds)

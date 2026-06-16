@@ -65,14 +65,16 @@ frontend/
 └── vite.config.js
 ```
 
-## 阶段 1 完成项
+## 阶段 2 完成项
 
 - [x] Vite + Vue3 + Element Plus 项目能跑通
 - [x] WebSocket 连接封装完成（心跳、自动重连、消息分类）
-- [x] ChatPanel 支持 user / assistant 消息渲染
-- [x] RiskAlert、ToolCallCard 组件已就位
-- [x] SysMonitor 使用 mock 数据展示 4 个 ECharts 图表
-- [x] AuditTimeline、ConfigPanel 基础页面完成
+- [x] ChatPanel 完整支持 user / assistant / tool_call / risk_alert 四种消息渲染
+- [x] 流式接收正常，`chunk` 消息逐字追加
+- [x] RiskAlert 弹窗正常弹出，中危二次确认按钮可用
+- [x] SysMonitor 优先接入后端 SSE，失败 fallback 到 mock 数据
+- [x] AuditTimeline 拉取后端审计日志
+- [x] ConfigPanel 与后端白名单接口对齐
 - [x] `npm run build` 通过
 
 ## 界面测试方法

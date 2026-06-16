@@ -132,6 +132,8 @@ class WsClient {
         this.emit('error', data)
         break
       case 'pong':
+      case 'status':
+        // 状态消息仅用于前端展示加载状态，暂不处理
         break
       default:
         console.log('未知消息类型', data)

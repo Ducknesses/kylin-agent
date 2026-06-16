@@ -25,6 +25,12 @@ python run.py
 
 后端默认监听 `http://localhost:8000`。
 
+> 如果没有 DeepSeek Key 或 MCP Server，可开启演示模式：
+> ```bash
+> cd backend
+> DEMO_MODE=true python3 run.py
+> ```
+
 ### 启动前端
 
 ```bash

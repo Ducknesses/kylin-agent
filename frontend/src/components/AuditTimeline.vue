@@ -15,23 +15,24 @@
     <el-timeline class="timeline">
       <el-timeline-item
         v-for="item in filteredList"
-        :key="item.id"
-        :type="timelineType(item.level)"
+        :key="item.trace_id"
+        :type="timelineType(item.risk_level)"
         :timestamp="formatTime(item.timestamp)"
         placement="top"
       >
         <el-card shadow="hover" class="audit-card">
           <template #header>
             <div class="card-header">
-              <span>{{ item.action || '对话记录' }}</span>
-              <el-tag :type="tagType(item.level)" size="small">{{ levelText(item.level) }}</el-tag>
+              <span>{{ item.intent || '对话记录' }}</span>
+              <el-tag :type="tagType(item.risk_level)" size="small">{{ levelText(item.risk_level) }}</el-tag>
             </div>
           </template>
           <div class="audit-detail">
             <p><strong>用户输入：</strong>{{ item.user_input || '-' }}</p>
-            <p><strong>意图：</strong>{{ item.intent || '-' }}</p>
+            <p><strong>工具：</strong>{{ item.mcp_tool || '-' }}</p>
             <p><strong>执行命令：</strong><code>{{ item.command || '-' }}</code></p>
-            <p><strong>结果：</strong>{{ item.result || '-' }}</p>
+            <p><strong>原始输出：</strong><pre class="raw-output">{{ item.raw_output || '-' }}</pre></p>
+            <p><strong>最终回复：</strong>{{ item.final_response || '-' }}</p>
           </div>
         </el-card>
       </el-timeline-item>
@@ -50,7 +51,7 @@ const filterLevel = ref('')
 
 const filteredList = computed(() => {
   if (!filterLevel.value) return auditList.value
-  return auditList.value.filter(item => item.level === filterLevel.value)
+  return auditList.value.filter(item => item.risk_level === filterLevel.value)
 })
 
 async function fetchAudit() {
@@ -59,9 +60,9 @@ async function fetchAudit() {
     auditList.value = res.data || []
   } catch (e) {
     console.error('拉取审计日志失败', e)
-    // 阶段1 mock 数据
+    // fallback mock 数据
     auditList.value = [
-      { id: 1, timestamp: Date.now() - 60000, user_input: '查看CPU', intent: 'sys_info', level: 'low', command: 'mpstat 1 1', result: 'cpu 15%' }
+      { trace_id: 'mock-1', timestamp: new Date().toISOString(), user_input: '查看CPU', intent: 'tool_call', risk_level: 'low', mcp_tool: 'sys_info', command: 'sys_info metric=cpu', raw_output: '{"cpu_percent": 15.2}', final_response: 'CPU 使用率 15%' }
     ]
   }
 }
@@ -130,6 +131,15 @@ onMounted(fetchAudit)
 .audit-detail p {
   margin: 4px 0;
   color: #4b5563;
+}
+.raw-output {
+  background-color: #f3f4f6;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
 }
 .empty {
   text-align: center;

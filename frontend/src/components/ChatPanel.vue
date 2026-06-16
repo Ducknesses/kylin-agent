@@ -105,13 +105,6 @@ function sendMessage() {
     content: text
   })
 
-  // 预置一条空的 assistant 消息，用于流式追加
-  chatStore.addMessage(chatStore.currentSessionId, {
-    role: 'assistant',
-    type: 'text',
-    content: ''
-  })
-
   isStreaming.value = true
   wsClient.sendChat(text)
   inputText.value = ''

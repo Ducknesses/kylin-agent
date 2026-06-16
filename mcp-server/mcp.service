@@ -1,0 +1,30 @@
+[Unit]
+Description=MCP Server for Kylin OS Agent
+Documentation=https://github.com/Ducknesses/kylin-agent
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/opt/mcp-server
+ExecStart=/usr/bin/python3 /opt/mcp-server/server.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/mcp-server.log
+StandardError=append:/var/log/mcp-server.log
+Environment=PYTHONUNBUFFERED=1
+Environment=MCP_HOST=0.0.0.0
+Environment=MCP_PORT=8001
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log
+ReadOnlyPaths=/proc /sys /dev
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
