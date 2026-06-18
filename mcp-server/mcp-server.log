@@ -1,4 +1,3 @@
-[WARN] 无法写入 /var/log/mcp-server.log，日志回退到 /home/jackb/projects/kylin-agent/mcp-server/mcp-server.log
 2026-06-18 22:41:48 [INFO] root: ============================================================
 2026-06-18 22:41:48 [INFO] root: MCP Server for Kylin OS Agent 启动中...
 2026-06-18 22:41:48 [INFO] root: 监听地址: 127.0.0.1:8001

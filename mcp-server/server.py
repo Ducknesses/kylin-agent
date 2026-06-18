@@ -40,11 +40,30 @@ JSONRPC_ERRORS = {
 
 
 def setup_logging():
-    """配置日志：同时输出到文件和控制台"""
+    """
+    配置日志。
+    systemd 环境（INVOCATION_ID 存在）：仅 stdout，由 journald 捕获
+    非 systemd 环境：RotatingFileHandler + stdout 双输出
+    """
+    in_systemd = bool(os.environ.get("INVOCATION_ID"))
+
     log_format = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    if in_systemd:
+        # systemd 模式：仅输出到 stdout，由 journald 自动捕获
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(log_format)
+        console_handler.setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
+        root_logger.addHandler(console_handler)
+        return root_logger
+
+    # ---- 非 systemd 模式：文件 + 控制台 ----
 
     # 文件日志（带轮转，每个文件10MB保留3个）
     log_dir = os.path.dirname(config.LOG_FILE)
@@ -60,22 +79,29 @@ def setup_logging():
         )
         file_handler.setFormatter(log_format)
         file_handler.setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
+        root_logger.addHandler(file_handler)
     except PermissionError:
         # 无权写入 /var/log 时回退到当前目录
         fallback_log = os.path.join(os.path.dirname(__file__), "mcp-server.log")
-        file_handler = logging.StreamHandler()
-        file_handler.setFormatter(log_format)
-        file_handler.setLevel(logging.DEBUG)
-        print(f"[WARN] 无法写入 {config.LOG_FILE}，日志输出到控制台")
+        print(f"[WARN] 无法写入 {config.LOG_FILE}，日志回退到 {fallback_log}")
+        try:
+            fallback_handler = logging.handlers.RotatingFileHandler(
+                fallback_log,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            fallback_handler.setFormatter(log_format)
+            fallback_handler.setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
+            root_logger.addHandler(fallback_handler)
+        except Exception:
+            # 连当前目录也写不了，只用控制台
+            pass
 
-    # 控制台日志
-    console_handler = logging.StreamHandler()
+    # 控制台日志（非 systemd 模式同样输出一份到控制台）
+    console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(log_format)
     console_handler.setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
-
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-    root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
 
     return root_logger

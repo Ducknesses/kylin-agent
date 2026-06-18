@@ -33,6 +33,9 @@ if [ -d "$SCRIPT_DIR/deploy" ]; then
 fi
 echo "  文件已复制到 /opt/mcp-server/"
 
+# 确保 agent-read 用户有权限读取所有文件
+chown -R agent-read:agent-read /opt/mcp-server
+
 # ---- 3. 创建虚拟环境并安装依赖 ----
 echo "[3/7] 创建 Python 虚拟环境..."
 cd /opt/mcp-server
