@@ -18,7 +18,11 @@ def http_post(path: str, data: dict) -> tuple:
     """发送 JSON-RPC POST 请求，返回 (status, body_dict)"""
     url = f"{BASE_URL}{path}"
     body = json.dumps(data).encode("utf-8")
-    req = Request(url, data=body, headers={"Content-Type": "application/json"})
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer change-me-in-production",
+    }
+    req = Request(url, data=body, headers=headers)
     try:
         with urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -171,6 +175,106 @@ def main():
         )
         all_passed = all_passed and ok
         print(f"  响应: {json.dumps(resp, ensure_ascii=False)}")
+        print()
+
+        # ---- 测试 7: file_guard write 操作 ----
+        print("[测试 7] file_guard → write 写入测试文件")
+        status, resp = http_post("/jsonrpc", {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "file_guard", "arguments": {
+                "action": "write",
+                "path": "/tmp/p1-test-write.txt",
+                "content": "P1 test content for file_guard write"
+            }},
+            "id": 5
+        })
+        result = resp.get("result", {})
+        ok = check(
+            status == 200 and "bytes_written" in result and "new_hash_prefix" in result,
+            f"write 成功, bytes_written={result.get('bytes_written')}, hash={result.get('new_hash_prefix')}"
+        )
+        all_passed = all_passed and ok
+        print(f"  响应: {json.dumps(result, ensure_ascii=False)}")
+        print()
+
+        # ---- 测试 8: file_guard write 拒绝高危路径 ----
+        print("[测试 8] file_guard → write 拒绝写入 /etc/passwd")
+        status, resp = http_post("/jsonrpc", {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "file_guard", "arguments": {
+                "action": "write",
+                "path": "/etc/passwd",
+                "content": "malicious"
+            }},
+            "id": 6
+        })
+        result = resp.get("result", {})
+        ok = check(
+            result.get("risk_level") == "high" or "error" in str(result),
+            "write /etc/passwd 被拒绝"
+        )
+        all_passed = all_passed and ok
+        print(f"  响应: {json.dumps(result, ensure_ascii=False)[:200]}")
+        print()
+
+        # ---- 测试 9: net_monitor listen 模式 ----
+        print("[测试 9] net_monitor → listen 监听端口查询")
+        status, resp = http_post("/jsonrpc", {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "net_monitor", "arguments": {"metric": "listen"}},
+            "id": 7
+        })
+        result = resp.get("result", {})
+        ok = check(
+            status == 200 and "listeners" in result,
+            f"listen 成功, 监听端口数={result.get('listeners', {}).get('total', 0)}"
+        )
+        all_passed = all_passed and ok
+        print(f"  listeners total: {result.get('listeners', {}).get('total', 'N/A')}")
+        print()
+
+        # ---- 测试 10: net_monitor listen 按端口筛选 ----
+        print("[测试 10] net_monitor → listen port=8001 筛选")
+        status, resp = http_post("/jsonrpc", {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "net_monitor", "arguments": {"metric": "listen", "port": 8001}},
+            "id": 8
+        })
+        result = resp.get("result", {})
+        ok = check(
+            status == 200 and "listeners" in result,
+            f"listen port=8001 成功, 匹配数={result.get('listeners', {}).get('total', 0)}"
+        )
+        all_passed = all_passed and ok
+        print(f"  listeners total: {result.get('listeners', {}).get('total', 'N/A')}")
+        print()
+
+        # ---- 测试 11: log_reader keyword 过滤 ----
+        print("[测试 11] log_reader → keyword 过滤测试")
+        status, resp = http_post("/jsonrpc", {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "log_reader", "arguments": {
+                "type": "file",
+                "source": "syslog",
+                "lines": 20,
+                "keyword": "systemd"
+            }},
+            "id": 9
+        })
+        result = resp.get("result", {})
+        # 兼容文件不存在的情况（非麒麟 V11 环境 /var/log/syslog 可能也不存在）
+        has_keyword = "keyword" in result
+        ok = check(
+            status == 200 and ("content" in result or "error" in result),
+            f"keyword 过滤请求完成, keyword={result.get('keyword')}, has_content={'content' in result}"
+        )
+        all_passed = all_passed and ok
+        print(f"  响应: keyword={result.get('keyword')}, lines={result.get('lines_returned')}")
         print()
 
     finally:

@@ -1,0 +1,58 @@
+2026-06-18 22:06:56 [INFO] root: ============================================================
+2026-06-18 22:06:56 [INFO] root: ============================================================
+2026-06-18 22:06:56 [INFO] root: MCP Server for Kylin OS Agent 启动中...
+2026-06-18 22:06:56 [INFO] root: MCP Server for Kylin OS Agent 启动中...
+2026-06-18 22:06:56 [INFO] root: 监听地址: 127.0.0.1:8001
+2026-06-18 22:06:56 [INFO] root: 监听地址: 127.0.0.1:8001
+2026-06-18 22:06:56 [INFO] root: 已注册工具 (6): ['sys_info', 'service_mgr', 'log_reader', 'net_monitor', 'cmd_exec', 'file_guard']
+2026-06-18 22:06:56 [INFO] root: 已注册工具 (6): ['sys_info', 'service_mgr', 'log_reader', 'net_monitor', 'cmd_exec', 'file_guard']
+2026-06-18 22:06:56 [INFO] root: 日志文件: /var/log/mcp-server.log
+2026-06-18 22:06:56 [INFO] root: 日志文件: /var/log/mcp-server.log
+2026-06-18 22:06:56 [INFO] root: ============================================================
+2026-06-18 22:06:56 [INFO] root: ============================================================
+2026-06-18 22:06:56 [INFO] root: MCP Server 已启动，等待请求...
+2026-06-18 22:06:56 [INFO] root: MCP Server 已启动，等待请求...
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "GET / HTTP/1.1" 200 -
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "GET / HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=1, method=ping, params={}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=1, method=ping, params={}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=2, method=tools/list, params={}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=2, method=tools/list, params={}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=3, method=tools/call, params={'name': 'sys_info', 'arguments': {'metric': 'cpu'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=3, method=tools/call, params={'name': 'sys_info', 'arguments': {'metric': 'cpu'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: sys_info, 参数: {'metric': 'cpu'}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: sys_info, 参数: {'metric': 'cpu'}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=4, method=no_such_method, params={}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=4, method=no_such_method, params={}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "GET /nonexistent HTTP/1.1" 404 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=5, method=tools/call, params={'name': 'file_guard', 'arguments': {'action': 'write', 'path': '/tmp/p1-test-write.txt', 'content': 'P1 test content for file_guard write'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=5, method=tools/call, params={'name': 'file_guard', 'arguments': {'action': 'write', 'path': '/tmp/p1-test-write.txt', 'content': 'P1 test content for file_guard write'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: file_guard, 参数: {'action': 'write', 'path': '/tmp/p1-test-write.txt', 'content': 'P1 test content for file_guard write'}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: file_guard, 参数: {'action': 'write', 'path': '/tmp/p1-test-write.txt', 'content': 'P1 test content for file_guard write'}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=6, method=tools/call, params={'name': 'file_guard', 'arguments': {'action': 'write', 'path': '/etc/passwd', 'content': 'malicious'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=6, method=tools/call, params={'name': 'file_guard', 'arguments': {'action': 'write', 'path': '/etc/passwd', 'content': 'malicious'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: file_guard, 参数: {'action': 'write', 'path': '/etc/passwd', 'content': 'malicious'}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: file_guard, 参数: {'action': 'write', 'path': '/etc/passwd', 'content': 'malicious'}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=7, method=tools/call, params={'name': 'net_monitor', 'arguments': {'metric': 'listen'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=7, method=tools/call, params={'name': 'net_monitor', 'arguments': {'metric': 'listen'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: net_monitor, 参数: {'metric': 'listen'}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: net_monitor, 参数: {'metric': 'listen'}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=8, method=tools/call, params={'name': 'net_monitor', 'arguments': {'metric': 'listen', 'port': 8001}}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=8, method=tools/call, params={'name': 'net_monitor', 'arguments': {'metric': 'listen', 'port': 8001}}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: net_monitor, 参数: {'metric': 'listen', 'port': 8001}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: net_monitor, 参数: {'metric': 'listen', 'port': 8001}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=9, method=tools/call, params={'name': 'log_reader', 'arguments': {'type': 'file', 'source': 'syslog', 'lines': 20, 'keyword': 'systemd'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 收到请求: id=9, method=tools/call, params={'name': 'log_reader', 'arguments': {'type': 'file', 'source': 'syslog', 'lines': 20, 'keyword': 'systemd'}}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: log_reader, 参数: {'type': 'file', 'source': 'syslog', 'lines': 20, 'keyword': 'systemd'}
+2026-06-18 22:06:57 [INFO] root: [Server] 调用工具: log_reader, 参数: {'type': 'file', 'source': 'syslog', 'lines': 20, 'keyword': 'systemd'}
+2026-06-18 22:06:57 [DEBUG] root: HTTP: "POST /jsonrpc HTTP/1.1" 200 -
+2026-06-18 22:06:57 [INFO] root: 收到信号 15，正在关闭服务器...
+2026-06-18 22:06:57 [INFO] root: 收到信号 15，正在关闭服务器...

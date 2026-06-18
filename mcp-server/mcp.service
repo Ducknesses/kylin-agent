@@ -6,16 +6,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=agent
+User=agent-read
 WorkingDirectory=/opt/mcp-server
-ExecStart=/usr/bin/python3 /opt/mcp-server/server.py
+ExecStart=/opt/mcp-server/venv/bin/python /opt/mcp-server/server.py
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/mcp-server.log
 StandardError=append:/var/log/mcp-server.log
 Environment=PYTHONUNBUFFERED=1
-Environment=MCP_HOST=0.0.0.0
+Environment=PYTHONPATH=/opt/mcp-server
+Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8001
+Environment=API_TOKEN=change-me-in-production
 
 # 安全加固
 NoNewPrivileges=yes

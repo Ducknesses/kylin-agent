@@ -6,8 +6,11 @@ class Config:
     """全局配置，优先从环境变量读取"""
 
     # HTTP 服务
-    HOST: str = os.getenv("MCP_HOST", "0.0.0.0")
+    HOST: str = os.getenv("MCP_HOST", "127.0.0.1")
     PORT: int = int(os.getenv("MCP_PORT", "8001"))
+
+    # Bearer Token 认证
+    API_TOKEN: str = os.getenv("API_TOKEN", "change-me-in-production")
 
     # 沙箱配置
     COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "30"))

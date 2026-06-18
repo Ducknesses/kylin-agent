@@ -12,6 +12,7 @@ class Settings:
 
     # MCP Server（VirtualBox 麒麟 V11）
     MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://192.168.56.101:8001")
+    MCP_API_TOKEN: str = os.getenv("MCP_API_TOKEN", "change-me-in-production")
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")

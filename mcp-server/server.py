@@ -1,4 +1,5 @@
 """MCP Server 主入口：HTTP JSON-RPC 2.0 服务"""
+import hmac
 import json
 import logging
 import logging.handlers
@@ -110,19 +111,21 @@ def handle_tools_list(req_id=None) -> dict:
             },
         },
         "log_reader": {
-            "description": "读取系统日志",
+            "description": "读取系统日志，支持关键词过滤",
             "parameters": {
                 "type": "journalctl|file",
                 "source": "日志来源（别名或路径）",
                 "lines": "行数",
                 "service": "服务名（journalctl模式）",
                 "since": "时间范围",
+                "keyword": "关键词过滤（可选）",
             },
         },
         "net_monitor": {
-            "description": "网络监控信息",
+            "description": "网络监控信息（连接/流量/网卡/路由/DNS/监听端口）",
             "parameters": {
-                "metric": "connections|traffic|interfaces|routes|dns|all",
+                "metric": "connections|traffic|interfaces|routes|dns|listen|all",
+                "port": "端口号（listen模式筛选，可选）",
             },
         },
         "cmd_exec": {
@@ -134,10 +137,11 @@ def handle_tools_list(req_id=None) -> dict:
             },
         },
         "file_guard": {
-            "description": "文件安全检查与读取",
+            "description": "文件安全检查、读取与安全写入（带审计日志）",
             "parameters": {
-                "action": "check|read",
+                "action": "check|read|write",
                 "path": "文件路径",
+                "content": "写入内容（write 操作）",
                 "max_size": "最大读取字节数（默认1MB）",
             },
         },
@@ -200,19 +204,27 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", "http://localhost:5173")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):
         """处理 CORS 预检请求"""
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", "http://localhost:5173")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
+
+    def _verify_token(self):
+        """Bearer Token 认证：使用 hmac.compare_digest 防时序攻击"""
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        token = auth[7:]
+        return hmac.compare_digest(token, config.API_TOKEN)
 
     def do_GET(self):
         """GET 请求返回健康检查信息"""
@@ -229,6 +241,15 @@ class MCPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """POST 请求处理 JSON-RPC 2.0 调用"""
+
+        # Bearer Token 认证（所有 POST 请求强制校验）
+        if not self._verify_token():
+            self._send_json(
+                make_jsonrpc_error(-32001, "未授权：Token 认证失败", None,
+                                   extra={"detail": "请在 Authorization 头中提供有效的 Bearer Token"}),
+                401,
+            )
+            return
 
         # 检查路径
         if self.path not in ("/mcp/v1/tools/call", "/mcp/v1/tools/list", "/mcp/v1/rpc", "/jsonrpc"):

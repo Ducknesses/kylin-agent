@@ -50,8 +50,8 @@ def _safe_path(log_file: str) -> str:
     return real_path
 
 
-def _read_log_file(filepath: str, lines: int = 50) -> dict:
-    """读取日志文件尾部内容"""
+def _read_log_file(filepath: str, lines: int = 50, keyword: str = None) -> dict:
+    """读取日志文件尾部内容，支持关键词过滤"""
     real_path = _safe_path(filepath)
     if not real_path:
         return {"error": f"禁止访问路径: {filepath}"}
@@ -77,12 +77,20 @@ def _read_log_file(filepath: str, lines: int = 50) -> dict:
             text=True,
             timeout=10,
         )
+        content = result.stdout
+        log_lines = content.strip().split("\n") if content.strip() else []
+
+        # 关键词过滤
+        if keyword:
+            log_lines = [l for l in log_lines if keyword in l]
+
         return {
             "source": filepath,
             "real_path": real_path,
             "lines_requested": lines,
-            "lines_returned": len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0,
-            "content": result.stdout,
+            "lines_returned": len(log_lines),
+            "keyword": keyword,
+            "content": "\n".join(log_lines),
             "stderr": result.stderr,
         }
     except subprocess.TimeoutExpired:
@@ -92,8 +100,8 @@ def _read_log_file(filepath: str, lines: int = 50) -> dict:
         return {"error": str(e)}
 
 
-def _read_journal(service: str = None, lines: int = 50, since: str = None) -> dict:
-    """通过 journalctl 读取系统日志"""
+def _read_journal(service: str = None, lines: int = 50, since: str = None, keyword: str = None) -> dict:
+    """通过 journalctl 读取系统日志，支持关键词过滤"""
     cmd = ["journalctl", "--no-pager", "--lines", str(min(lines, config.MAX_OUTPUT_LINES))]
 
     if service:
@@ -110,15 +118,20 @@ def _read_journal(service: str = None, lines: int = 50, since: str = None) -> di
             timeout=15,
         )
         content = result.stdout
-        lines_count = len(content.strip().split("\n")) if content.strip() else 0
+        log_lines = content.strip().split("\n") if content.strip() else []
+
+        # 关键词过滤
+        if keyword:
+            log_lines = [l for l in log_lines if keyword in l]
 
         return {
             "source": "journalctl",
             "service": service,
             "since": since,
             "lines_requested": lines,
-            "lines_returned": lines_count,
-            "content": content,
+            "lines_returned": len(log_lines),
+            "keyword": keyword,
+            "content": "\n".join(log_lines),
             "stderr": result.stderr,
         }
     except subprocess.TimeoutExpired:
@@ -140,21 +153,23 @@ def handle(arguments: dict) -> dict:
             "service": "sshd",          # journalctl 模式下筛选服务
             "source": "messages",       # file 模式下日志来源（别名或路径）
             "lines": 50,                # 读取行数
-            "since": "30m"              # 时间范围（仅 journalctl）
+            "since": "30m",             # 时间范围（仅 journalctl）
+            "keyword": "error"          # 关键词过滤（可选）
         }
 
     返回:
-        日志内容
+         日志内容（支持关键词过滤）
     """
     log_type = arguments.get("type", "file")
     lines = int(arguments.get("lines", 50))
     service = arguments.get("service", "")
     source = arguments.get("source", "messages")
     since = arguments.get("since", "")
+    keyword = arguments.get("keyword", "")
 
     if log_type == "journalctl":
-        return _read_journal(service=service, lines=lines, since=since)
+        return _read_journal(service=service, lines=lines, since=since, keyword=keyword or None)
     elif log_type == "file":
-        return _read_log_file(filepath=source, lines=lines)
+        return _read_log_file(filepath=source, lines=lines, keyword=keyword or None)
     else:
         return {"error": f"不支持的日志类型: {log_type}，可选: journalctl / file"}

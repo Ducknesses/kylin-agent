@@ -111,7 +111,10 @@ class MCPClient:
 
         try:
             timeout = httpx.Timeout(settings.COMMAND_TIMEOUT + 5.0, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = {}
+            if not settings.DEMO_MODE:
+                headers["Authorization"] = f"Bearer {settings.MCP_API_TOKEN}"
+            async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
                 resp = await client.post(
                     f"{self.base_url}/mcp/v1/tools/call",
                     json=payload,
@@ -148,7 +151,10 @@ class MCPClient:
             "id": self._next_id(),
         }
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            headers = {}
+            if not settings.DEMO_MODE:
+                headers["Authorization"] = f"Bearer {settings.MCP_API_TOKEN}"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0), headers=headers) as client:
                 resp = await client.post(
                     f"{self.base_url}/mcp/v1/tools/list",
                     json=payload,

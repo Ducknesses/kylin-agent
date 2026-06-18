@@ -141,19 +141,54 @@ def _get_dns() -> dict:
     return {"nameservers": nameservers, "raw": content}
 
 
+def _get_listeners(port: int = None) -> dict:
+    """通过 ss -tlnp 获取监听端口"""
+    try:
+        cmd = ["ss", "-tlnp"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        lines = result.stdout.strip().split("\n")
+        listeners = []
+        for line in lines[1:]:  # 跳过标题行
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 4:
+                state = parts[0]
+                local = parts[3]
+                process = " ".join(parts[5:]) if len(parts) > 5 else ""
+                if port is not None and f":{port}" not in local:
+                    continue
+                listeners.append({
+                    "state": state,
+                    "local": local,
+                    "process": process
+                })
+        return {"total": len(listeners), "listeners": listeners[:200]}
+    except FileNotFoundError:
+        return {"error": "ss 命令不可用"}
+    except subprocess.TimeoutExpired:
+        return {"error": "ss 命令执行超时"}
+    except Exception as e:
+        logger.exception("获取监听端口失败: %s", e)
+        return {"error": str(e)}
+
+
 def handle(arguments: dict) -> dict:
     """
     处理网络监控请求
 
     参数:
         arguments: {
-            "metric": "connections"|"traffic"|"interfaces"|"routes"|"dns"|"all"
+            "metric": "connections"|"traffic"|"interfaces"|"routes"|"dns"|"listen"|"all",
+            "port": 80              # 可选，仅 listen 模式筛选特定端口
         }
 
     返回:
         网络监控数据
     """
     metric = arguments.get("metric", "all")
+    port = arguments.get("port")
 
     result = {}
 
@@ -172,10 +207,13 @@ def handle(arguments: dict) -> dict:
     if metric in ("dns", "all"):
         result["dns"] = _get_dns()
 
+    if metric in ("listen", "all"):
+        result["listeners"] = _get_listeners(port=port)
+
     if not result:
         return {
             "error": f"未知的metric: {metric}",
-            "available": ["connections", "traffic", "interfaces", "routes", "dns", "all"],
+            "available": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
         }
 
     return result
