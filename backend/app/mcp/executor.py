@@ -22,7 +22,7 @@ TOOL_COMMAND_TYPES = {
 class Executor:
     """命令执行调度器"""
 
-    def __init__(self, client: MCPClient = None):
+    def __init__(self, client: MCPClient | None = None):
         self.client = client or MCPClient()
 
     async def execute(self, tool_name: str, arguments: Dict, user_id: str = "anonymous") -> Dict:

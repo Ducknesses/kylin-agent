@@ -3,6 +3,9 @@
 *.db-journal
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+backend/data/backup/
 
 # Python virtual environment
 .venv/
@@ -10,3 +13,4 @@ venv/
 env/
 .env.example
 backend/requirements.txt
+ws_test.py
