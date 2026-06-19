@@ -11,6 +11,6 @@ backend/data/backup/
 .venv/
 venv/
 env/
-.env.example
+
 backend/requirements.txt
 ws_test.py
