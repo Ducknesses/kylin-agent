@@ -1,1 +1,10 @@
 *.pyc
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python virtual environment
+.venv/
+venv/
+env/
