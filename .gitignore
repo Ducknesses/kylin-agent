@@ -14,3 +14,4 @@ env/
 
 backend/requirements.txt
 ws_test.py
+tmp/
