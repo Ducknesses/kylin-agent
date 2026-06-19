@@ -25,6 +25,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
+import http from '../api/http'
 
 const timeRange = ref('5m')
 const cpuChart = ref(null)
@@ -33,9 +34,12 @@ const diskChart = ref(null)
 const netChart = ref(null)
 const dataSource = ref('mock')
 
+const POLL_INTERVAL = 5000
+
 let charts = {}
 let sseSource = null
 let mockTimer = null
+let pollTimer = null
 
 const metrics = {
   times: [],
@@ -60,8 +64,9 @@ function pushPoint(data) {
   metrics.cpu.push(data.cpu_percent ?? +(Math.random() * 30 + 20).toFixed(1))
   metrics.mem.push(data.memory_percent ?? +(Math.random() * 20 + 40).toFixed(1))
   metrics.disk.push(data.disk_percent ?? +(Math.random() * 10 + 50).toFixed(1))
-  metrics.netIn.push(data.net_in_kbps ?? +(Math.random() * 500 + 100).toFixed(0))
-  metrics.netOut.push(data.net_out_kbps ?? +(Math.random() * 300 + 50).toFixed(0))
+  // 统一转换为数值，避免后端/SSE 传字符串导致折线无法绘制
+  metrics.netIn.push(parseNetRate(data.net_in_kbps) ?? +(Math.random() * 500 + 100).toFixed(0))
+  metrics.netOut.push(parseNetRate(data.net_out_kbps) ?? +(Math.random() * 300 + 50).toFixed(0))
 }
 
 function baseOption(title, color) {
@@ -134,13 +139,13 @@ function connectSse() {
       }
     }
     sseSource.onerror = (err) => {
-      console.warn('SSE 连接失败，切换到 mock 数据', err)
+      console.warn('SSE 连接失败，切换到 REST 轮询', err)
       dataSource.value = 'mock'
       if (sseSource) {
         sseSource.close()
         sseSource = null
       }
-      startMock()
+      startPolling()
     }
   } catch (e) {
     console.warn('EventSource 不可用，使用 mock 数据')
@@ -152,6 +157,55 @@ function startMock() {
   if (mockTimer) return
   addMockPoint()
   mockTimer = setInterval(addMockPoint, 3000)
+}
+
+// 解析带单位的网络速率字符串，统一转换为 KB/s 数值
+function parseNetRate(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const str = String(value).toLowerCase().trim()
+  const num = parseFloat(str)
+  if (Number.isNaN(num)) return undefined
+  if (str.includes('gb/s') || str.includes('gbps')) return num * 1024 * 1024
+  if (str.includes('mb/s') || str.includes('mbps')) return num * 1024
+  return num
+}
+
+async function fetchMetricsSnapshot() {
+  try {
+    const data = await http.get('/monitor/metrics')
+    // 接口约定文档格式: { cpu: {percent, cores}, memory: {percent, total, used}, disk: {percent, total, used}, network: {rx, tx}, timestamp }
+    // 映射为内部统一格式
+    const point = {
+      cpu_percent: data?.cpu?.percent,
+      memory_percent: data?.memory?.percent,
+      disk_percent: data?.disk?.percent,
+      net_in_kbps: parseNetRate(data?.network?.rx),
+      net_out_kbps: parseNetRate(data?.network?.tx),
+    }
+    dataSource.value = 'sse'
+    pushPoint(point)
+    refreshAll()
+  } catch (e) {
+    console.warn('REST 指标获取失败，降级到 mock', e)
+    dataSource.value = 'mock'
+    // 如果 mock 还没启动则启动
+    if (!mockTimer) {
+      startMock()
+    }
+  }
+}
+
+function startPolling() {
+  if (pollTimer) return
+  fetchMetricsSnapshot()
+  pollTimer = setInterval(fetchMetricsSnapshot, POLL_INTERVAL)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 }
 
 function onRangeChange() {
@@ -167,6 +221,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (mockTimer) clearInterval(mockTimer)
   if (sseSource) sseSource.close()
+  stopPolling()
   Object.values(charts).forEach(c => c.dispose())
 })
 </script>
