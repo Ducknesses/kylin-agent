@@ -382,3 +382,34 @@ confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 dec
 - `audit.py` 中不再存在未使用的 `AuditRecordOut` 导入。
 - `GET /api/audit` 返回结构不变。
 - 数据库表结构不变。
+
+---
+
+## Part：Pydantic Schema 默认值与枚举约束清理
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`schemas/models.py` 中存在未使用的 `datetime` 导入，同时部分列表字段直接使用 `[]` 作为默认值。`role` / `risk` / `decision` 字段原先使用普通 `str`，无法在 Schema 层拦截明显非法取值（如 `role: "root"`）。
+
+### 产生原因
+
+初版模型优先对齐接口字段结构，未进一步做 lint 清理和枚举约束。
+
+### 本轮修复
+
+- 删除未使用的 `from datetime import datetime`，新增 `from typing import Literal`。
+- `SessionMessagesOut.messages` 和 `WhitelistUpdate.blocked_patterns` 默认值改为 `Field(default_factory=list)`。
+- `ChatMessage.decision` 限制为 `Literal["approve", "reject"] | None`。
+- `WhitelistCommandEntry.role` 限制为 `Literal["agent-read", "agent-op", "agent-admin"]`。
+- `WhitelistCommandEntry.risk` 限制为 `Literal["low", "medium", "high"]`。
+
+### 验收方式
+
+- `python -m py_compile` 通过。
+- `WhitelistUpdate` 仍接收 commands 对象数组。
+- `blocked_patterns` 未传时默认为空列表。
+- 非法 role / risk / decision 会被 Pydantic ValidationError 拒绝。
+- `ChatMessage` 仍兼容 chat / confirm / ping 三种前端消息。

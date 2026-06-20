@@ -1,5 +1,6 @@
 """Pydantic 数据模型 —— 对齐最新前后端 API 统一规范 v1.0"""
-from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -26,7 +27,7 @@ class SessionMessage(BaseModel):
 class SessionMessagesOut(BaseModel):
     """会话历史响应"""
     session_id: str
-    messages: list[SessionMessage] = []
+    messages: list[SessionMessage] = Field(default_factory=list)
 
 
 # ── WebSocket 消息模型 ────────────────────────────────────────────
@@ -40,7 +41,10 @@ class ChatMessage(BaseModel):
     type: str = Field(..., description="消息类型: chat / confirm / ping")
     content: str | None = Field(None, description="消息内容（chat 类型必填）")
     confirm_id: str | None = Field(None, description="确认操作 ID（confirm 类型）")
-    decision: str | None = Field(None, description="决策: approve / reject（confirm 类型）")
+    decision: Literal["approve", "reject"] | None = Field(
+        None,
+        description="决策: approve / reject（confirm 类型）",
+    )
 
 
 # ── 审计模型 ──────────────────────────────────────────────────────
@@ -66,14 +70,14 @@ class AuditRecordOut(BaseModel):
 class WhitelistCommandEntry(BaseModel):
     """白名单命令条目"""
     pattern: str
-    role: str  # agent-read / agent-op / agent-admin
-    risk: str  # low / medium / high
+    role: Literal["agent-read", "agent-op", "agent-admin"]
+    risk: Literal["low", "medium", "high"]
 
 
 class WhitelistUpdate(BaseModel):
     """更新白名单请求"""
     commands: list[WhitelistCommandEntry]
-    blocked_patterns: list[str] | None = []
+    blocked_patterns: list[str] = Field(default_factory=list)
 
 
 # ── 监控指标模型 ──────────────────────────────────────────────────
