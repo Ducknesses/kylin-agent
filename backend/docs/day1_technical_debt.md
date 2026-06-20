@@ -353,3 +353,32 @@ confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 dec
 - `/api/monitor/stream` 正常推送仍返回扁平结构。
 - SSE 异常 fallback 包含 `cpu_percent` / `load_avg` / `memory_percent` / `disk_percent` / `net_in_kbps` / `net_out_kbps` / `timestamp`。
 - `rx_kbps` / `tx_kbps` / `net_in_kbps` / `net_out_kbps` 不应为负数。
+
+---
+
+## Part：审计模块注释脱敏与未使用导入清理
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+审计日志模块中仍存在「完整思维链」「LLM 推理过程」等注释表述，容易误导后续开发者将模型原始思维链写入数据库。同时 `audit.py` 中存在未使用的 `AuditRecordOut` 导入。
+
+### 产生原因
+
+早期实现为了描述审计链路，沿用了「思维链」表述，但当前安全要求下不应保存模型原始思维链。
+
+### 本轮修复
+
+- `logger.py` 模块注释从「思维链审计日志记录」改为「安全审计日志记录」。
+- `log_chain()` 函数注释从「记录完整思维链到 SQLite」改为「记录一次安全审计链路到 SQLite」。
+- `llm_reasoning` 参数注释从「LLM 推理过程」改为「可展示的安全摘要或处理说明，不保存模型原始思维链」。
+- `audit.py` 中删除未使用的 `AuditRecordOut` 导入。
+
+### 验收方式
+
+- `logger.py` 中不再出现「完整思维链」「LLM 推理过程」等误导性表述。
+- `audit.py` 中不再存在未使用的 `AuditRecordOut` 导入。
+- `GET /api/audit` 返回结构不变。
+- 数据库表结构不变。

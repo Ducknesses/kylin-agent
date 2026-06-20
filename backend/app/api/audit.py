@@ -9,7 +9,6 @@ import logging
 from fastapi import APIRouter, Query
 
 from app.audit.logger import count_audit, query_audit
-from app.schemas.models import AuditRecordOut
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
