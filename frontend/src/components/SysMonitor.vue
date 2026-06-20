@@ -2,11 +2,16 @@
   <div class="monitor-panel">
     <div class="monitor-header">
       <span class="title">系统监控大盘</span>
-      <el-radio-group v-model="timeRange" size="small" @change="onRangeChange">
-        <el-radio-button label="5m">最近5分钟</el-radio-button>
-        <el-radio-button label="30m">最近30分钟</el-radio-button>
-        <el-radio-button label="1h">最近1小时</el-radio-button>
-      </el-radio-group>
+      <div class="header-right">
+        <el-tag :type="dataSource === 'sse' ? 'success' : 'warning'" size="small">
+          {{ dataSource === 'sse' ? 'SSE 实时' : '轮询中' }}
+        </el-tag>
+        <el-radio-group v-model="timeRange" size="small" @change="onRangeChange">
+          <el-radio-button label="5m">最近5分钟</el-radio-button>
+          <el-radio-button label="30m">最近30分钟</el-radio-button>
+          <el-radio-button label="1h">最近1小时</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
     <div class="charts-grid">
       <div ref="cpuChart" class="chart-box" />
@@ -20,8 +25,10 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
+import axios from 'axios'
 
 const timeRange = ref('5m')
+const dataSource = ref('mock') // 'sse' | 'polling' | 'mock'
 const cpuChart = ref(null)
 const memChart = ref(null)
 const diskChart = ref(null)
@@ -29,7 +36,7 @@ const netChart = ref(null)
 
 let charts = {}
 let sseSource = null
-let mockTimer = null
+let pollTimer = null
 
 const metrics = {
   times: [],
@@ -40,9 +47,16 @@ const metrics = {
   netOut: []
 }
 
-function pushPoint() {
-  const now = new Date().toLocaleTimeString()
-  if (metrics.times.length > 60) {
+// ===== 数据写入 =====
+
+function appendDataPoint(data) {
+  const now = data.timestamp
+    ? new Date(data.timestamp).toLocaleTimeString()
+    : new Date().toLocaleTimeString()
+
+  // 保持最多 60 个数据点
+  const maxLen = 60
+  if (metrics.times.length >= maxLen) {
     metrics.times.shift()
     metrics.cpu.shift()
     metrics.mem.shift()
@@ -50,13 +64,18 @@ function pushPoint() {
     metrics.netIn.shift()
     metrics.netOut.shift()
   }
+
   metrics.times.push(now)
-  metrics.cpu.push(+(Math.random() * 30 + 20).toFixed(1))
-  metrics.mem.push(+(Math.random() * 20 + 40).toFixed(1))
-  metrics.disk.push(+(Math.random() * 10 + 50).toFixed(1))
-  metrics.netIn.push(+(Math.random() * 500 + 100).toFixed(0))
-  metrics.netOut.push(+(Math.random() * 300 + 50).toFixed(0))
+  metrics.cpu.push(data.cpu_percent ?? 0)
+  metrics.mem.push(data.memory_percent ?? 0)
+  metrics.disk.push(data.disk_percent ?? 0)
+  metrics.netIn.push(data.net_in_kbps ?? 0)
+  metrics.netOut.push(data.net_out_kbps ?? 0)
+
+  refreshAll()
 }
+
+// ===== 图表 =====
 
 function baseOption(title, color) {
   return {
@@ -100,42 +119,124 @@ function initCharts() {
 
 function refreshAll() {
   const common = { xAxis: { data: metrics.times } }
-  charts.cpu.setOption({ ...common, series: [{ data: metrics.cpu }] })
-  charts.mem.setOption({ ...common, series: [{ data: metrics.mem }] })
-  charts.disk.setOption({ ...common, series: [{ data: metrics.disk }] })
-  charts.net.setOption({
+  charts.cpu && charts.cpu.setOption({ ...common, series: [{ data: metrics.cpu }] })
+  charts.mem && charts.mem.setOption({ ...common, series: [{ data: metrics.mem }] })
+  charts.disk && charts.disk.setOption({ ...common, series: [{ data: metrics.disk }] })
+  charts.net && charts.net.setOption({
     xAxis: { data: metrics.times },
     series: [{ data: metrics.netIn }, { data: metrics.netOut }]
   })
 }
 
-function addMockPoint() {
-  pushPoint()
-  refreshAll()
-}
+// ===== SSE 连接 =====
 
 function connectSse() {
-  // 阶段1先用 mock 数据，阶段3再接入真实 SSE
-  // sseSource = new EventSource('/api/monitor/stream')
-  addMockPoint()
-  mockTimer = setInterval(addMockPoint, 3000)
+  try {
+    sseSource = new EventSource('/api/monitor/stream')
+
+    sseSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.error) {
+          console.error('[SSE] 服务端错误:', data.error)
+          return
+        }
+        dataSource.value = 'sse'
+        appendDataPoint(data)
+      } catch (e) {
+        console.error('[SSE] 数据解析失败:', e)
+      }
+    }
+
+    sseSource.onerror = () => {
+      console.warn('[SSE] 连接断开，降级为轮询')
+      sseSource.close()
+      sseSource = null
+      startPolling()
+    }
+
+    sseSource.onopen = () => {
+      console.log('[SSE] 连接已建立')
+      dataSource.value = 'sse'
+      // SSE 建立后停止轮询（如果之前有）
+      stopPolling()
+    }
+  } catch (e) {
+    console.error('[SSE] 创建连接失败:', e)
+    // SSE 不可用时直接走轮询
+    startPolling()
+  }
 }
 
+// ===== 轮询降级 =====
+
+async function fetchMetrics() {
+  try {
+    const res = await axios.get('/api/monitor/metrics', { timeout: 5000 })
+    const data = res.data
+    if (data.cpu) {
+      // REST 快照格式（嵌套结构）
+      appendDataPoint({
+        cpu_percent: data.cpu.percent ?? 0,
+        memory_percent: data.memory?.percent ?? 0,
+        disk_percent: data.disk?.percent ?? 0,
+        net_in_kbps: data.network?.rx_kbps ?? 0,
+        net_out_kbps: data.network?.tx_kbps ?? 0,
+        timestamp: data.timestamp
+      })
+    }
+    dataSource.value = 'polling'
+  } catch (e) {
+    console.error('[Poll] 拉取监控指标失败:', e)
+  }
+}
+
+function startPolling() {
+  if (pollTimer) return
+  dataSource.value = 'polling'
+  fetchMetrics()
+  pollTimer = setInterval(fetchMetrics, 5000)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+// ===== 时间范围切换 =====
+
 function onRangeChange() {
-  // 时间范围切换，后续可过滤历史数据
   console.log('切换时间范围', timeRange.value)
 }
 
+// ===== 生命周期 =====
+
 onMounted(() => {
   initCharts()
+  // 注入初始 mock 数据点（后端就绪前）
+  appendDataPoint({
+    cpu_percent: +(Math.random() * 30 + 20).toFixed(1),
+    memory_percent: +(Math.random() * 20 + 40).toFixed(1),
+    disk_percent: +(Math.random() * 10 + 50).toFixed(1),
+    net_in_kbps: +(Math.random() * 500 + 100).toFixed(0),
+    net_out_kbps: +(Math.random() * 300 + 50).toFixed(0),
+    timestamp: new Date().toISOString()
+  })
+  // 优先尝试 SSE，不可用时自动降级
   connectSse()
-  window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()))
+
+  window.addEventListener('resize', () => Object.values(charts).forEach(c => c && c.resize()))
 })
 
 onUnmounted(() => {
-  if (mockTimer) clearInterval(mockTimer)
-  if (sseSource) sseSource.close()
-  Object.values(charts).forEach(c => c.dispose())
+  if (sseSource) {
+    sseSource.close()
+    sseSource = null
+  }
+  stopPolling()
+  Object.values(charts).forEach(c => c && c.dispose())
 })
 </script>
 
@@ -154,6 +255,11 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .title {
   font-size: 16px;

@@ -18,21 +18,20 @@
         </el-table>
       </el-tab-pane>
 
-      <el-tab-pane label="风险关键词" name="risk">
-        <el-form :model="riskForm" label-width="120px" size="small">
-          <el-form-item label="高危关键词">
-            <el-input v-model="riskForm.high" type="textarea" :rows="3" placeholder="逗号分隔" />
-          </el-form-item>
-          <el-form-item label="中危关键词">
-            <el-input v-model="riskForm.medium" type="textarea" :rows="3" placeholder="逗号分隔" />
-          </el-form-item>
-          <el-form-item label="低危关键词">
-            <el-input v-model="riskForm.low" type="textarea" :rows="3" placeholder="逗号分隔" />
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" @click="saveRiskConfig">保存</el-button>
-          </el-form-item>
-        </el-form>
+      <el-tab-pane label="风险拦截规则" name="risk">
+        <div class="toolbar">
+          <el-button type="primary" size="small" @click="showBlockedDialog = true">新增规则</el-button>
+          <el-button size="small" @click="fetchWhitelist">刷新</el-button>
+        </div>
+        <el-table :data="blockedPatterns" border style="width: 100%" size="small">
+          <el-table-column prop="pattern" label="拦截模式" min-width="300" />
+          <el-table-column label="操作" width="120">
+            <template #default="{ $index }">
+              <el-button link type="danger" size="small" @click="removeBlockedItem($index)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="blockedPatterns.length === 0" class="empty">暂无拦截规则</div>
       </el-tab-pane>
 
       <el-tab-pane label="权限配置" name="permission">
@@ -53,6 +52,7 @@
       </el-tab-pane>
     </el-tabs>
 
+    <!-- 新增白名单命令对话框 -->
     <el-dialog v-model="showAddDialog" title="新增白名单命令" width="400px">
       <el-form :model="newItem" label-width="100px" size="small">
         <el-form-item label="命令模板">
@@ -78,6 +78,19 @@
         <el-button type="primary" size="small" @click="addItem">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 新增拦截规则对话框 -->
+    <el-dialog v-model="showBlockedDialog" title="新增拦截规则" width="400px">
+      <el-form :model="newBlockedPattern" label-width="100px" size="small">
+        <el-form-item label="拦截模式">
+          <el-input v-model="newBlockedPattern.pattern" placeholder="如：rm -rf /" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="small" @click="showBlockedDialog = false">取消</el-button>
+        <el-button type="primary" size="small" @click="addBlockedItem">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -88,28 +101,39 @@ import axios from 'axios'
 
 const activeTab = ref('whitelist')
 const whitelist = ref([])
+const blockedPatterns = ref([])
 const showAddDialog = ref(false)
+const showBlockedDialog = ref(false)
 const newItem = ref({ pattern: '', role: 'agent-read', risk: 'low' })
+const newBlockedPattern = ref({ pattern: '' })
 
-const riskForm = ref({ high: '', medium: '', low: '' })
 const permForm = ref({ read: '', op: '', admin: '' })
 
 async function fetchWhitelist() {
   try {
     const res = await axios.get('/api/config/whitelist')
-    whitelist.value = res.data || []
+    whitelist.value = res.data.commands || []
+    blockedPatterns.value = (res.data.blocked_patterns || []).map(p => ({ pattern: p }))
   } catch (e) {
     console.error('拉取白名单失败', e)
     whitelist.value = [
       { pattern: 'df -h', role: 'agent-read', risk: 'low' },
       { pattern: 'systemctl status *', role: 'agent-op', risk: 'low' }
     ]
+    blockedPatterns.value = [
+      { pattern: 'rm -rf /' },
+      { pattern: '> /etc/passwd' },
+      { pattern: '| /bin/sh' }
+    ]
   }
 }
 
 async function saveWhitelist() {
   try {
-    await axios.put('/api/config/whitelist', whitelist.value)
+    await axios.put('/api/config/whitelist', {
+      commands: whitelist.value,
+      blocked_patterns: blockedPatterns.value.map(p => p.pattern)
+    })
     ElMessage.success('保存成功')
   } catch (e) {
     console.error('保存白名单失败', e)
@@ -130,8 +154,17 @@ function removeItem(index) {
   saveWhitelist()
 }
 
-function saveRiskConfig() {
-  ElMessage.success('风险关键词配置已保存（本地）')
+function addBlockedItem() {
+  if (!newBlockedPattern.value.pattern.trim()) return
+  blockedPatterns.value.push({ pattern: newBlockedPattern.value.pattern })
+  newBlockedPattern.value.pattern = ''
+  showBlockedDialog.value = false
+  saveWhitelist()
+}
+
+function removeBlockedItem(index) {
+  blockedPatterns.value.splice(index, 1)
+  saveWhitelist()
 }
 
 function savePermConfig() {
@@ -153,5 +186,10 @@ onMounted(fetchWhitelist)
   margin-bottom: 12px;
   display: flex;
   gap: 10px;
+}
+.empty {
+  text-align: center;
+  color: #9ca3af;
+  padding: 40px 0;
 }
 </style>

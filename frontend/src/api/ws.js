@@ -59,7 +59,7 @@ class WsClient {
 
   // 发送聊天消息
   sendChat(content) {
-    this.send({ type: 'chat', session_id: this.sessionId, content })
+    this.send({ type: 'chat', content })
   }
 
   // 发送中危确认
@@ -102,6 +102,14 @@ class WsClient {
     const chatStore = useChatStore()
 
     switch (data.type) {
+      case 'status':
+        chatStore.addMessage(this.sessionId, {
+          role: 'system',
+          type: 'status',
+          content: data.content || '处理中...'
+        })
+        this.emit('status', data)
+        break
       case 'chunk':
         chatStore.appendToLastAssistant(this.sessionId, data.content || '')
         this.emit('chunk', data)
