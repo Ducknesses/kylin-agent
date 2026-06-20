@@ -413,3 +413,30 @@ confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 dec
 - `blocked_patterns` 未传时默认为空列表。
 - 非法 role / risk / decision 会被 Pydantic ValidationError 拒绝。
 - `ChatMessage` 仍兼容 chat / confirm / ping 三种前端消息。
+
+---
+
+## Part：会话历史接口返回模型与注释清理
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`GET /api/sessions/{session_id}/messages` 已实现，但函数返回普通 `dict`，未使用已定义的 `SessionMessagesOut` 模型。同时 docstring 中「不能 404」的表述与实际逻辑不一致。
+
+### 产生原因
+
+初版会话历史接口优先补齐前端所需路径，消息持久化暂未实现，返回模型和注释未同步整理。
+
+### 本轮修复
+
+- `get_session_messages()` 返回类型从 `dict` 改为 `SessionMessagesOut`。
+- 返回改为 `SessionMessagesOut(session_id=session_id, messages=[])`。
+- 文档字符串修正为「已存在会话返回空列表；会话不存在时返回 404」。
+
+### 验收方式
+
+- 已存在会话返回 `{session_id, messages: []}`。
+- 不存在会话返回 404 + `{"detail": "会话不存在"}`。
+- 未引入消息持久化或额外数据库结构。
