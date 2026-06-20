@@ -326,3 +326,30 @@ confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 dec
 - GET `/api/config/whitelist` 返回的 commands 每项包含 `pattern/role/risk`。
 - role 字段为 `agent-read` / `agent-op` / `agent-admin` 之一。
 - 重启后端后 GET 仍返回 PUT 写入的内容，确认持久化生效。
+
+---
+
+## Part：监控 SSE 异常结构与网络速率非负保护
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`/api/monitor/stream` 在采集异常时只返回 `{"error": "采集失败"}`，导致前端图表组件缺少 `cpu_percent` / `memory_percent` / `disk_percent` 等核心字段。同时网络速率基于两次采样差值计算，在网卡计数器重置或运行环境变化时理论上可能出现负数。
+
+### 产生原因
+
+初版监控接口优先完成结构对齐，异常分支和边界采样场景处理较简单。
+
+### 本轮修复
+
+- SSE 异常分支改为返回与正常数据一致的核心字段，并额外携带 `error` 字段。
+- 网络速率计算增加 `max(0, delta)` 保护，避免出现负数。
+
+### 验收方式
+
+- `/api/monitor/metrics` 仍返回嵌套结构。
+- `/api/monitor/stream` 正常推送仍返回扁平结构。
+- SSE 异常 fallback 包含 `cpu_percent` / `load_avg` / `memory_percent` / `disk_percent` / `net_in_kbps` / `net_out_kbps` / `timestamp`。
+- `rx_kbps` / `tx_kbps` / `net_in_kbps` / `net_out_kbps` 不应为负数。
