@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class MCPClient:
     """MCP HTTP JSON-RPC 2.0 客户端"""
 
-    def __init__(self, base_url: str = None):
+    def __init__(self, base_url: str | None = None):
         self.base_url = base_url or settings.MCP_SERVER_URL
         self._request_id = 0
 
@@ -42,11 +42,17 @@ class MCPClient:
             "id": self._next_id(),
         }
 
+        headers = {"Content-Type": "application/json"}
+        # 执行器 C 通过 Bearer Token 校验后端身份，开发阶段可为空
+        if settings.MCP_AUTH_TOKEN:
+            headers["Authorization"] = f"Bearer {settings.MCP_AUTH_TOKEN}"
+
         try:
             timeout = httpx.Timeout(settings.COMMAND_TIMEOUT + 5.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/mcp/v1/tools/call",
+                    headers=headers,
                     json=payload,
                 )
                 resp.raise_for_status()
@@ -80,10 +86,15 @@ class MCPClient:
             "method": "tools/list",
             "id": self._next_id(),
         }
+        headers = {"Content-Type": "application/json"}
+        if settings.MCP_AUTH_TOKEN:
+            headers["Authorization"] = f"Bearer {settings.MCP_AUTH_TOKEN}"
+
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                 resp = await client.post(
                     f"{self.base_url}/mcp/v1/tools/list",
+                    headers=headers,
                     json=payload,
                 )
                 resp.raise_for_status()

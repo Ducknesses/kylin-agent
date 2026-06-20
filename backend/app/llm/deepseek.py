@@ -36,7 +36,7 @@ async def chat_with_llm(
     """
     if not settings.DEEPSEEK_API_KEY:
         logger.error("DeepSeek API Key 未配置")
-        yield "[错误] DeepSeek API Key 未配置，请在环境变量中设置 DEEPSEEK_API_KEY"
+        yield "[错误] 智能分析服务暂不可用，请检查后端环境配置"
         return
 
     headers = {

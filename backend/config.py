@@ -12,6 +12,8 @@ class Settings:
 
     # MCP Server（VirtualBox 麒麟 V11）
     MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://192.168.56.101:8001")
+    # 执行器 C 通过 Bearer Token 校验后端身份，生产环境必须配置
+    MCP_AUTH_TOKEN: str = os.getenv("MCP_AUTH_TOKEN", "")
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
