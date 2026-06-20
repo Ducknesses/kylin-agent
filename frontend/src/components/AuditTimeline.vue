@@ -56,13 +56,18 @@ const filteredList = computed(() => {
 async function fetchAudit() {
   try {
     const res = await axios.get('/api/audit?limit=50')
-    auditList.value = res.data || []
+    const body = res.data
+    // 兼容新旧格式：新格式 { records, total }，旧格式是数组
+    if (Array.isArray(body)) {
+      auditList.value = body
+    } else if (body && body.records) {
+      auditList.value = body.records
+    } else {
+      auditList.value = []
+    }
   } catch (e) {
     console.error('拉取审计日志失败', e)
-    // 阶段1 mock 数据
-    auditList.value = [
-      { trace_id: 'mock-1', timestamp: Date.now() - 60000, user_input: '查看CPU', intent: 'sys_info', risk_level: 'low', command: 'mpstat 1 1', final_response: 'cpu 15%' }
-    ]
+    auditList.value = []
   }
 }
 

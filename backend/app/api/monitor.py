@@ -18,14 +18,29 @@ async def _metrics_generator():
     client = MCPClient()
     while True:
         try:
-            # 阶段1：先用 mock 数据，阶段2接入真实 MCP
-            # result = await client.get_system_metrics()
-            # data = result.get("result", {})
+            try:
+                result = await client.get_system_metrics()
+                raw = result.get("result", {}) if result.get("success") else {}
+            except Exception:
+                raw = {}
+
+            # 从 MCP 返回的嵌套结构中提取扁平指标
+            cpu_data = raw.get("cpu", {})
+            mem_data = raw.get("memory", {})
+            disk_data = raw.get("disk", [{}])
+            load_data = raw.get("load", {})
+
+            disk_pct_str = (disk_data[0] if isinstance(disk_data, list) and disk_data else disk_data).get("percent", "0")
+            try:
+                disk_pct = float(str(disk_pct_str).replace("%", "").strip())
+            except (ValueError, TypeError):
+                disk_pct = 0.0
+
             data = {
-                "cpu_percent": 12.5,
-                "load_avg": [0.3, 0.2, 0.1],
-                "memory_percent": 45.0,
-                "disk_percent": 62.0,
+                "cpu_percent": cpu_data.get("cpu_percent_snapshot", 0.0),
+                "load_avg": load_data.get("load_avg", [0.0, 0.0, 0.0]),
+                "memory_percent": mem_data.get("percent", 0.0),
+                "disk_percent": disk_pct,
                 "timestamp": datetime.now().isoformat(),
             }
             yield f"data: {json.dumps(data)}\n\n"

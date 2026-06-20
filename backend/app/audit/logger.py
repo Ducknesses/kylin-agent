@@ -85,6 +85,18 @@ async def log_chain(
         logger.error(f"[Audit] 审计日志写入失败: {e}")
 
 
+async def count_audit() -> int:
+    """返回审计日志总条数"""
+    try:
+        async with aiosqlite.connect(settings.SQLITE_DB) as db:
+            async with db.execute("SELECT COUNT(*) FROM audit_chain") as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+    except Exception as e:
+        logger.error(f"[Audit] 查询总数失败: {e}")
+        return 0
+
+
 async def query_audit(limit: int = 50, offset: int = 0):
     """
     查询审计日志

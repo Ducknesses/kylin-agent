@@ -22,6 +22,10 @@
             <el-icon><Timer /></el-icon>
             <span>审计日志</span>
           </el-menu-item>
+          <el-menu-item index="/config">
+            <el-icon><Lock /></el-icon>
+            <span>权限配置</span>
+          </el-menu-item>
           <el-menu-item index="#" @click="settingsVisible = true">
             <el-icon><Setting /></el-icon>
             <span>连接设置</span>
@@ -39,7 +43,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { Setting } from '@element-plus/icons-vue'
+import { Setting, Lock } from '@element-plus/icons-vue'
 import ConnectionSettings from '@/components/ConnectionSettings.vue'
 
 const route = useRoute()
