@@ -295,3 +295,34 @@ confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 dec
 - confirm_id 不匹配不会清空 pending。
 - reject 会清空 pending 并返回 status：操作已取消。
 - approve 会清空 pending 并继续调用现有 `_process_low_risk`。
+
+---
+
+## Part：白名单配置持久化失败处理修复
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`save_config()` 在 SQLite 写入失败时只记录日志，不向调用方抛出异常。`update_whitelist()` 在持久化失败后仍然更新内存缓存并返回「白名单已更新」，导致前端误认为保存成功但数据库实际未写入。
+
+### 产生原因
+
+配置持久化 helper 为了容错吞掉了异常，但 PUT 接口属于用户显式保存操作，失败时应明确返回错误。
+
+### 本轮修复
+
+- `save_config()`：记录日志后重新抛出异常。
+- `update_whitelist()`：捕获异常并返回 HTTP 500（`detail="白名单配置持久化失败"`）。
+- 仅在所有 `save_config()` 成功后更新运行时缓存 `_runtime_commands` / `_runtime_blocked`。
+- `get_whitelist()`：同时检查 `_runtime_commands` 和 `_runtime_blocked` 缓存状态。
+- role 字段确认输出为 `agent-read` / `agent-op` / `agent-admin` 字符串（Permission 类成员本身就是规范字符串）。
+
+### 验收方式
+
+- PUT 成功时返回 `message/saved_commands/saved_blocked_patterns`。
+- SQLite 写入失败时不会返回「白名单已更新」。
+- GET `/api/config/whitelist` 返回的 commands 每项包含 `pattern/role/risk`。
+- role 字段为 `agent-read` / `agent-op` / `agent-admin` 之一。
+- 重启后端后 GET 仍返回 PUT 写入的内容，确认持久化生效。
