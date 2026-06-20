@@ -22,21 +22,29 @@
             <el-icon><Timer /></el-icon>
             <span>审计日志</span>
           </el-menu-item>
+          <el-menu-item index="#" @click="settingsVisible = true">
+            <el-icon><Setting /></el-icon>
+            <span>连接设置</span>
+          </el-menu-item>
         </el-menu>
       </el-aside>
       <el-main class="main-content">
         <router-view />
       </el-main>
     </el-container>
+    <ConnectionSettings v-model="settingsVisible" />
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { Setting } from '@element-plus/icons-vue'
+import ConnectionSettings from '@/components/ConnectionSettings.vue'
 
 const route = useRoute()
 const activeMenu = computed(() => route.path)
+const settingsVisible = ref(false)
 </script>
 
 <style scoped>

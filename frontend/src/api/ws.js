@@ -1,7 +1,6 @@
 import { useChatStore } from '@/stores/chatStore'
 import { useWsStore } from '@/stores/wsStore'
 
-const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8000'
 const MAX_RECONNECT = 5
 const HEARTBEAT_INTERVAL = 30000
 const RECONNECT_DELAY = 3000
@@ -15,6 +14,19 @@ class WsClient {
     this.handlers = new Map()
     this.pendingConfirms = new Map()
     this.skipReconnect = false
+    this._closeCode = null
+    this._closeReason = ''
+  }
+
+  // 获取带 token 的 WebSocket URL
+  _buildUrl(sessionId) {
+    const wsStore = useWsStore()
+    const base = wsStore.wsBaseUrl
+    let url = `${base}/ws/chat/${sessionId}`
+    if (wsStore.token) {
+      url += `?token=${encodeURIComponent(wsStore.token)}`
+    }
+    return url
   }
 
   // 建立连接
@@ -24,7 +36,10 @@ class WsClient {
     }
     this.close(false)
     this.sessionId = sessionId
-    const url = `${WS_BASE_URL}/ws/chat/${sessionId}`
+    this._closeCode = null
+    this._closeReason = ''
+    const url = this._buildUrl(sessionId)
+    console.log('WebSocket 连接:', url.replace(/token=[^&]*/, 'token=***'))
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
@@ -40,11 +55,22 @@ class WsClient {
       this.handleMessage(event.data)
     }
 
-    this.ws.onclose = () => {
-      console.log('WebSocket 已断开')
+    this.ws.onclose = (event) => {
+      console.log('WebSocket 已断开', event.code, event.reason)
+      this._closeCode = event.code
+      this._closeReason = event.reason
       const wsStore = useWsStore()
       wsStore.setConnected(false)
       this.stopHeartbeat()
+
+      // 认证失败（4001）不重连，直接标记并通知用户配置 Token
+      if (event.code === 4001 || event.reason === 'auth_failed') {
+        wsStore.setAuthError(true)
+        this.skipReconnect = true
+        console.warn('Token 认证失败，请检查 API Token 配置')
+        return
+      }
+
       if (this.skipReconnect) {
         this.skipReconnect = false
         return
@@ -54,6 +80,7 @@ class WsClient {
 
     this.ws.onerror = (err) => {
       console.error('WebSocket 错误', err)
+      // onerror 后通常 onclose 也会触发，这里仅做标记
     }
   }
 
@@ -164,6 +191,7 @@ class WsClient {
     const wsStore = useWsStore()
     if (wsStore.reconnectCount >= MAX_RECONNECT) {
       console.warn('重连次数已达上限')
+      wsStore.setConnectionRefused(true)
       return
     }
     wsStore.setReconnectCount(wsStore.reconnectCount + 1)

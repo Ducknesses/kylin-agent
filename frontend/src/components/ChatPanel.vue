@@ -2,18 +2,43 @@
   <div class="chat-panel">
     <div class="chat-header">
       <span class="title">智能运维助手</span>
-      <el-tag :type="wsStore.isConnected ? 'success' : 'danger'" size="small">
-        {{ wsStore.isConnected ? '已连接' : '未连接' }}
-      </el-tag>
-      <el-button link type="primary" size="small" @click="injectMockData">
-        注入测试数据
-      </el-button>
+      <div class="header-actions">
+        <el-tag :type="connectionTagType" size="small">
+          {{ connectionTagText }}
+        </el-tag>
+        <el-button link type="primary" size="small" @click="openSettings">
+          <el-icon><Setting /></el-icon>
+        </el-button>
+        <el-button link type="primary" size="small" @click="injectMockData">
+          注入测试数据
+        </el-button>
+      </div>
+    </div>
+
+    <!-- 连接失败提示 -->
+    <div v-if="showConnectionBanner" class="connection-banner">
+      <el-alert
+        :title="connectionBannerTitle"
+        :description="connectionBannerDesc"
+        type="warning"
+        show-icon
+        :closable="false"
+      >
+        <template #default>
+          <el-button size="small" type="primary" @click="openSettings">打开连接设置</el-button>
+        </template>
+      </el-alert>
     </div>
 
     <div ref="msgListRef" class="message-list">
-      <div v-if="chatStore.currentMessages.length === 0" class="empty-tip">
+      <div v-if="chatStore.currentMessages.length === 0 && !showConnectionBanner" class="empty-tip">
         <el-icon :size="40" color="#9ca3af"><ChatLineRound /></el-icon>
         <p>请输入运维问题，例如：查看CPU使用率</p>
+      </div>
+      <div v-else-if="chatStore.currentMessages.length === 0 && showConnectionBanner" class="empty-tip">
+        <el-icon :size="40" color="#f59e0b"><WarningFilled /></el-icon>
+        <p class="tip-warning">无法连接到后端服务器</p>
+        <p class="tip-sub">请检查连接地址和 Token 配置</p>
       </div>
       <MsgBubble
         v-for="(msg, index) in chatStore.currentMessages"
@@ -50,16 +75,20 @@
       @confirm="handleRiskConfirm"
       @cancel="handleRiskCancel"
     />
+
+    <ConnectionSettings v-model="settingsVisible" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { Setting, WarningFilled } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chatStore'
 import { useWsStore } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
 import MsgBubble from './MsgBubble.vue'
 import RiskAlert from './RiskAlert.vue'
+import ConnectionSettings from './ConnectionSettings.vue'
 
 const chatStore = useChatStore()
 const wsStore = useWsStore()
@@ -68,11 +97,46 @@ const inputText = ref('')
 const isStreaming = ref(false)
 const msgListRef = ref(null)
 const riskDialogVisible = ref(false)
+const settingsVisible = ref(false)
 const currentRisk = ref({ level: 'high', reason: '', originalInput: '', confirmId: '' })
 
 const canSend = computed(() => {
   return inputText.value.trim().length > 0 && wsStore.isConnected && !isStreaming.value
 })
+
+// 连接标签
+const connectionTagType = computed(() => {
+  if (wsStore.isConnected) return 'success'
+  if (wsStore.authError || wsStore.connectionRefused) return 'danger'
+  return 'warning'
+})
+
+const connectionTagText = computed(() => {
+  if (wsStore.isConnected) return '已连接'
+  if (wsStore.authError) return '认证失败'
+  if (wsStore.connectionRefused) return '连接失败'
+  return '未连接'
+})
+
+// 连接失败横幅
+const showConnectionBanner = computed(() => {
+  return !wsStore.isConnected && (wsStore.authError || wsStore.connectionRefused ||
+    (!wsStore.isConnected && wsStore.reconnectCount >= 5))
+})
+
+const connectionBannerTitle = computed(() => {
+  if (wsStore.authError) return 'Token 认证失败'
+  return '无法连接到后端服务器'
+})
+
+const connectionBannerDesc = computed(() => {
+  if (wsStore.authError) return 'API Token 不正确或未配置，请联系管理员获取正确的 Token。'
+  return '请检查后端服务是否已启动，以及连接地址是否正确。当前地址: ' + wsStore.wsBaseUrl
+})
+
+function openSettings() {
+  settingsVisible.value = true
+}
 
 // 初始化会话与连接
 onMounted(() => {
@@ -250,5 +314,24 @@ function scrollToBottom() {
 }
 .input-area :deep(.el-textarea__inner) {
   resize: none;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.connection-banner {
+  padding: 8px 16px;
+  background-color: #fffbeb;
+  border-bottom: 1px solid #fde68a;
+}
+.tip-warning {
+  color: #f59e0b;
+  font-weight: 500;
+}
+.tip-sub {
+  color: #9ca3af;
+  font-size: 13px;
+  margin-top: 4px;
 }
 </style>
