@@ -42,13 +42,15 @@ async def parse_intent(user_input: str) -> Dict:
         return {"intent": "query", "tool": "cmd_exec", "args": {"command": user_input}}
 
 
-async def route_request(user_input: str, context: List[Dict] = None) -> Dict:
+async def route_request(user_input: str, context: List[Dict] |None = None) -> Dict:
     """
     总路由：根据输入决定走查询/操作/分析流程
 
     返回:
         {"action": "tool_call|direct_reply|root_cause", "data": {...}}
     """
+    if context is None:
+        context=[]
     # 简单启发式：如果输入包含"分析"、"根因"、"为什么"等，走根因分析
     lower = user_input.lower()
     if any(k in lower for k in ["根因", "分析", "为什么", "怎么回事", "crash", "宕机"]):
