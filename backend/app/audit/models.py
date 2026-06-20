@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS audit_chain (
     record_hash TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_trace_id ON audit_chain(trace_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_chain(timestamp);
 """
@@ -75,3 +81,35 @@ async def get_last_hash(db: aiosqlite.Connection) -> str:
     ) as cursor:
         row = await cursor.fetchone()
         return row[0] if row else "0"
+
+
+# ── 配置持久化 ────────────────────────────────────────────────────
+
+
+async def save_config(key: str, value: str) -> None:
+    """将配置键值存入 app_config 表"""
+    from datetime import datetime as dt
+    try:
+        async with aiosqlite.connect(settings.SQLITE_DB) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO app_config (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, value, dt.now().isoformat()),
+            )
+            await db.commit()
+        logger.info(f"[Config] 配置已持久化: {key}")
+    except Exception as e:
+        logger.error(f"[Config] 配置持久化失败: {e}")
+
+
+async def load_config(key: str) -> str | None:
+    """从 app_config 表读取配置值"""
+    try:
+        async with aiosqlite.connect(settings.SQLITE_DB) as db:
+            async with db.execute(
+                "SELECT value FROM app_config WHERE key = ?", (key,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+    except Exception as e:
+        logger.error(f"[Config] 读取配置失败: {e}")
+        return None

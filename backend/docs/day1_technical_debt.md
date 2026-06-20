@@ -210,3 +210,88 @@ LLM 配置错误信息脱敏修复后，新审计记录已不再暴露 `DEEPSEEK
 - `/health` 正常返回。
 - 新的 `/api/audit/logs` 结果不再包含 `DEEPSEEK_API_KEY`。
 - `audit.db` 和备份数据库未被加入 Git（备份目录已被 `.gitignore` 排除，但 `audit.db` 本身已被 Git 跟踪，需手动 `git rm --cached`）。
+
+---
+
+## Part：PR1 前后端 API 统一规范修复
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 背景
+
+PR review 后确认，旧 Day 1 后端接口与前端实际调用存在多处不一致。最新 `api_specification_1.pdf` 已作为新的统一接口规范。
+
+### 本轮修复
+
+| 接口 | 旧形态 | 新形态 |
+| --- | --- | --- |
+| WebSocket | `/ws/chat` 正式，/chat/{session_id} deprecated | `/ws/chat/{session_id}` 正式，/chat legacy |
+| WS 前端消息 | 仅 chat | chat / confirm / ping |
+| WS 后端消息 | chunk / done / reject / error | status / risk_alert / chunk / tool_call / done / error / pong |
+| WS 高危响应 | `{"type":"reject"}` | `{"type":"risk_alert","level":"high",...}` |
+| WS 中危响应 | 无 confirm 流程 | risk_alert + confirm_id + pending_confirm + approve/reject |
+| 审计 | `GET /api/audit/logs` 返回 code/data | `GET /api/audit` 返回 {total, items} |
+| 审计字段 | 缺 raw_output/llm_reasoning | 包含全部 10 个字段 |
+| 监控 REST | `GET /api/monitor/metrics` 返回 code/data + mock | 嵌套结构，真实 psutil 数据，无 code/data |
+| 监控 SSE | `GET /api/monitor/stream` 嵌套 SSE | 扁平结构 SSE，无 code/data |
+| 白名单 GET | `{code, data: {commands:[{pattern,risk}]}}` | `{commands:[{pattern,role,risk}], blocked_patterns}` |
+| 白名单 PUT | WhitelistUpdate.commands 为 list[str] | WhitelistUpdate.commands 为 list[WhitelistCommandEntry] |
+| 白名单持久化 | 无 | SQLite app_config 表 |
+| 会话历史 | 无 | `GET /api/sessions/{session_id}/messages` |
+| Schema 模型 | 旧注释、扁平 SystemMetrics | ChatMessage 按方向分述、嵌套指标模型、SSEMetrics |
+
+### 本轮不处理
+
+- 后端-MCP `/mcp/v1/tools/call` 对齐（下一轮）
+- `params.args` 改 `params.arguments`（下一轮）
+- 完整 AgentHarness / Orchestrator
+- 真实 MCP tool_call 执行链路（当前仅占位消息类型）
+- 消息历史持久化（当前返回空列表）
+
+### 风险说明
+
+部分接口契约相较 Day 1 旧文档发生变化。后续统一以最新 PDF 为准。
+旧接口如保留，仅作为 legacy 兼容入口，不再作为正式契约。
+`tool_call` 消息类型已支持，但真实 MCP 调用链路下一轮处理。
+
+### 验收方式
+
+- WebSocket `/ws/chat/{session_id}` 可连接
+- ping 返回 pong
+- 高危输入返回 risk_alert
+- `/api/audit?limit=20&offset=0` 返回 total/items
+- `/api/monitor/stream` 返回扁平 SSE
+- `/api/monitor/metrics` 返回嵌套指标
+- `/api/config/whitelist` GET/PUT 不再 422
+- `/api/sessions/{session_id}/messages` 可访问
+- 后端启动无 Traceback
+
+---
+
+## Part：WebSocket confirm_id 校验与 pending 状态修复
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 decision 和 confirm_id 之前就删除挂起操作。错误 confirm 消息（非法 decision、缺少 confirm_id、confirm_id 不匹配）也会清空待确认操作，导致用户无法重试。
+
+### 产生原因
+
+初版 confirm 流程只按 session_id 查找挂起操作，未完整实现最新前后端 API v1.0 中 confirm_id 的确认语义。
+
+### 本轮修复
+
+- 改为先 `pending_confirm.get(session_id)` 读取挂起操作而不删除。
+- 仅当 `decision == "approve"` 或 `decision == "reject"` 且 `confirm_id` 匹配时才执行 `pop`。
+- 缺少 confirm_id、confirm_id 不匹配、decision 非法时均返回 error 并保留 pending。
+
+### 验收方式
+
+- 错误 decision 不会清空 pending。
+- 缺少 confirm_id 不会清空 pending。
+- confirm_id 不匹配不会清空 pending。
+- reject 会清空 pending 并返回 status：操作已取消。
+- approve 会清空 pending 并继续调用现有 `_process_low_risk`。

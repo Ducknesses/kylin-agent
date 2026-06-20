@@ -12,6 +12,5 @@ backend/data/backup/
 venv/
 env/
 
-backend/requirements.txt
 ws_test.py
 tmp/
