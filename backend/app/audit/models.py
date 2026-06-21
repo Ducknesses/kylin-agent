@@ -87,7 +87,7 @@ async def get_last_hash(db: aiosqlite.Connection) -> str:
 
 
 async def save_config(key: str, value: str) -> None:
-    """将配置键值存入 app_config 表"""
+    """将配置键值存入 app_config 表，失败时抛出异常供调用方处理"""
     from datetime import datetime as dt
     try:
         async with aiosqlite.connect(settings.SQLITE_DB) as db:
@@ -99,6 +99,7 @@ async def save_config(key: str, value: str) -> None:
         logger.info(f"[Config] 配置已持久化: {key}")
     except Exception as e:
         logger.error(f"[Config] 配置持久化失败: {e}")
+        raise
 
 
 async def load_config(key: str) -> str | None:

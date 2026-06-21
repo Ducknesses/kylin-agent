@@ -440,3 +440,40 @@ confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 dec
 - 已存在会话返回 `{session_id, messages: []}`。
 - 不存在会话返回 404 + `{"detail": "会话不存在"}`。
 - 未引入消息持久化或额外数据库结构。
+
+---
+
+## Part：PR Review 阻塞问题修复
+
+> 日期：2026-06-20
+> 关联分支：fix/api-alignment-FrontAndBack
+
+### 问题描述
+
+PR Review 指出白名单持久化失败处理、会话历史响应模型、监控 SSE 异常 fallback 三处问题仍未在当前 PR 分支真实代码中生效，同时存在 `router.py` 类型标注混用、`.gitignore` 文件末尾缺换行符、`audit.db` 被 Git 跟踪等工程问题。
+
+### 产生原因
+
+部分修复内容已在前期讨论和文档中记录，但当前 PR 分支源码未完整包含对应实现，导致 PR 描述与实际代码不一致。
+
+### 本轮修复
+
+- `save_config()` 改为失败时抛出异常（`except` 块末尾加 `raise`）。
+- `update_whitelist()` 捕获持久化异常并返回 HTTP 500，且仅在 DB 保存成功后更新运行时缓存。
+- `get_whitelist()` 同时检查 `_runtime_commands` 和 `_runtime_blocked` 缓存状态。
+- `get_session_messages()` 返回类型改为 `SessionMessagesOut`，返回 Pydantic 模型实例。
+- SSE 异常 fallback 改为返回完整核心字段（`cpu_percent` / `load_avg` / `memory_percent` / `disk_percent` / `net_in_kbps` / `net_out_kbps` / `timestamp`）。
+- 网络速率计算增加 `max(0, delta)` 非负保护。
+- `route_request()` 类型标注统一为 Python 3.10+ `list[dict] | None` 风格，移除未使用的 `typing.Dict` / `typing.List` 导入。
+- `.gitignore` 补充文件末尾换行。
+- `backend/data/audit.db` 已不在 Git 跟踪中。
+
+### 验收方式
+
+- `python -m py_compile` 全部通过。
+- SQLite 写入失败时不会返回「白名单已更新」。
+- `GET /api/sessions/{session_id}/messages` 返回 `SessionMessagesOut` 对应结构。
+- SSE 异常 fallback 包含完整核心字段。
+- `route_request()` 不再出现 `List[Dict] | None` 混用。
+- `.gitignore` 末尾字节为 `0a`。
+- `git ls-files backend/data/audit.db` 无输出。

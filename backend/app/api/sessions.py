@@ -48,17 +48,14 @@ async def create_session(body: SessionCreate) -> SessionOut:
 
 
 @router.get("/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str) -> dict:
+async def get_session_messages(session_id: str) -> SessionMessagesOut:
     """
-    获取会话历史消息
+    获取会话历史消息。
 
-    当前阶段消息持久化尚未实现，返回空列表。
-    但接口必须存在，不能 404。
+    当前阶段消息持久化尚未实现。
+    已存在会话返回空列表；会话不存在时返回 404。
     """
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return {
-        "session_id": session_id,
-        "messages": [],
-    }
+    return SessionMessagesOut(session_id=session_id, messages=[])

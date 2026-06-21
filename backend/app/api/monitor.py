@@ -33,15 +33,17 @@ def _collect_nested_metrics() -> dict:
     disk_total_gb = round(disk.total / (1024**3), 1)
     disk_used_gb = round(disk.used / (1024**3), 1)
 
-    # 计算网络速率（两次采样差值）
+    # 计算网络速率（两次采样差值，非负保护避免计数器重置导致负数）
     global _prev_net
     now_ts = datetime.now().timestamp()
     rx_kbps, tx_kbps = 0.0, 0.0
     if _prev_net["ts"] > 0:
         elapsed = now_ts - _prev_net["ts"]
         if elapsed > 0:
-            rx_kbps = round((net.bytes_recv - _prev_net["bytes_recv"]) / elapsed / 1024, 1)
-            tx_kbps = round((net.bytes_sent - _prev_net["bytes_sent"]) / elapsed / 1024, 1)
+            rx_delta = max(0, net.bytes_recv - _prev_net["bytes_recv"])
+            tx_delta = max(0, net.bytes_sent - _prev_net["bytes_sent"])
+            rx_kbps = round(rx_delta / elapsed / 1024, 1)
+            tx_kbps = round(tx_delta / elapsed / 1024, 1)
     _prev_net = {"bytes_sent": net.bytes_sent, "bytes_recv": net.bytes_recv, "ts": now_ts}
 
     return {
@@ -107,7 +109,18 @@ async def monitor_stream():
                 yield f"data: {json.dumps(data)}\n\n"
             except Exception as e:
                 logger.error(f"[Monitor] SSE 采集失败: {e}")
-                yield f"data: {json.dumps({'error': '采集失败'})}\n\n"
+                # fallback 保持与正常数据相同的字段结构，避免前端图表组件缺字段
+                fallback = {
+                    "cpu_percent": 0.0,
+                    "load_avg": [0.0, 0.0, 0.0],
+                    "memory_percent": 0.0,
+                    "disk_percent": 0.0,
+                    "net_in_kbps": 0.0,
+                    "net_out_kbps": 0.0,
+                    "timestamp": datetime.now().isoformat(),
+                    "error": "采集失败",
+                }
+                yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
             await asyncio.sleep(3)
 
     return StreamingResponse(

@@ -7,7 +7,7 @@
 import json
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.audit.models import load_config, save_config
 from app.core.rbac import COMMAND_WHITELIST, DANGEROUS_PATTERNS, Permission
@@ -68,7 +68,7 @@ async def _load_runtime_config() -> None:
 @router.get("/config/whitelist")
 async def get_whitelist() -> dict:
     """获取当前命令白名单 —— 直接返回 commands 和 blocked_patterns"""
-    if _runtime_commands is None:
+    if _runtime_commands is None or _runtime_blocked is None:
         await _load_runtime_config()
 
     return {
@@ -86,11 +86,15 @@ async def update_whitelist(body: WhitelistUpdate) -> dict:
     new_commands = [cmd.model_dump() for cmd in body.commands]
     new_blocked = body.blocked_patterns or []
 
-    # 持久化到 DB
-    await save_config("whitelist_commands", json.dumps(new_commands, ensure_ascii=False))
-    await save_config("whitelist_blocked", json.dumps(new_blocked, ensure_ascii=False))
+    # 持久化到 DB（失败时返回 500，不更新内存缓存）
+    try:
+        await save_config("whitelist_commands", json.dumps(new_commands, ensure_ascii=False))
+        await save_config("whitelist_blocked", json.dumps(new_blocked, ensure_ascii=False))
+    except Exception:
+        logger.exception("[Config] 白名单配置持久化失败")
+        raise HTTPException(status_code=500, detail="白名单配置持久化失败")
 
-    # 更新内存缓存
+    # DB 保存成功后才更新内存缓存
     _runtime_commands = new_commands
     _runtime_blocked = new_blocked
 
