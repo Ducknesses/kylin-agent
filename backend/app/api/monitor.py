@@ -105,10 +105,18 @@ async def _mcp_metrics_generator():
             # 从 MCP 返回的嵌套结构中提取扁平指标
             cpu_data = raw.get("cpu", {})
             mem_data = raw.get("memory", {})
-            disk_data = raw.get("disk", [{}])
             load_data = raw.get("load", {})
 
-            disk_pct_str = (disk_data[0] if isinstance(disk_data, list) and disk_data else disk_data).get("percent", "0")
+            # 类型收窄：disk 可能为 list 或 dict，统一转为 dict 后取 percent
+            disk_raw = raw.get("disk", {})
+            if isinstance(disk_raw, list):
+                disk_data = disk_raw[0] if disk_raw and isinstance(disk_raw[0], dict) else {}
+            elif isinstance(disk_raw, dict):
+                disk_data = disk_raw
+            else:
+                disk_data = {}
+
+            disk_pct_str = disk_data.get("percent", "0")
             try:
                 disk_pct = float(str(disk_pct_str).replace("%", "").strip())
             except (ValueError, TypeError):
@@ -124,7 +132,8 @@ async def _mcp_metrics_generator():
             yield f"data: {json.dumps(data)}\n\n"
         except Exception as e:
             logger.error(f"[Monitor] MCP 获取指标失败: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            # 不把内部异常详情返回给前端
+            yield f"data: {json.dumps({'error': '监控数据采集失败'})}\n\n"
         await asyncio.sleep(3)
 
 

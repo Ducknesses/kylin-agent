@@ -2,57 +2,42 @@
 
 正式接口：WS /ws/chat/{session_id}（最新前后端 API 统一规范 v1.0）
 前端消息类型：chat / confirm / ping
-后端消息类型：status / risk_alert / chunk / tool_call / done / error / pong
+后端消息类型：status / chat / risk_alert / tool_call / error / done / pong
+
+当前为 Day2 Mock 流程，不接真实 LLM 和 MCP Server。
 """
 import json
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
 from app.core.security import risk_classify
-from app.llm.deepseek import chat_with_llm
-from app.mcp.executor import Executor
-from config import settings
+from app.services.connection_manager import ConnectionManager
+from app.services.orchestrator import is_medium_risk_command, mock_orchestrate
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 简单内存连接管理（阶段1），后续可接入 Redis Pub/Sub
-active_connections: Dict[str, WebSocket] = {}
-
-# 待确认的中危操作（session_id → pending_request），内存存储
-pending_confirm: Dict[str, dict] = {}
+# 连接管理器和挂起操作（单例，模块级共享）
+manager = ConnectionManager()
 
 # ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────
 
 
 @router.websocket("/chat/{session_id}")
-async def chat_ws(websocket: WebSocket, session_id: str, token: str = None):
+async def chat_ws(websocket: WebSocket, session_id: str):
     """
-    WebSocket 聊天核心流程：
-    0. Token 认证（若配置了 API_TOKEN）
+    WebSocket 聊天核心流程（Day2 Mock）：
     1. 接收前端消息（type: chat / confirm / ping）
-    2. ping → 立即 pong，不写审计不调 LLM
-    3. 安全检测
-    4. 高危 -> 返回风险告警
-    5. 中危 -> 返回需确认
-    6. confirm → 处理中危操作确认
-    7. chat → 低危/已确认 → LLM 解析 → MCP 执行 → 流式返回
-    8. 全程记录审计日志
+    2. ping → 立即 pong
+    3. chat → 安全检测 → risk_alert / Mock 编排
+    4. confirm → 处理中危确认
+    5. 全程记录审计日志
     """
-    # 0. Token 认证
-    if settings.API_TOKEN:
-        if not token or token != settings.API_TOKEN:
-            logger.warning(f"[WebSocket] Token 认证失败: session={session_id}, token={'present' if token else 'missing'}")
-            await websocket.close(code=4001, reason="auth_failed")
-            return
-
-    await websocket.accept()
-    active_connections[session_id] = websocket
-    logger.info(f"[WebSocket] 正式会话建立: {session_id}")
+    await manager.connect(websocket, session_id)
 
     try:
         while True:
@@ -60,48 +45,24 @@ async def chat_ws(websocket: WebSocket, session_id: str, token: str = None):
             await _handle_message(websocket, session_id, raw)
     except WebSocketDisconnect:
         logger.info(f"[WebSocket] 会话断开: {session_id}")
-        active_connections.pop(session_id, None)
-        pending_confirm.pop(session_id, None)
     except Exception as e:
         logger.exception(f"[WebSocket] 会话异常: {e}")
         try:
-            await _send(websocket, "error", message=f"服务端异常: {str(e)}")
+            await _send(websocket, "error", message="服务端处理异常，请稍后重试")
         except Exception:
             pass
-
-
-# ── Legacy 接口：兼容旧版 /ws/chat，后续删除 ──────────────────────
-# 内部复用同一 _handle_message，不维护独立业务逻辑
-
-
-@router.websocket("/chat")
-async def chat_ws_legacy(websocket: WebSocket):
-    """[legacy] 旧版 WebSocket 入口，内部复用正式处理函数"""
-    await websocket.accept()
-    session_id = f"legacy-{str(uuid.uuid4())[:8]}"
-    active_connections[session_id] = websocket
-    logger.info(f"[WebSocket:LEGACY] 旧路径连接 session={session_id}")
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            await _handle_message(websocket, session_id, raw)
-    except WebSocketDisconnect:
-        logger.info(f"[WebSocket:LEGACY] 会话断开: {session_id}")
-        active_connections.pop(session_id, None)
-    except Exception as e:
-        logger.exception(f"[WebSocket:LEGACY] 会话异常: {e}")
-        try:
-            await _send(websocket, "error", message=f"服务端异常: {str(e)}")
-        except Exception:
-            pass
+    finally:
+        manager.disconnect(session_id)
 
 
 # ── 内部处理函数 ─────────────────────────────────────────────────
 
 
 async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> None:
-    """按最新规范 v1.0 分发处理 WebSocket 消息"""
+    """按最新规范 v1.0 分发处理 WebSocket 消息
+
+    协议层校验完成后，业务逻辑委托给 mock_orchestrate。
+    """
     # 1. 解析 JSON
     try:
         msg = json.loads(raw)
@@ -111,19 +72,18 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
 
     msg_type = msg.get("type", "")
 
-    # ── ping：立即 pong，不进入任何业务逻辑 ──
+    # ── ping：立即 pong ──
     if msg_type == "ping":
         await _send(websocket, "pong")
         return
 
-    # ── confirm：处理中危确认，校验 confirm_id 后才 pop ──
+    # ── confirm：校验 confirm_id 后才 pop ──
     if msg_type == "confirm":
         confirm_id = msg.get("confirm_id", "")
         decision = msg.get("decision", "")
 
-        # 先 get 不 pop，校验失败时保留 pending
-        pending = pending_confirm.get(session_id)
-        if not pending:
+        pending = manager.get_pending(session_id)
+        if pending is None:
             await _send(websocket, "error", message="没有待确认的操作")
             return
 
@@ -135,21 +95,23 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
             await _send(websocket, "error", message="confirm_id 不匹配")
             return
 
+        # confirm 协议中 decision=reject 表示用户取消中危操作；
+        # 后端不发送旧版 type=reject，只返回 status + done
         if decision == "reject":
-            pending_confirm.pop(session_id, None)
-            await _send(websocket, "status", content="操作已取消")
+            manager.pop_pending(session_id)
+            await _send(websocket, "status", content="已取消该风险操作。", trace_id=pending["trace_id"])
+            await _send(websocket, "done", trace_id=pending["trace_id"])
             return
 
         if decision == "approve":
-            pending_confirm.pop(session_id, None)
-            user_input = pending.get("user_input", "")
-            trace_id = pending.get("trace_id", str(uuid.uuid4())[:16])
-            risk_level = pending.get("risk_level", "medium")
-            await _send(websocket, "status", content="正在分析意图...", trace_id=trace_id)
-            await _process_low_risk(websocket, session_id, user_input, trace_id, risk_level)
+            popped = manager.pop_pending(session_id)
+            assert popped is not None  # 前面已经校验 pending is not None
+            user_input = popped.get("user_input", "")
+            trace_id = popped.get("trace_id", str(uuid.uuid4())[:16])
+            risk_level = popped.get("risk_level", "medium")
+            await _stream_orchestrator(websocket, user_input, trace_id, risk_level)
             return
 
-        # 非法 decision —— 不 pop，保留 pending 供前端重试
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
         return
 
@@ -188,14 +150,14 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
         return
 
     if risk["action"] == "confirm":
-        # 中危：返回 risk_alert + confirm_id，挂起等待前端确认
+        # 中危：返回 risk_alert + confirm_id，挂起
         confirm_id = f"cfm_{str(uuid.uuid4())[:8]}"
-        pending_confirm[session_id] = {
+        manager.set_pending(session_id, {
             "user_input": user_input,
             "trace_id": trace_id,
             "risk_level": risk["level"],
             "confirm_id": confirm_id,
-        }
+        })
         await _send(
             websocket,
             "risk_alert",
@@ -207,31 +169,61 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
         )
         return
 
-    # 3. 低危：进入 LLM 流式回复
-    await _process_low_risk(websocket, session_id, user_input, trace_id, risk["level"])
+    # 3. Mock 额外中危检查（安全模块未覆盖的 Day2 关键词）
+    if is_medium_risk_command(user_input):
+        confirm_id = f"cfm_{str(uuid.uuid4())[:8]}"
+        manager.set_pending(session_id, {
+            "user_input": user_input,
+            "trace_id": trace_id,
+            "risk_level": "medium",
+            "confirm_id": confirm_id,
+        })
+        await _send(
+            websocket,
+            "risk_alert",
+            level="medium",
+            reason=f"该操作涉及敏感服务变更: {user_input[:50]}",
+            original_input=user_input,
+            confirm_id=confirm_id,
+            trace_id=trace_id,
+        )
+        return
+
+    # 4. 低危：Mock 编排流式返回
+    await _stream_orchestrator(websocket, user_input, trace_id, risk["level"])
 
 
-async def _process_low_risk(
-    websocket: WebSocket, session_id: str, user_input: str, trace_id: str, risk_level: str = "low"
+async def _stream_orchestrator(
+    websocket: WebSocket, user_input: str, trace_id: str, risk_level: str = "low"
 ) -> None:
-    """低危/已确认中危输入：调用 LLM 并流式返回"""
-    await _send(websocket, "status", content="正在分析意图...", trace_id=trace_id)
+    """调用 Mock Orchestrator 并流式返回结果"""
+    response_text_parts: list[str] = []
 
-    messages = [{"role": "user", "content": user_input}]
-    response_text = ""
+    async for msg in mock_orchestrate(user_input):
+        # 使用 orchestrator 返回的 trace_id 覆盖（保持一致性）
+        msg_trace = msg.get("trace_id", trace_id)
+        await _send(
+            websocket,
+            msg["type"],
+            content=msg.get("content"),
+            tool=msg.get("tool"),
+            tool_call_id=msg.get("tool_call_id"),
+            params=msg.get("params"),
+            result=msg.get("result"),
+            trace_id=msg_trace,
+        )
+        # 收集 chunk 内容用于审计
+        if msg["type"] == "chunk" and "content" in msg:
+            response_text_parts.append(msg["content"])
 
-    async for chunk in chat_with_llm(messages, stream=True):
-        await _send(websocket, "chunk", content=chunk, trace_id=trace_id)
-        response_text += chunk
-
-    await _send(websocket, "done", trace_id=trace_id)
+    final_response = "".join(response_text_parts) if response_text_parts else "Mock 流程已完成"
 
     # 记录审计
     await log_chain(
         trace_id=trace_id,
         user_input=user_input,
         risk_level=risk_level,
-        final_response=response_text,
+        final_response=final_response,
     )
 
 
@@ -248,7 +240,7 @@ async def _send(
     tool: str | None = None,
     tool_call_id: str | None = None,
     params: dict[str, Any] | None = None,
-    result: str | None = None,
+    result: Any = None,
 ) -> None:
     """统一发送 WebSocket 消息 —— 对齐最新规范 v1.0 所有后端消息类型"""
     payload: dict[str, Any] = {"type": msg_type}
