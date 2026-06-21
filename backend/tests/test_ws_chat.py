@@ -15,7 +15,6 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from fastapi.websockets import WebSocketDisconnect
 
 from app.main import app
 
