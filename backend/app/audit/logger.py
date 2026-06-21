@@ -85,6 +85,45 @@ async def log_chain(
         logger.error(f"[Audit] 审计日志写入失败: {e}")
 
 
+async def count_audit(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> int:
+    """
+    查询审计日志总条数 —— 用于前端分页表格 total 字段
+
+    参数:
+        start_date: 开始时间（ISO-8601），可选
+        end_date: 结束时间（ISO-8601），可选
+
+    返回:
+        记录总数
+    """
+    try:
+        async with aiosqlite.connect(settings.SQLITE_DB) as db:
+            where_clauses = []
+            params = []
+
+            if start_date:
+                where_clauses.append("timestamp >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("timestamp <= ?")
+                params.append(end_date)
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = "WHERE " + " AND ".join(where_clauses)
+
+            sql = f"SELECT COUNT(*) FROM audit_chain {where_sql}"
+            async with db.execute(sql, params) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+    except Exception as e:
+        logger.error(f"[Audit] 查询审计日志总数失败: {e}")
+        return 0
+
+
 async def query_audit(
     limit: int = 50,
     offset: int = 0,
@@ -130,39 +169,3 @@ async def query_audit(
     except Exception as e:
         logger.error(f"[Audit] 查询审计日志失败: {e}")
         return []
-
-
-async def count_audit(start_date: str | None = None, end_date: str | None = None) -> int:
-    """
-    查询审计日志总条数 —— 用于前端分页表格 total 字段
-
-    参数:
-        start_date: 开始时间（ISO-8601），可选
-        end_date: 结束时间（ISO-8601），可选
-
-    返回:
-        记录总数
-    """
-    try:
-        async with aiosqlite.connect(settings.SQLITE_DB) as db:
-            where_clauses = []
-            params = []
-
-            if start_date:
-                where_clauses.append("timestamp >= ?")
-                params.append(start_date)
-            if end_date:
-                where_clauses.append("timestamp <= ?")
-                params.append(end_date)
-
-            where_sql = ""
-            if where_clauses:
-                where_sql = "WHERE " + " AND ".join(where_clauses)
-
-            sql = f"SELECT COUNT(*) FROM audit_chain {where_sql}"
-            async with db.execute(sql, params) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else 0
-    except Exception as e:
-        logger.error(f"[Audit] 查询审计日志总数失败: {e}")
-        return 0

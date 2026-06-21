@@ -1,22 +1,43 @@
 __pycache__/
 *.pyc
-
-.env
-.env.*
-!.env.example
-
+*.log
+*.Identifier
+*.md
+*.docx
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
-backend/data/backup/
+
+# Environment
+.env
+.env.*
+!.env.example
+frontend/.env.development.local
+frontend/.env.production
+backend/.env
 
 # Python virtual environment
 .venv/
 venv/
 env/
+/backend/.venv/
 
+# Node
+/.node/
+/node_modules/
+/frontend/node_modules/
+
+# Build
+/frontend/dist/
+
+# Data
+backend/data/backup/
+backend/data/audit.db
+
+# Misc
 ws_test.py
 tmp/
+.clinerules

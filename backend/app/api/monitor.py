@@ -1,8 +1,8 @@
 """监控数据接口
 
 正式接口（最新前后端 API 统一规范 v1.0）：
-  GET /api/monitor/metrics  → 嵌套结构 REST 快照
-  GET /api/monitor/stream   → 扁平结构 SSE 实时流
+  GET /api/monitor/metrics  → 嵌套结构 REST 快照（本地 psutil）
+  GET /api/monitor/stream   → 扁平结构 SSE 实时流（本地 psutil）
 """
 import asyncio
 import json
@@ -13,6 +13,8 @@ from datetime import datetime
 import psutil
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+
+from app.mcp.client import MCPClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -89,6 +91,43 @@ def _collect_flat_metrics() -> dict:
     }
 
 
+async def _mcp_metrics_generator():
+    """SSE 流式生成系统指标（通过 MCP 远程采集）"""
+    client = MCPClient()
+    while True:
+        try:
+            try:
+                result = await client.get_system_metrics()
+                raw = result.get("result", {}) if result.get("success") else {}
+            except Exception:
+                raw = {}
+
+            # 从 MCP 返回的嵌套结构中提取扁平指标
+            cpu_data = raw.get("cpu", {})
+            mem_data = raw.get("memory", {})
+            disk_data = raw.get("disk", [{}])
+            load_data = raw.get("load", {})
+
+            disk_pct_str = (disk_data[0] if isinstance(disk_data, list) and disk_data else disk_data).get("percent", "0")
+            try:
+                disk_pct = float(str(disk_pct_str).replace("%", "").strip())
+            except (ValueError, TypeError):
+                disk_pct = 0.0
+
+            data = {
+                "cpu_percent": cpu_data.get("cpu_percent_snapshot", 0.0),
+                "load_avg": load_data.get("load_avg", [0.0, 0.0, 0.0]),
+                "memory_percent": mem_data.get("percent", 0.0),
+                "disk_percent": disk_pct,
+                "timestamp": datetime.now().isoformat(),
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+        except Exception as e:
+            logger.error(f"[Monitor] MCP 获取指标失败: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        await asyncio.sleep(3)
+
+
 # ── 正式监控接口（最新规范 v1.0） ───────────────────────────────────
 
 
@@ -100,7 +139,7 @@ async def get_metrics() -> dict:
 
 @router.get("/monitor/stream")
 async def monitor_stream():
-    """SSE 实时流 —— 扁平结构，每 3 秒推送一次"""
+    """SSE 实时流 —— 扁平结构，每 3 秒推送一次（本地 psutil）"""
 
     async def _generator():
         while True:

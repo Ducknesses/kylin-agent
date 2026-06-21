@@ -30,6 +30,9 @@ class Settings:
     APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
 
+    # Token 认证（空字符串表示不启用认证，向后兼容）
+    API_TOKEN: str = os.getenv("API_TOKEN", "")
+
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 

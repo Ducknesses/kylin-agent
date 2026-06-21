@@ -7,13 +7,15 @@
 import json
 import logging
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
 from app.core.security import risk_classify
 from app.llm.deepseek import chat_with_llm
+from app.mcp.executor import Executor
+from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,15 +30,26 @@ pending_confirm: Dict[str, dict] = {}
 
 
 @router.websocket("/chat/{session_id}")
-async def chat_ws(websocket: WebSocket, session_id: str):
+async def chat_ws(websocket: WebSocket, session_id: str, token: str = None):
     """
-    正式 WebSocket 入口：
+    WebSocket 聊天核心流程：
+    0. Token 认证（若配置了 API_TOKEN）
     1. 接收前端消息（type: chat / confirm / ping）
     2. ping → 立即 pong，不写审计不调 LLM
-    3. confirm → 处理中危操作确认
-    4. chat → 安全检测 → risk_alert / 流式回复
-    5. 全程记录审计日志
+    3. 安全检测
+    4. 高危 -> 返回风险告警
+    5. 中危 -> 返回需确认
+    6. confirm → 处理中危操作确认
+    7. chat → 低危/已确认 → LLM 解析 → MCP 执行 → 流式返回
+    8. 全程记录审计日志
     """
+    # 0. Token 认证
+    if settings.API_TOKEN:
+        if not token or token != settings.API_TOKEN:
+            logger.warning(f"[WebSocket] Token 认证失败: session={session_id}, token={'present' if token else 'missing'}")
+            await websocket.close(code=4001, reason="auth_failed")
+            return
+
     await websocket.accept()
     active_connections[session_id] = websocket
     logger.info(f"[WebSocket] 正式会话建立: {session_id}")
