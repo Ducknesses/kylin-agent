@@ -1,7 +1,8 @@
 """WebSocket 聊天接口
 
-正式接口：/ws/chat（API 文档约定）
-消息格式：{"type": "chat", "session_id": "...", "content": "..."}
+正式接口：WS /ws/chat/{session_id}（最新前后端 API 统一规范 v1.0）
+前端消息类型：chat / confirm / ping
+后端消息类型：status / risk_alert / chunk / tool_call / done / error / pong
 """
 import json
 import logging
@@ -20,28 +21,34 @@ router = APIRouter()
 # 简单内存连接管理（阶段1），后续可接入 Redis Pub/Sub
 active_connections: Dict[str, WebSocket] = {}
 
-# ── 正式接口：API 文档约定的前端 WebSocket 入口 ──────────────────
+# 待确认的中危操作（session_id → pending_request），内存存储
+pending_confirm: Dict[str, dict] = {}
+
+# ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────
 
 
-@router.websocket("/chat")
-async def chat_ws(websocket: WebSocket):
+@router.websocket("/chat/{session_id}")
+async def chat_ws(websocket: WebSocket, session_id: str):
     """
-    WebSocket 聊天核心流程：
-    1. 接收用户输入（JSON: type / session_id / content）
-    2. 安全检测
-    3. 高危 -> reject
-    4. 中危 -> 返回需确认提示
-    5. 低危 -> LLM 解析 -> 流式返回 chunk / done
-    6. 全程记录审计日志
+    正式 WebSocket 入口：
+    1. 接收前端消息（type: chat / confirm / ping）
+    2. ping → 立即 pong，不写审计不调 LLM
+    3. confirm → 处理中危操作确认
+    4. chat → 安全检测 → risk_alert / 流式回复
+    5. 全程记录审计日志
     """
     await websocket.accept()
+    active_connections[session_id] = websocket
+    logger.info(f"[WebSocket] 正式会话建立: {session_id}")
 
     try:
         while True:
             raw = await websocket.receive_text()
-            await _handle_message(websocket, raw)
+            await _handle_message(websocket, session_id, raw)
     except WebSocketDisconnect:
-        logger.info("[WebSocket] 会话断开")
+        logger.info(f"[WebSocket] 会话断开: {session_id}")
+        active_connections.pop(session_id, None)
+        pending_confirm.pop(session_id, None)
     except Exception as e:
         logger.exception(f"[WebSocket] 会话异常: {e}")
         try:
@@ -50,32 +57,27 @@ async def chat_ws(websocket: WebSocket):
             pass
 
 
-# ── 废弃接口：仅用于临时兼容旧调试脚本，后续删除 ──────────────────
-# 前端已切换到 /ws/chat，此路由不再作为正式对接入口。
+# ── Legacy 接口：兼容旧版 /ws/chat，后续删除 ──────────────────────
+# 内部复用同一 _handle_message，不维护独立业务逻辑
 
 
-@router.websocket("/chat/{session_id}")
-async def chat_ws_deprecated(websocket: WebSocket, session_id: str):
-    """[deprecated] 旧版 WebSocket，session_id 从路径读取"""
+@router.websocket("/chat")
+async def chat_ws_legacy(websocket: WebSocket):
+    """[legacy] 旧版 WebSocket 入口，内部复用正式处理函数"""
     await websocket.accept()
-    logger.info(f"[WebSocket:DEPRECATED] 旧路径连接 session={session_id}")
+    session_id = f"legacy-{str(uuid.uuid4())[:8]}"
+    active_connections[session_id] = websocket
+    logger.info(f"[WebSocket:LEGACY] 旧路径连接 session={session_id}")
 
     try:
         while True:
             raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await _send(websocket, "error", message="消息格式非法，需为 JSON")
-                continue
-            # 旧路径没有 session_id 字段时，从路径参数补入
-            msg.setdefault("session_id", session_id)
-            # 转为字符串放回，复用 _handle_message
-            await _handle_message(websocket, json.dumps(msg, ensure_ascii=False))
+            await _handle_message(websocket, session_id, raw)
     except WebSocketDisconnect:
-        logger.info(f"[WebSocket:DEPRECATED] 会话断开: {session_id}")
+        logger.info(f"[WebSocket:LEGACY] 会话断开: {session_id}")
+        active_connections.pop(session_id, None)
     except Exception as e:
-        logger.exception(f"[WebSocket:DEPRECATED] 会话异常: {e}")
+        logger.exception(f"[WebSocket:LEGACY] 会话异常: {e}")
         try:
             await _send(websocket, "error", message=f"服务端异常: {str(e)}")
         except Exception:
@@ -85,8 +87,8 @@ async def chat_ws_deprecated(websocket: WebSocket, session_id: str):
 # ── 内部处理函数 ─────────────────────────────────────────────────
 
 
-async def _handle_message(websocket: WebSocket, raw: str) -> None:
-    """处理单条 WebSocket 消息，抽取为独立函数以复用"""
+async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> None:
+    """按最新规范 v1.0 分发处理 WebSocket 消息"""
     # 1. 解析 JSON
     try:
         msg = json.loads(raw)
@@ -94,31 +96,74 @@ async def _handle_message(websocket: WebSocket, raw: str) -> None:
         await _send(websocket, "error", message="消息格式非法，需为 JSON")
         return
 
-    # API 文档要求 type 固定为 chat
-    if msg.get("type") != "chat":
-        await _send(websocket, "error", message="不支持的消息类型，请使用 type=chat")
+    msg_type = msg.get("type", "")
+
+    # ── ping：立即 pong，不进入任何业务逻辑 ──
+    if msg_type == "ping":
+        await _send(websocket, "pong")
         return
 
-    session_id = msg.get("session_id", "").strip()
-    user_input = msg.get("content", "").strip()
+    # ── confirm：处理中危确认，校验 confirm_id 后才 pop ──
+    if msg_type == "confirm":
+        confirm_id = msg.get("confirm_id", "")
+        decision = msg.get("decision", "")
 
-    if not session_id or not user_input:
-        await _send(websocket, "error", message="缺少 session_id 或 content")
+        # 先 get 不 pop，校验失败时保留 pending
+        pending = pending_confirm.get(session_id)
+        if not pending:
+            await _send(websocket, "error", message="没有待确认的操作")
+            return
+
+        if not confirm_id:
+            await _send(websocket, "error", message="缺少 confirm_id")
+            return
+
+        if confirm_id != pending.get("confirm_id"):
+            await _send(websocket, "error", message="confirm_id 不匹配")
+            return
+
+        if decision == "reject":
+            pending_confirm.pop(session_id, None)
+            await _send(websocket, "status", content="操作已取消")
+            return
+
+        if decision == "approve":
+            pending_confirm.pop(session_id, None)
+            user_input = pending.get("user_input", "")
+            trace_id = pending.get("trace_id", str(uuid.uuid4())[:16])
+            risk_level = pending.get("risk_level", "medium")
+            await _send(websocket, "status", content="正在分析意图...", trace_id=trace_id)
+            await _process_low_risk(websocket, session_id, user_input, trace_id, risk_level)
+            return
+
+        # 非法 decision —— 不 pop，保留 pending 供前端重试
+        await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
         return
 
-    # 跟踪连接
-    active_connections[session_id] = websocket
+    # ── chat：核心对话流程 ──
+    if msg_type != "chat":
+        await _send(websocket, "error", message=f"不支持的消息类型: {msg_type}，可用类型: chat / confirm / ping")
+        return
+
+    content = msg.get("content", "")
+    if not content or not isinstance(content, str) or not content.strip():
+        await _send(websocket, "error", message="输入不能为空或格式错误", trace_id=str(uuid.uuid4())[:16])
+        return
+
+    user_input = content.strip()
     trace_id = str(uuid.uuid4())[:16]
 
     # 2. 安全检测
     risk = risk_classify(user_input)
 
     if risk["action"] == "reject":
+        # 高危：直接返回 risk_alert
         await _send(
             websocket,
-            "reject",
+            "risk_alert",
+            level=risk["level"],
             reason=risk["reason"],
-            risk_level=risk["level"],
+            original_input=user_input,
             trace_id=trace_id,
         )
         await log_chain(
@@ -130,24 +175,34 @@ async def _handle_message(websocket: WebSocket, raw: str) -> None:
         return
 
     if risk["action"] == "confirm":
-        # 中危：告知前端需确认（阶段1不实现等待逻辑）
+        # 中危：返回 risk_alert + confirm_id，挂起等待前端确认
+        confirm_id = f"cfm_{str(uuid.uuid4())[:8]}"
+        pending_confirm[session_id] = {
+            "user_input": user_input,
+            "trace_id": trace_id,
+            "risk_level": risk["level"],
+            "confirm_id": confirm_id,
+        }
         await _send(
             websocket,
-            "reject",
+            "risk_alert",
+            level=risk["level"],
             reason=risk["reason"],
-            risk_level=risk["level"],
+            original_input=user_input,
+            confirm_id=confirm_id,
             trace_id=trace_id,
-        )
-        await log_chain(
-            trace_id=trace_id,
-            user_input=user_input,
-            risk_level=risk["level"],
-            final_response=risk["reason"],
         )
         return
 
     # 3. 低危：进入 LLM 流式回复
-    await _send(websocket, "chunk", content="正在思考...", trace_id=trace_id)
+    await _process_low_risk(websocket, session_id, user_input, trace_id, risk["level"])
+
+
+async def _process_low_risk(
+    websocket: WebSocket, session_id: str, user_input: str, trace_id: str, risk_level: str = "low"
+) -> None:
+    """低危/已确认中危输入：调用 LLM 并流式返回"""
+    await _send(websocket, "status", content="正在分析意图...", trace_id=trace_id)
 
     messages = [{"role": "user", "content": user_input}]
     response_text = ""
@@ -156,13 +211,13 @@ async def _handle_message(websocket: WebSocket, raw: str) -> None:
         await _send(websocket, "chunk", content=chunk, trace_id=trace_id)
         response_text += chunk
 
-    await _send(websocket, "done", content="", trace_id=trace_id)
+    await _send(websocket, "done", trace_id=trace_id)
 
-    # 4. 记录审计
+    # 记录审计
     await log_chain(
         trace_id=trace_id,
         user_input=user_input,
-        risk_level=risk["level"],
+        risk_level=risk_level,
         final_response=response_text,
     )
 
@@ -173,25 +228,59 @@ async def _send(
     content: str | None = None,
     message: str | None = None,
     reason: str | None = None,
-    risk_level: str | None = None,
+    level: str | None = None,
+    original_input: str | None = None,
+    confirm_id: str | None = None,
     trace_id: str | None = None,
+    tool: str | None = None,
+    tool_call_id: str | None = None,
+    params: dict[str, Any] | None = None,
+    result: str | None = None,
 ) -> None:
-    """统一发送 WebSocket 消息"""
+    """统一发送 WebSocket 消息 —— 对齐最新规范 v1.0 所有后端消息类型"""
     payload: dict[str, Any] = {"type": msg_type}
 
-    # reject / error 类型使用固定字段名以匹配 API 文档
-    if msg_type == "reject":
-        if reason:
+    if msg_type == "risk_alert":
+        if level is not None:
+            payload["level"] = level
+        if reason is not None:
             payload["reason"] = reason
-        if risk_level:
-            payload["risk_level"] = risk_level
-    elif msg_type == "error":
-        if message:
-            payload["message"] = message
-    elif content is not None:
-        payload["content"] = content
+        if original_input is not None:
+            payload["original_input"] = original_input
+        if confirm_id is not None:
+            payload["confirm_id"] = confirm_id
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
 
-    if trace_id:
-        payload["trace_id"] = trace_id
+    elif msg_type in ("status", "chunk"):
+        if content is not None:
+            payload["content"] = content
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
+    elif msg_type == "tool_call":
+        if tool is not None:
+            payload["tool"] = tool
+        if tool_call_id is not None:
+            payload["tool_call_id"] = tool_call_id
+        if params is not None:
+            payload["params"] = params
+        if result is not None:
+            payload["result"] = result
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
+    elif msg_type == "done":
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
+    elif msg_type == "error":
+        if message is not None:
+            payload["message"] = message
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
+    elif msg_type == "pong":
+        pass  # 只发 {"type":"pong"}，无额外字段
 
     await ws.send_json(payload)

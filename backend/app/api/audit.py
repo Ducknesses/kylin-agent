@@ -1,22 +1,21 @@
 """审计日志查询接口
 
-正式接口：GET /api/audit/logs（API 文档约定）
-参数：page / limit / start_date / end_date
+正式接口：GET /api/audit（最新前后端 API 统一规范 v1.0）
+参数：limit / offset
+返回：{total, items}
 """
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Query
 
 from app.audit.logger import count_audit, query_audit
-from app.schemas.models import AuditRecordOut
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 def _format_audit_records(rows: list) -> list:
-    """将数据库行转换为 API 文档约定的审计记录格式"""
+    """将数据库行转为 items 条目，按最新规范包含全部审计字段"""
     return [
         {
             "trace_id": r.get("trace_id", ""),
@@ -26,31 +25,27 @@ def _format_audit_records(rows: list) -> list:
             "risk_level": r.get("risk_level", ""),
             "mcp_tool": r.get("mcp_tool"),
             "command": r.get("command"),
+            "raw_output": r.get("raw_output"),
+            "llm_reasoning": r.get("llm_reasoning"),
             "final_response": r.get("final_response"),
         }
         for r in rows
     ]
 
 
-# ── 正式审计接口（API 文档约定） ───────────────────────────────────
+# ── 正式审计接口（最新规范 v1.0） ───────────────────────────────────
 
 
-@router.get("/audit/logs")
+@router.get("/audit")
 async def get_audit_logs(
-    page: int = Query(1, ge=1, description="页码，从 1 开始"),
-    limit: int = Query(20, ge=1, le=200, description="每页条数"),
-    start_date: Optional[str] = Query(None, description="开始时间 ISO-8601"),
-    end_date: Optional[str] = Query(None, description="结束时间 ISO-8601"),
+    limit: int = Query(50, ge=1, le=200, description="每页条数"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+    start_date: str | None = Query(None, description="开始时间 ISO-8601"),
+    end_date: str | None = Query(None, description="结束时间 ISO-8601"),
 ) -> dict:
     """
-    分页查询审计日志
-
-    内部复用 query_audit(limit, offset)，通过 page/limit 计算 offset。
-    count_audit 提供 total 字段满足前端分页表格需求。
+    分页查询审计日志，返回 {total, items}
     """
-    # page/limit 转 offset 以复用现有 query_audit
-    offset = (page - 1) * limit
-
     rows = await query_audit(
         limit=limit,
         offset=offset,
@@ -60,23 +55,26 @@ async def get_audit_logs(
     total = await count_audit(start_date=start_date, end_date=end_date)
 
     return {
-        "code": 200,
-        "data": {
-            "total": total,
-            "list": _format_audit_records(rows),
-        },
+        "total": total,
+        "items": _format_audit_records(rows),
     }
 
 
-# ── 废弃接口：仅保留以防旧调用方启动失败，后续删除 ──────────────────
-# 新代码统一使用 /api/audit/logs，此路由不计入正式接口文档。
+# ── Legacy 接口：兼容旧 /api/audit/logs，后续删除 ──────────────────
 
 
-@router.get("/audit")
-async def get_audit_deprecated(
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-) -> list:
-    """[deprecated] 旧版审计查询，直接返回列表，内部复用同一 query_audit"""
-    rows = await query_audit(limit=limit, offset=offset)
-    return _format_audit_records(rows)
+@router.get("/audit/logs")
+async def get_audit_logs_legacy(
+    page: int = Query(1, ge=1, description="页码"),
+    limit: int = Query(20, ge=1, le=200, description="每页条数"),
+    start_date: str | None = Query(None, description="开始时间"),
+    end_date: str | None = Query(None, description="结束时间"),
+) -> dict:
+    """[legacy] 旧版审计查询，内部复用同一 query_audit"""
+    offset = (page - 1) * limit
+    rows = await query_audit(limit=limit, offset=offset, start_date=start_date, end_date=end_date)
+    total = await count_audit(start_date=start_date, end_date=end_date)
+    return {
+        "code": 200,
+        "data": {"total": total, "list": _format_audit_records(rows)},
+    }

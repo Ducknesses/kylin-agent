@@ -1,4 +1,4 @@
-"""思维链审计日志记录"""
+"""安全审计日志记录"""
 import logging
 from datetime import datetime
 from typing import Optional
@@ -23,7 +23,7 @@ async def log_chain(
     final_response: Optional[str] = None,
 ) -> None:
     """
-    记录完整思维链到 SQLite
+    记录一次安全审计链路到 SQLite。
 
     参数:
         trace_id: 审计追踪 ID
@@ -33,7 +33,7 @@ async def log_chain(
         mcp_tool: 调用的 MCP 工具名
         command: 执行的命令
         raw_output: 原始输出
-        llm_reasoning: LLM 推理过程
+        llm_reasoning: 可展示的安全摘要或处理说明，不保存模型原始思维链
         final_response: 最终返回给用户的响应
     """
     timestamp = datetime.now().isoformat()

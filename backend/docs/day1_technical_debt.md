@@ -210,3 +210,270 @@ LLM 配置错误信息脱敏修复后，新审计记录已不再暴露 `DEEPSEEK
 - `/health` 正常返回。
 - 新的 `/api/audit/logs` 结果不再包含 `DEEPSEEK_API_KEY`。
 - `audit.db` 和备份数据库未被加入 Git（备份目录已被 `.gitignore` 排除，但 `audit.db` 本身已被 Git 跟踪，需手动 `git rm --cached`）。
+
+---
+
+## Part：PR1 前后端 API 统一规范修复
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 背景
+
+PR review 后确认，旧 Day 1 后端接口与前端实际调用存在多处不一致。最新 `api_specification_1.pdf` 已作为新的统一接口规范。
+
+### 本轮修复
+
+| 接口 | 旧形态 | 新形态 |
+| --- | --- | --- |
+| WebSocket | `/ws/chat` 正式，/chat/{session_id} deprecated | `/ws/chat/{session_id}` 正式，/chat legacy |
+| WS 前端消息 | 仅 chat | chat / confirm / ping |
+| WS 后端消息 | chunk / done / reject / error | status / risk_alert / chunk / tool_call / done / error / pong |
+| WS 高危响应 | `{"type":"reject"}` | `{"type":"risk_alert","level":"high",...}` |
+| WS 中危响应 | 无 confirm 流程 | risk_alert + confirm_id + pending_confirm + approve/reject |
+| 审计 | `GET /api/audit/logs` 返回 code/data | `GET /api/audit` 返回 {total, items} |
+| 审计字段 | 缺 raw_output/llm_reasoning | 包含全部 10 个字段 |
+| 监控 REST | `GET /api/monitor/metrics` 返回 code/data + mock | 嵌套结构，真实 psutil 数据，无 code/data |
+| 监控 SSE | `GET /api/monitor/stream` 嵌套 SSE | 扁平结构 SSE，无 code/data |
+| 白名单 GET | `{code, data: {commands:[{pattern,risk}]}}` | `{commands:[{pattern,role,risk}], blocked_patterns}` |
+| 白名单 PUT | WhitelistUpdate.commands 为 list[str] | WhitelistUpdate.commands 为 list[WhitelistCommandEntry] |
+| 白名单持久化 | 无 | SQLite app_config 表 |
+| 会话历史 | 无 | `GET /api/sessions/{session_id}/messages` |
+| Schema 模型 | 旧注释、扁平 SystemMetrics | ChatMessage 按方向分述、嵌套指标模型、SSEMetrics |
+
+### 本轮不处理
+
+- 后端-MCP `/mcp/v1/tools/call` 对齐（下一轮）
+- `params.args` 改 `params.arguments`（下一轮）
+- 完整 AgentHarness / Orchestrator
+- 真实 MCP tool_call 执行链路（当前仅占位消息类型）
+- 消息历史持久化（当前返回空列表）
+
+### 风险说明
+
+部分接口契约相较 Day 1 旧文档发生变化。后续统一以最新 PDF 为准。
+旧接口如保留，仅作为 legacy 兼容入口，不再作为正式契约。
+`tool_call` 消息类型已支持，但真实 MCP 调用链路下一轮处理。
+
+### 验收方式
+
+- WebSocket `/ws/chat/{session_id}` 可连接
+- ping 返回 pong
+- 高危输入返回 risk_alert
+- `/api/audit?limit=20&offset=0` 返回 total/items
+- `/api/monitor/stream` 返回扁平 SSE
+- `/api/monitor/metrics` 返回嵌套指标
+- `/api/config/whitelist` GET/PUT 不再 422
+- `/api/sessions/{session_id}/messages` 可访问
+- 后端启动无 Traceback
+
+---
+
+## Part：WebSocket confirm_id 校验与 pending 状态修复
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+confirm 分支原先使用 `pending_confirm.pop(session_id, None)` 在校验 decision 和 confirm_id 之前就删除挂起操作。错误 confirm 消息（非法 decision、缺少 confirm_id、confirm_id 不匹配）也会清空待确认操作，导致用户无法重试。
+
+### 产生原因
+
+初版 confirm 流程只按 session_id 查找挂起操作，未完整实现最新前后端 API v1.0 中 confirm_id 的确认语义。
+
+### 本轮修复
+
+- 改为先 `pending_confirm.get(session_id)` 读取挂起操作而不删除。
+- 仅当 `decision == "approve"` 或 `decision == "reject"` 且 `confirm_id` 匹配时才执行 `pop`。
+- 缺少 confirm_id、confirm_id 不匹配、decision 非法时均返回 error 并保留 pending。
+
+### 验收方式
+
+- 错误 decision 不会清空 pending。
+- 缺少 confirm_id 不会清空 pending。
+- confirm_id 不匹配不会清空 pending。
+- reject 会清空 pending 并返回 status：操作已取消。
+- approve 会清空 pending 并继续调用现有 `_process_low_risk`。
+
+---
+
+## Part：白名单配置持久化失败处理修复
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`save_config()` 在 SQLite 写入失败时只记录日志，不向调用方抛出异常。`update_whitelist()` 在持久化失败后仍然更新内存缓存并返回「白名单已更新」，导致前端误认为保存成功但数据库实际未写入。
+
+### 产生原因
+
+配置持久化 helper 为了容错吞掉了异常，但 PUT 接口属于用户显式保存操作，失败时应明确返回错误。
+
+### 本轮修复
+
+- `save_config()`：记录日志后重新抛出异常。
+- `update_whitelist()`：捕获异常并返回 HTTP 500（`detail="白名单配置持久化失败"`）。
+- 仅在所有 `save_config()` 成功后更新运行时缓存 `_runtime_commands` / `_runtime_blocked`。
+- `get_whitelist()`：同时检查 `_runtime_commands` 和 `_runtime_blocked` 缓存状态。
+- role 字段确认输出为 `agent-read` / `agent-op` / `agent-admin` 字符串（Permission 类成员本身就是规范字符串）。
+
+### 验收方式
+
+- PUT 成功时返回 `message/saved_commands/saved_blocked_patterns`。
+- SQLite 写入失败时不会返回「白名单已更新」。
+- GET `/api/config/whitelist` 返回的 commands 每项包含 `pattern/role/risk`。
+- role 字段为 `agent-read` / `agent-op` / `agent-admin` 之一。
+- 重启后端后 GET 仍返回 PUT 写入的内容，确认持久化生效。
+
+---
+
+## Part：监控 SSE 异常结构与网络速率非负保护
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`/api/monitor/stream` 在采集异常时只返回 `{"error": "采集失败"}`，导致前端图表组件缺少 `cpu_percent` / `memory_percent` / `disk_percent` 等核心字段。同时网络速率基于两次采样差值计算，在网卡计数器重置或运行环境变化时理论上可能出现负数。
+
+### 产生原因
+
+初版监控接口优先完成结构对齐，异常分支和边界采样场景处理较简单。
+
+### 本轮修复
+
+- SSE 异常分支改为返回与正常数据一致的核心字段，并额外携带 `error` 字段。
+- 网络速率计算增加 `max(0, delta)` 保护，避免出现负数。
+
+### 验收方式
+
+- `/api/monitor/metrics` 仍返回嵌套结构。
+- `/api/monitor/stream` 正常推送仍返回扁平结构。
+- SSE 异常 fallback 包含 `cpu_percent` / `load_avg` / `memory_percent` / `disk_percent` / `net_in_kbps` / `net_out_kbps` / `timestamp`。
+- `rx_kbps` / `tx_kbps` / `net_in_kbps` / `net_out_kbps` 不应为负数。
+
+---
+
+## Part：审计模块注释脱敏与未使用导入清理
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+审计日志模块中仍存在「完整思维链」「LLM 推理过程」等注释表述，容易误导后续开发者将模型原始思维链写入数据库。同时 `audit.py` 中存在未使用的 `AuditRecordOut` 导入。
+
+### 产生原因
+
+早期实现为了描述审计链路，沿用了「思维链」表述，但当前安全要求下不应保存模型原始思维链。
+
+### 本轮修复
+
+- `logger.py` 模块注释从「思维链审计日志记录」改为「安全审计日志记录」。
+- `log_chain()` 函数注释从「记录完整思维链到 SQLite」改为「记录一次安全审计链路到 SQLite」。
+- `llm_reasoning` 参数注释从「LLM 推理过程」改为「可展示的安全摘要或处理说明，不保存模型原始思维链」。
+- `audit.py` 中删除未使用的 `AuditRecordOut` 导入。
+
+### 验收方式
+
+- `logger.py` 中不再出现「完整思维链」「LLM 推理过程」等误导性表述。
+- `audit.py` 中不再存在未使用的 `AuditRecordOut` 导入。
+- `GET /api/audit` 返回结构不变。
+- 数据库表结构不变。
+
+---
+
+## Part：Pydantic Schema 默认值与枚举约束清理
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`schemas/models.py` 中存在未使用的 `datetime` 导入，同时部分列表字段直接使用 `[]` 作为默认值。`role` / `risk` / `decision` 字段原先使用普通 `str`，无法在 Schema 层拦截明显非法取值（如 `role: "root"`）。
+
+### 产生原因
+
+初版模型优先对齐接口字段结构，未进一步做 lint 清理和枚举约束。
+
+### 本轮修复
+
+- 删除未使用的 `from datetime import datetime`，新增 `from typing import Literal`。
+- `SessionMessagesOut.messages` 和 `WhitelistUpdate.blocked_patterns` 默认值改为 `Field(default_factory=list)`。
+- `ChatMessage.decision` 限制为 `Literal["approve", "reject"] | None`。
+- `WhitelistCommandEntry.role` 限制为 `Literal["agent-read", "agent-op", "agent-admin"]`。
+- `WhitelistCommandEntry.risk` 限制为 `Literal["low", "medium", "high"]`。
+
+### 验收方式
+
+- `python -m py_compile` 通过。
+- `WhitelistUpdate` 仍接收 commands 对象数组。
+- `blocked_patterns` 未传时默认为空列表。
+- 非法 role / risk / decision 会被 Pydantic ValidationError 拒绝。
+- `ChatMessage` 仍兼容 chat / confirm / ping 三种前端消息。
+
+---
+
+## Part：会话历史接口返回模型与注释清理
+
+> 日期：2026-06-20
+> 关联分支：feature/backend-foundation
+
+### 问题描述
+
+`GET /api/sessions/{session_id}/messages` 已实现，但函数返回普通 `dict`，未使用已定义的 `SessionMessagesOut` 模型。同时 docstring 中「不能 404」的表述与实际逻辑不一致。
+
+### 产生原因
+
+初版会话历史接口优先补齐前端所需路径，消息持久化暂未实现，返回模型和注释未同步整理。
+
+### 本轮修复
+
+- `get_session_messages()` 返回类型从 `dict` 改为 `SessionMessagesOut`。
+- 返回改为 `SessionMessagesOut(session_id=session_id, messages=[])`。
+- 文档字符串修正为「已存在会话返回空列表；会话不存在时返回 404」。
+
+### 验收方式
+
+- 已存在会话返回 `{session_id, messages: []}`。
+- 不存在会话返回 404 + `{"detail": "会话不存在"}`。
+- 未引入消息持久化或额外数据库结构。
+
+---
+
+## Part：PR Review 阻塞问题修复
+
+> 日期：2026-06-20
+> 关联分支：fix/api-alignment-FrontAndBack
+
+### 问题描述
+
+PR Review 指出白名单持久化失败处理、会话历史响应模型、监控 SSE 异常 fallback 三处问题仍未在当前 PR 分支真实代码中生效，同时存在 `router.py` 类型标注混用、`.gitignore` 文件末尾缺换行符、`audit.db` 被 Git 跟踪等工程问题。
+
+### 产生原因
+
+部分修复内容已在前期讨论和文档中记录，但当前 PR 分支源码未完整包含对应实现，导致 PR 描述与实际代码不一致。
+
+### 本轮修复
+
+- `save_config()` 改为失败时抛出异常（`except` 块末尾加 `raise`）。
+- `update_whitelist()` 捕获持久化异常并返回 HTTP 500，且仅在 DB 保存成功后更新运行时缓存。
+- `get_whitelist()` 同时检查 `_runtime_commands` 和 `_runtime_blocked` 缓存状态。
+- `get_session_messages()` 返回类型改为 `SessionMessagesOut`，返回 Pydantic 模型实例。
+- SSE 异常 fallback 改为返回完整核心字段（`cpu_percent` / `load_avg` / `memory_percent` / `disk_percent` / `net_in_kbps` / `net_out_kbps` / `timestamp`）。
+- 网络速率计算增加 `max(0, delta)` 非负保护。
+- `route_request()` 类型标注统一为 Python 3.10+ `list[dict] | None` 风格，移除未使用的 `typing.Dict` / `typing.List` 导入。
+- `.gitignore` 补充文件末尾换行。
+- `backend/data/audit.db` 已不在 Git 跟踪中。
+
+### 验收方式
+
+- `python -m py_compile` 全部通过。
+- SQLite 写入失败时不会返回「白名单已更新」。
+- `GET /api/sessions/{session_id}/messages` 返回 `SessionMessagesOut` 对应结构。
+- SSE 异常 fallback 包含完整核心字段。
+- `route_request()` 不再出现 `List[Dict] | None` 混用。
+- `.gitignore` 末尾字节为 `0a`。
+- `git ls-files backend/data/audit.db` 无输出。
