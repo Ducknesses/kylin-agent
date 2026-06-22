@@ -2,7 +2,7 @@
 
 正式接口：WS /ws/chat/{session_id}（最新前后端 API 统一规范 v1.0）
 前端消息类型：chat / confirm / ping
-后端消息类型：status / chat / risk_alert / tool_call / error / done / pong
+后端消息类型：status / chunk / risk_alert / tool_call / error / done / pong
 
 当前为 Day2 Mock 流程，不接真实 LLM 和 MCP Server。
 """

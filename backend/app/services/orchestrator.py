@@ -4,7 +4,7 @@
 """
 import logging
 import uuid
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +45,8 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
 
     识别规则:
       - CPU 相关 → mock sys_info 工具调用
+      - 重启 nginx → mock service_mgr restart 工具调用（优先判断，避免被普通 nginx 查询误匹配）
       - nginx 状态 → mock service_mgr status 工具调用
-      - 重启 nginx → mock service_mgr restart 工具调用
       - 其他 → 通用 mock 回复
     """
     trace_id = str(uuid.uuid4())[:16]
@@ -72,6 +72,30 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
                 f"当前 CPU 使用率约为 {_MOCK_CPU_RESULT['cpu_percent']}%，"
                 f"系统负载为 {', '.join(str(v) for v in _MOCK_CPU_RESULT['load_avg'])}。"
             ),
+            "trace_id": trace_id,
+        }
+        yield {"type": "done", "trace_id": trace_id}
+        return
+
+    # ── 重启 nginx（中危确认后由 chat.py 调用） ──
+    # 必须放在 nginx 状态查询之前，避免 "重启 nginx" 被 "nginx" 关键词误匹配为状态查询
+    if _match_any(user_input, _RESTART_NGINX_KEYWORDS):
+        yield {
+            "type": "status",
+            "content": "已收到确认，正在模拟重启 nginx...",
+            "trace_id": trace_id,
+        }
+        yield {
+            "type": "tool_call",
+            "tool": "service_mgr",
+            "tool_call_id": f"tc_{str(uuid.uuid4())[:8]}",
+            "params": {"action": "restart", "service": "nginx"},
+            "result": _MOCK_NGINX_RESTART_RESULT,
+            "trace_id": trace_id,
+        }
+        yield {
+            "type": "chunk",
+            "content": "已模拟提交 nginx 重启操作。当前仍为 Mock 流程，未调用真实 MCP。",
             "trace_id": trace_id,
         }
         yield {"type": "done", "trace_id": trace_id}
@@ -104,29 +128,6 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "done", "trace_id": trace_id}
         return
 
-    # ── 重启 nginx（中危确认后由 chat.py 调用） ──
-    if _match_any(user_input, _RESTART_NGINX_KEYWORDS):
-        yield {
-            "type": "status",
-            "content": "已收到确认，正在模拟重启 nginx...",
-            "trace_id": trace_id,
-        }
-        yield {
-            "type": "tool_call",
-            "tool": "service_mgr",
-            "tool_call_id": f"tc_{str(uuid.uuid4())[:8]}",
-            "params": {"action": "restart", "service": "nginx"},
-            "result": _MOCK_NGINX_RESTART_RESULT,
-            "trace_id": trace_id,
-        }
-        yield {
-            "type": "chunk",
-            "content": "已模拟提交 nginx 重启操作。当前仍为 Mock 流程，未调用真实 MCP。",
-            "trace_id": trace_id,
-        }
-        yield {"type": "done", "trace_id": trace_id}
-        return
-
     # ── 通用 mock 回复 ──
     yield {
         "type": "status",
@@ -141,6 +142,8 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "done", "trace_id": trace_id}
 
 
+# TODO: is_high_risk_command 当前未被任何模块导入/调用（死代码）
+# 保留作为 Day3 扩展时的补充检查入口（不影响安全流程的完整性）
 def is_high_risk_command(user_input: str) -> bool:
     """检查输入是否为高危命令（不依赖 security.py 的补充检查）"""
     high_risk_patterns = [

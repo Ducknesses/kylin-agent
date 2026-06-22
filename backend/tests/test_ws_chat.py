@@ -122,6 +122,11 @@ class TestWebSocketBasic:
             assert "chunk" in types
             assert "done" in types
 
+            # 确认 tool_call 携带了 restart action 参数
+            tool_calls = [m for m in msgs if m["type"] == "tool_call"]
+            assert len(tool_calls) == 1
+            assert tool_calls[0]["params"]["action"] == "restart"
+
 
 class TestErrorHandling:
     """异常输入处理测试"""
