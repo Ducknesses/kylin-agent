@@ -128,8 +128,8 @@ class SafetyGuard:
         if not stripped:
             return {
                 "allowed": False,
-                "risk_level": "high",
-                "reason": "输入为空",
+                "risk_level": "low",
+                "reason": "输入不能为空",
                 "requires_confirm": False,
             }
 
@@ -177,8 +177,8 @@ class SafetyGuard:
                 "requires_confirm": True,
             }
 
-        # 5. 调已有 risk_classify 做完整风险分级
-        risk = risk_classify(stripped)
+        # 5. 调已有 risk_classify 做完整风险分级（跳过注入检测，前面已做过）
+        risk = risk_classify(stripped, skip_injection_check=True)
 
         # 高危：不允许
         if risk["action"] == "reject":
@@ -249,6 +249,9 @@ class SafetyGuard:
             return result
 
         if result["risk_level"] == "medium":
+            # 如果 _check_* 已显式拒绝，则不因角色放行
+            if result.get("allowed") is False:
+                return result
             if role in _ROLE_CAN_MEDIUM:
                 result["allowed"] = True
                 result["requires_confirm"] = True
@@ -292,31 +295,26 @@ class SafetyGuard:
         if file_path and not file_path.startswith("/var/log/"):
             return self._deny("high", f"日志路径超出允许范围: {file_path}")
 
-        # 行数过大
-        if isinstance(lines, (int, float)) and lines > 500:
-            return self._deny("medium", f"请求日志行数过大: {lines}")
+        # 行数校验：1~500 合法，<=0 或 >500 或非数字均拒绝
         try:
             lines_int = int(str(lines))
-            if lines_int > 500:
-                return self._deny("medium", f"请求日志行数过大: {lines_int}")
         except (ValueError, TypeError):
             return self._deny("medium", "lines 参数格式非法")
+        if lines_int < 1 or lines_int > 500:
+            return self._deny("medium", f"请求日志行数不合法: {lines_int}")
 
         return self._allow("low", "log_reader 只读日志查询")
 
     def _check_service_mgr(self, params: dict) -> dict[str, Any]:
-        """service_mgr 工具检查：按 action + 服务名分级"""
-        action = (params.get("action") or "").strip()
+        """service_mgr 工具检查：按 action + 服务名分级（去除 dead code）"""
+        action = (params.get("action") or "").strip().lower()
         service_name = (params.get("service") or params.get("name") or "").strip()
 
         # 服务名为空或含注入字符
         if not service_name or _INJECTION_CHARS_PATTERN.search(service_name):
             return self._deny("high", "服务名称为空或包含命令注入字符")
 
-        # 低风险只读 action
-        read_actions = {"status", "is_active", "is-active", "is_enabled", "is-enabled"}
-        # 中风险变更 action
-        medium_actions = {"start", "stop", "restart", "reload"}
+        svc_lower = service_name.lower()
 
         # 高风险服务名（核心守护进程）
         high_risk_services = {
@@ -324,31 +322,31 @@ class SafetyGuard:
             "auditd", "mcp-server", "network", "networkmanager",
             "dbus", "dbus-daemon", "polkit",
         }
+        is_high_svc = svc_lower in high_risk_services
 
-        # 高风险服务 + 任何非只读 action → high
-        if service_name.lower() in high_risk_services:
-            if action in medium_actions or action == "disable":
-                return self._deny("high", f"禁止对核心服务执行 {action}: {service_name}")
+        # 只读 action
+        read_actions = {"status", "is_active", "is-active", "is_enabled", "is-enabled"}
+        # 变更 action（需确认）
+        medium_actions = {"start", "stop", "restart", "reload"}
 
+        # 高风险服务 + 变更/禁用 → high
+        if is_high_svc and action in (medium_actions | {"disable"}):
+            return self._deny("high", f"禁止对核心服务执行 {action}: {service_name}")
+
+        # 只读 action → low（含高风险服务的只读查询）
         if action in read_actions:
             return self._allow("low", f"service_mgr 只读查询: {action} {service_name}")
 
+        # 变更 action → medium（需确认）
         if action in medium_actions:
-            # 对高风险服务执行 disable（破坏性）
-            if action in ("disable", "stop") and service_name.lower() in high_risk_services:
-                return self._deny("high", f"禁止对核心服务执行 {action}: {service_name}")
             return {
                 "risk_level": "medium",
                 "reason": f"中风险服务操作: {action} {service_name}",
             }
 
+        # disable（非高风险服务）→ medium 拒绝
         if action == "disable":
-            if service_name.lower() in high_risk_services:
-                return self._deny("high", f"禁止对核心服务执行 disable: {service_name}")
-            return {
-                "risk_level": "medium",
-                "reason": f"中风险服务操作: {action} {service_name}",
-            }
+            return self._deny("medium", f"禁止执行 disable 操作: {service_name}")
 
         # 非法 action
         return self._deny("medium", f"非法的 service_mgr action: {action}")
@@ -424,17 +422,19 @@ class SafetyGuard:
     # ── 辅助方法 ────────────────────────────────────────────────────
 
     @staticmethod
-    def _allow(risk_level: str, reason: str) -> dict[str, Any]:
+    def _result(allowed: bool, risk_level: str, reason: str, requires_confirm: bool = False) -> dict[str, Any]:
+        """统一结果工厂 —— 所有 _check_* 方法返回完整四字段"""
         return {
+            "allowed": allowed,
             "risk_level": risk_level,
             "reason": reason,
+            "requires_confirm": requires_confirm,
         }
 
-    @staticmethod
-    def _deny(risk_level: str, reason: str) -> dict[str, Any]:
-        return {
-            "allowed": False,
-            "risk_level": risk_level,
-            "reason": reason,
-            "requires_confirm": False,
-        }
+    @classmethod
+    def _allow(cls, risk_level: str, reason: str) -> dict[str, Any]:
+        return cls._result(True, risk_level, reason, requires_confirm=False)
+
+    @classmethod
+    def _deny(cls, risk_level: str, reason: str) -> dict[str, Any]:
+        return cls._result(False, risk_level, reason, requires_confirm=False)

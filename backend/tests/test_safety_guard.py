@@ -196,13 +196,14 @@ class TestEdgeCases:
     def test_empty_string(self, guard):
         result = guard.analyze_user_input("")
         assert result["allowed"] is False
-        assert result["risk_level"] == "high"
-        assert result["reason"]  # reason 不为空
+        assert result["risk_level"] == "low"
+        assert "不能为空" in result["reason"]
 
     def test_whitespace_only(self, guard):
         result = guard.analyze_user_input("   \t  \n  ")
         assert result["allowed"] is False
-        assert result["risk_level"] == "high"
+        assert result["risk_level"] == "low"
+        assert "不能为空" in result["reason"]
 
     def test_normal_systemctl_status(self, guard):
         result = guard.analyze_user_input("systemctl status nginx")
@@ -300,6 +301,21 @@ class TestLogReader:
         assert result["allowed"] is False
         assert result["risk_level"] == "high"
 
+    def test_lines_zero(self, guard):
+        result = guard.analyze_tool_call("log_reader", {"lines": 0})
+        assert result["allowed"] is False
+        assert result["risk_level"] == "medium"
+
+    def test_lines_negative(self, guard):
+        result = guard.analyze_tool_call("log_reader", {"lines": -100})
+        assert result["allowed"] is False
+        assert result["risk_level"] == "medium"
+
+    def test_lines_not_int(self, guard):
+        result = guard.analyze_tool_call("log_reader", {"lines": "abc"})
+        assert result["allowed"] is False
+        assert result["risk_level"] == "medium"
+
 
 class TestServiceMgr:
     """service_mgr 工具测试"""
@@ -334,6 +350,23 @@ class TestServiceMgr:
         result = guard.analyze_tool_call("service_mgr", {"action": "disable", "service": "systemd"}, "admin")
         assert result["allowed"] is False
         assert result["risk_level"] == "high"
+
+    def test_disable_auditd_admin_high(self, guard):
+        result = guard.analyze_tool_call("service_mgr", {"action": "disable", "service": "auditd"}, "admin")
+        assert result["allowed"] is False
+        assert result["risk_level"] == "high"
+
+    def test_status_auditd_viewer_low(self, guard):
+        """高风险服务的只读查询应放行"""
+        result = guard.analyze_tool_call("service_mgr", {"action": "status", "service": "auditd"}, "viewer")
+        assert result["allowed"] is True
+        assert result["risk_level"] == "low"
+
+    def test_disable_nginx_admin_denied(self, guard):
+        """普通服务 disable 应 medium 拒绝"""
+        result = guard.analyze_tool_call("service_mgr", {"action": "disable", "service": "nginx"}, "admin")
+        assert result["allowed"] is False
+        assert result["risk_level"] == "medium"
 
     def test_bad_action(self, guard):
         result = guard.analyze_tool_call("service_mgr", {"action": "bad_action", "service": "nginx"})
