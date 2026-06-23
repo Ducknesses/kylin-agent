@@ -14,15 +14,16 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
-from app.core.security import risk_classify
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import is_medium_risk_command, mock_orchestrate
+from app.services.safety_guard import SafetyGuard
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 连接管理器和挂起操作（单例，模块级共享）
+# 连接管理器、安全护栏（模块级单例）
 manager = ConnectionManager()
+safety_guard = SafetyGuard()
 
 # ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────
 
@@ -128,41 +129,41 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
     user_input = content.strip()
     trace_id = str(uuid.uuid4())[:16]
 
-    # 2. 安全检测
-    risk = risk_classify(user_input)
+    # 2. 安全检测 —— 统一通过 SafetyGuard
+    safety = safety_guard.analyze_user_input(user_input)
 
-    if risk["action"] == "reject":
-        # 高危：直接返回 risk_alert
+    if not safety["allowed"]:
+        # 高危/拦截：返回 risk_alert，不进入后续流程
         await _send(
             websocket,
             "risk_alert",
-            level=risk["level"],
-            reason=risk["reason"],
+            level=safety["risk_level"],
+            reason=safety["reason"],
             original_input=user_input,
             trace_id=trace_id,
         )
         await log_chain(
             trace_id=trace_id,
             user_input=user_input,
-            risk_level=risk["level"],
-            final_response=risk["reason"],
+            risk_level=safety["risk_level"],
+            final_response=safety["reason"],
         )
         return
 
-    if risk["action"] == "confirm":
-        # 中危：返回 risk_alert + confirm_id，挂起
+    if safety["requires_confirm"]:
+        # 中危：返回 risk_alert + confirm_id，挂起等待确认
         confirm_id = f"cfm_{str(uuid.uuid4())[:8]}"
         manager.set_pending(session_id, {
             "user_input": user_input,
             "trace_id": trace_id,
-            "risk_level": risk["level"],
+            "risk_level": safety["risk_level"],
             "confirm_id": confirm_id,
         })
         await _send(
             websocket,
             "risk_alert",
-            level=risk["level"],
-            reason=risk["reason"],
+            level=safety["risk_level"],
+            reason=safety["reason"],
             original_input=user_input,
             confirm_id=confirm_id,
             trace_id=trace_id,
@@ -190,7 +191,7 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
         return
 
     # 4. 低危：Mock 编排流式返回
-    await _stream_orchestrator(websocket, user_input, trace_id, risk["level"])
+    await _stream_orchestrator(websocket, user_input, trace_id, safety["risk_level"])
 
 
 async def _stream_orchestrator(
