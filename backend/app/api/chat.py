@@ -15,7 +15,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
 from app.services.connection_manager import ConnectionManager
-from app.services.orchestrator import is_medium_risk_command, mock_orchestrate
+from app.services.orchestrator import mock_orchestrate
 from app.services.safety_guard import SafetyGuard
 
 logger = logging.getLogger(__name__)
@@ -170,27 +170,7 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
         )
         return
 
-    # 3. Mock 额外中危检查（安全模块未覆盖的 Day2 关键词）
-    if is_medium_risk_command(user_input):
-        confirm_id = f"cfm_{str(uuid.uuid4())[:8]}"
-        manager.set_pending(session_id, {
-            "user_input": user_input,
-            "trace_id": trace_id,
-            "risk_level": "medium",
-            "confirm_id": confirm_id,
-        })
-        await _send(
-            websocket,
-            "risk_alert",
-            level="medium",
-            reason=f"该操作涉及敏感服务变更: {user_input[:50]}",
-            original_input=user_input,
-            confirm_id=confirm_id,
-            trace_id=trace_id,
-        )
-        return
-
-    # 4. 低危：Mock 编排流式返回
+    # 3. 低危：Mock 编排流式返回
     await _stream_orchestrator(websocket, user_input, trace_id, safety["risk_level"])
 
 

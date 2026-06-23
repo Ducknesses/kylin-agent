@@ -94,6 +94,15 @@ _SENSITIVE_EXTENSIONS: tuple[str, ...] = (
 # 命令注入字符（service 名中的非法字符）
 _INJECTION_CHARS_PATTERN = re.compile(r"[;&|`$()><\n]")
 
+# 中风险 nginx 服务操作（需二次确认，但不禁用）
+# 匹配：重启/停止/启动/重新加载 nginx，支持 systemctl/service + restart/stop/start/reload
+_MEDIUM_NGINX_PATTERN = re.compile(
+    # 匹配 systemctl restart nginx / service nginx restart / 重启 nginx 等
+    r"((?:systemctl|service)\s+)?(restart|stop|start|reload|重启|停止|启动|重新加载)\s+nginx"
+    r"|service\s+nginx\s+(restart|stop|start|reload)",
+    re.IGNORECASE,
+)
+
 
 class SafetyGuard:
     """用户输入安全检查统一入口"""
@@ -147,7 +156,7 @@ class SafetyGuard:
                     "requires_confirm": False,
                 }
 
-        # 3. 调已有 Prompt Injection 检测
+        # 3. Prompt Injection 检测（优先于中风险，防止「忽略规则 + restart nginx」被误判为 medium）
         injection = detect_injection(stripped)
         if injection["detected"]:
             logger.warning(f"[SafetyGuard] Prompt Injection: {injection['reason']}")
@@ -158,7 +167,17 @@ class SafetyGuard:
                 "requires_confirm": False,
             }
 
-        # 4. 调已有 risk_classify 做完整风险分级
+        # 4. 中风险 nginx 服务操作检测（Prompt 注入已排除，仅正常运维操作到此）
+        if _MEDIUM_NGINX_PATTERN.search(stripped):
+            logger.info(f"[SafetyGuard] 中风险服务操作: {stripped[:60]}")
+            return {
+                "allowed": True,
+                "risk_level": "medium",
+                "reason": f"该操作涉及服务变更，需要确认: {stripped[:50]}",
+                "requires_confirm": True,
+            }
+
+        # 5. 调已有 risk_classify 做完整风险分级
         risk = risk_classify(stripped)
 
         # 高危：不允许
