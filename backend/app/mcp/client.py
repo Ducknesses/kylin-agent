@@ -62,8 +62,22 @@ class MCPClient:
                     logger.error(f"[MCP] 工具调用错误: {data['error']}")
                     return {"success": False, "error": data["error"]}
 
+                result = data.get("result", {})
+                # MCP Server 可能在 HTTP 200 下通过 result.blocked 表示安全拦截
+                if isinstance(result, dict) and result.get("blocked") is True:
+                    logger.warning(
+                        f"[MCP] 工具 {tool_name} 被 MCP Server 安全拦截: "
+                        f"{result.get('reason', '未知原因')}"
+                    )
+                    return {
+                        "success": False,
+                        "blocked": True,
+                        "error": result.get("reason") or "MCP 工具调用被安全策略拦截",
+                        "result": result,
+                    }
+
                 logger.info(f"[MCP] 工具 {tool_name} 调用成功")
-                return {"success": True, "result": data.get("result", {})}
+                return {"success": True, "result": result}
 
         except httpx.TimeoutException:
             logger.error(f"[MCP] 工具 {tool_name} 调用超时")
