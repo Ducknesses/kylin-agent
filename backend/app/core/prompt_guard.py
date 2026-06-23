@@ -22,7 +22,7 @@ INJECTION_KEYWORDS = [
     "bypass safety",
     "jailbreak",
     "dank mode",
-]
+] 
 
 # 控制字符与异常 Unicode
 CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")

@@ -73,13 +73,13 @@ def _check_keywords(text: str) -> Optional[Dict]:
     return None
 
 
-def risk_classify(user_input: str) -> Dict:
+def risk_classify(user_input: str, skip_injection_check: bool = False) -> Dict:
     """
     三层安全检测：
     1. 长度检查
     2. 正则黑名单（高危直接拒）
     3. 关键词分级（中危需确认）
-    4. Prompt Injection 语义检测
+    4. Prompt Injection 语义检测（可通过 skip_injection_check=True 跳过，避免重复检测）
 
     返回: {"level": "high|medium|low", "reason": "...", "action": "reject|confirm|allow"}
     """
@@ -95,15 +95,16 @@ def risk_classify(user_input: str) -> Dict:
         logger.warning(f"[安全] 高危命令拦截: {result['reason']}")
         return result
 
-    # 3. Prompt Injection 检测
-    injection = detect_injection(user_input)
-    if injection["detected"]:
-        logger.warning(f"[安全] Prompt Injection 拦截: {injection['reason']}")
-        return {
-            "level": "high",
-            "reason": injection["reason"],
-            "action": "reject",
-        }
+    # 3. Prompt Injection 检测（如果调用方已自行检测可跳过）
+    if not skip_injection_check:
+        injection = detect_injection(user_input)
+        if injection["detected"]:
+            logger.warning(f"[安全] Prompt Injection 拦截: {injection['reason']}")
+            return {
+                "level": "high",
+                "reason": injection["reason"],
+                "action": "reject",
+            }
 
     # 4. 中危关键词
     result = _check_keywords(user_input)
