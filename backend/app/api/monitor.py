@@ -98,7 +98,7 @@ async def _mcp_metrics_generator():
         try:
             try:
                 result = await client.get_system_metrics()
-                raw = result.get("result", {}) if result.get("success") else {}
+                raw = result.get("result", {}) if result.get("ok") else {}
             except Exception:
                 raw = {}
 

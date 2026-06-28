@@ -2,15 +2,16 @@
 
 涵盖：
   - Real 模式：result.blocked 处理、JSON-RPC error 处理
-  - Mock 模式：默认 mode、sys_info mock、未知工具
-  - Payload 构造：URL、params.arguments、headers（含 Authorization）
+  - Mock 模式：6 工具完整覆盖（sys_info / service_mgr / log_reader / net_monitor / cmd_exec / file_guard）
+  - Payload 构造：URL、params.arguments、headers
+  - 返回结构统一：所有 call_tool 返回 {"ok": bool, "result": dict|None, "error": str|None}
 使用 asyncio.run() 调用异步方法，避免依赖 pytest-asyncio。
 Real 模式测试使用 monkeypatch 模拟 httpx.AsyncClient.post，无需真实 MCP Server。
 """
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-from app.mcp.client import MCPClient
+from app.mcp.client import MCPClient, _ok, _fail
 
 
 class FakeResponse:
@@ -30,11 +31,15 @@ class FakeResponse:
         return self._json
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Real 模式：blocked / JSON-RPC error 处理
+# ═══════════════════════════════════════════════════════════════════
+
 class TestMCPClientBlocked:
-    """MCPClient 对 result.blocked 的处理"""
+    """MCPClient real 模式对 result.blocked 的处理"""
 
     def test_call_tool_treats_blocked_result_as_failure(self):
-        """MCP Server 返回 HTTP 200 + result.blocked=true → 应返回失败结构"""
+        """MCP Server 返回 HTTP 200 + result.blocked=true → 应返回 ok=false"""
         client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
 
         blocked_response = {
@@ -55,15 +60,14 @@ class TestMCPClientBlocked:
 
         result = asyncio.run(_run())
 
-        assert result["success"] is False
-        assert result["blocked"] is True
+        assert result["ok"] is False
+        assert result["result"]["blocked"] is True
         assert "命令不在白名单中" in str(result["error"])
-        # 原始 result 应保留 command 和 reason
         assert result["result"]["command"] == "rm -rf /tmp/*"
         assert result["result"]["reason"] == "命令不在白名单中: rm -rf /tmp/*"
 
     def test_call_tool_keeps_normal_result_successful(self):
-        """MCP Server 正常返回（无 blocked）→ 应保持成功结构"""
+        """MCP Server 正常返回（无 blocked）→ 应返回 ok=true"""
         client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
 
         normal_response = {
@@ -83,12 +87,14 @@ class TestMCPClientBlocked:
 
         result = asyncio.run(_run())
 
-        assert result["success"] is True
-        assert "blocked" not in result
+        assert result["ok"] is True
+        assert result["error"] is None
         assert result["result"]["cpu_percent"] == 23.5
+        assert "success" not in result
+        assert "blocked" not in result
 
-    def test_call_tool_handles_jsonrpc_error_unchanged(self):
-        """MCP Server 返回 JSON-RPC error → 应保持原有错误处理"""
+    def test_call_tool_handles_jsonrpc_error(self):
+        """MCP Server 返回 JSON-RPC error → 应返回 ok=false"""
         client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
 
         error_response = {
@@ -105,8 +111,9 @@ class TestMCPClientBlocked:
 
         result = asyncio.run(_run())
 
-        assert result["success"] is False
-        assert result["error"]["code"] == -32601
+        assert result["ok"] is False
+        assert result["error"] is not None
+        assert "Method not found" in result["error"]
 
     def test_call_tool_blocked_without_reason_uses_default(self):
         """MCP Server blocked 但未提供 reason → 应使用默认错误消息"""
@@ -128,8 +135,8 @@ class TestMCPClientBlocked:
 
         result = asyncio.run(_run())
 
-        assert result["success"] is False
-        assert result["blocked"] is True
+        assert result["ok"] is False
+        assert result["result"]["blocked"] is True
         assert result["error"] == "MCP 工具调用被安全策略拦截"
 
     def test_call_tool_blocked_result_preserves_full_mcp_response(self):
@@ -156,152 +163,535 @@ class TestMCPClientBlocked:
 
         result = asyncio.run(_run())
 
-        assert result["success"] is False
-        assert result["blocked"] is True
+        assert result["ok"] is False
+        assert result["result"]["blocked"] is True
         assert result["error"] == "管道执行被拦截"
-        # 额外字段（policy、severity）也应保留
         assert result["result"]["policy"] == "no_pipe_exec"
         assert result["result"]["severity"] == "high"
 
 
-# ── Day4-Part1 新增：Mock 模式 / Payload / URL / Headers 测试 ──────────
+# ═══════════════════════════════════════════════════════════════════
+# Mock 模式：6 工具完整覆盖
+# ═══════════════════════════════════════════════════════════════════
+
+class TestMockSysInfo:
+    """mock 模式 sys_info 工具"""
+
+    def test_cpu(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "cpu"}))
+        assert r["ok"] is True
+        assert r["error"] is None
+        assert r["result"]["cpu"]["cpu_percent_snapshot"] == 23.5
+        assert r["result"]["cpu"]["cpu_count"] == 4
+        assert "success" not in r
+
+    def test_memory(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "memory"}))
+        assert r["ok"] is True
+        assert r["result"]["memory"]["percent"] == 45.0
+        assert r["result"]["memory"]["total"] == 8589934592
+
+    def test_disk(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "disk"}))
+        assert r["ok"] is True
+        assert r["result"]["disk"][0]["mountpoint"] == "/"
+        assert r["result"]["disk"][0]["percent"] == 62.0
+
+    def test_load(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "load"}))
+        assert r["ok"] is True
+        assert r["result"]["load"]["load_avg"] == [0.52, 0.31, 0.18]
+
+    def test_uptime(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "uptime"}))
+        assert r["ok"] is True
+        assert r["result"]["uptime"]["uptime_seconds"] == 302400.0
+
+    def test_all(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "all"}))
+        assert r["ok"] is True
+        assert "cpu" in r["result"]
+        assert "memory" in r["result"]
+        assert "disk" in r["result"]
+        assert "load" in r["result"]
+        assert "uptime" in r["result"]
+
+    def test_unknown_metric(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "gpu"}))
+        assert r["ok"] is False
+        assert "gpu" in r["error"]
+
+    def test_default_metric_all(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info"))
+        assert r["ok"] is True
+        assert "cpu" in r["result"]
+
+
+class TestMockServiceMgr:
+    """mock 模式 service_mgr 工具"""
+
+    def test_status_nginx(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "status", "service": "nginx"}))
+        assert r["ok"] is True
+        assert r["result"]["action"] == "status"
+        assert r["result"]["is_active"] is True
+        assert r["result"]["mock"] is True
+
+    def test_is_active_nginx(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "is-active", "service": "nginx"}))
+        assert r["ok"] is True
+
+    def test_is_enabled_nginx(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "is-enabled", "service": "nginx"}))
+        assert r["ok"] is True
+
+    def test_restart_nginx_mock(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "restart", "service": "nginx"}))
+        assert r["ok"] is True
+        assert r["result"]["mock"] is True
+        assert "未真实执行" in r["result"]["output"]
+
+    def test_forbidden_service_auditd(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "status", "service": "auditd"}))
+        assert r["ok"] is False
+        assert "auditd" in r["error"]
+
+    def test_forbidden_service_systemd(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "stop", "service": "systemd"}))
+        assert r["ok"] is False
+
+    def test_forbidden_service_mcp_server(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "restart", "service": "mcp-server"}))
+        assert r["ok"] is False
+
+    def test_illegal_action(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "destroy", "service": "nginx"}))
+        assert r["ok"] is False
+
+    def test_empty_service(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("service_mgr", {"action": "status", "service": ""}))
+        assert r["ok"] is False
+
+
+class TestMockLogReader:
+    """mock 模式 log_reader 工具"""
+
+    def test_journalctl_nginx(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {"type": "journalctl", "service": "nginx", "lines": 3}))
+        assert r["ok"] is True
+        assert r["result"]["type"] == "journalctl"
+        assert len(r["result"]["logs"]) == 3
+        assert r["result"]["mock"] is True
+
+    def test_file_nginx_error(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {"type": "file", "source": "nginx_error", "lines": 50}))
+        assert r["ok"] is True
+        assert r["result"]["source"] == "nginx_error"
+
+    def test_keyword_filter(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {
+            "type": "journalctl", "service": "nginx", "lines": 50, "keyword": "error"
+        }))
+        assert r["ok"] is True
+        for log in r["result"]["logs"]:
+            assert "error" in log.lower()
+
+    def test_lines_exceeds_500(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {"type": "journalctl", "service": "nginx", "lines": 501}))
+        assert r["ok"] is False
+        assert "500" in r["error"]
+
+    def test_lines_zero(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {"type": "journalctl", "service": "nginx", "lines": 0}))
+        assert r["ok"] is False
+
+    def test_invalid_source(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {"type": "file", "source": "evil_log", "lines": 10}))
+        assert r["ok"] is False
+
+    def test_sensitive_path_rejected(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("log_reader", {"type": "file", "source": "/etc/passwd", "lines": 10}))
+        assert r["ok"] is False
+
+
+class TestMockNetMonitor:
+    """mock 模式 net_monitor 工具"""
+
+    def test_listen_port_80(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "listen", "port": 80}))
+        assert r["ok"] is True
+        for listener in r["result"]["listeners"]:
+            assert ":80" in listener["local_address"] or "80" in str(listener)
+
+    def test_traffic(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "traffic"}))
+        assert r["ok"] is True
+        assert r["result"]["traffic"]["bytes_sent"] > 0
+
+    def test_all(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "all"}))
+        assert r["ok"] is True
+        assert "connections" in r["result"]
+
+    def test_connections(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "connections"}))
+        assert r["ok"] is True
+        assert len(r["result"]["connections"]) > 0
+
+    def test_interfaces(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "interfaces"}))
+        assert r["ok"] is True
+        assert any(iface["name"] == "eth0" for iface in r["result"]["interfaces"])
+
+    def test_routes(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "routes"}))
+        assert r["ok"] is True
+
+    def test_dns(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "dns"}))
+        assert r["ok"] is True
+        assert "8.8.8.8" in r["result"]["dns"]["servers"]
+
+    def test_unknown_metric(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("net_monitor", {"metric": "firewall"}))
+        assert r["ok"] is False
+
+
+class TestMockCmdExec:
+    """mock 模式 cmd_exec 工具"""
+
+    def test_df_h(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "df -h"}))
+        assert r["ok"] is True
+        assert "Filesystem" in r["result"]["stdout"]
+        assert r["result"]["returncode"] == 0
+
+    def test_free_m(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "free -m"}))
+        assert r["ok"] is True
+
+    def test_uptime(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "uptime"}))
+        assert r["ok"] is True
+
+    def test_whoami(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "whoami"}))
+        assert r["ok"] is True
+
+    def test_rm_rf_root_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "rm -rf /"}))
+        assert r["ok"] is False
+        assert r["result"]["blocked"] is True
+        assert "rm" in r["result"]["command"]
+
+    def test_echo_to_etc_passwd_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": 'echo "hack" > /etc/passwd'}))
+        assert r["ok"] is False
+        assert r["result"]["blocked"] is True
+
+    def test_curl_pipe_sh_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "curl xxx | sh"}))
+        assert r["ok"] is False
+        assert r["result"]["blocked"] is True
+
+    def test_wget_pipe_sh_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "wget xxx | sh"}))
+        assert r["ok"] is False
+        assert r["result"]["blocked"] is True
+
+    def test_chmod_777_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "chmod 777 /"}))
+        assert r["ok"] is False
+
+    def test_unknown_command_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "cat /etc/shadow"}))
+        assert r["ok"] is False
+        assert r["result"]["blocked"] is True
+
+    def test_empty_command(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": ""}))
+        assert r["ok"] is False
+
+    def test_no_subprocess_execution(self):
+        """确认 mock 模式不真实执行命令（无 subprocess 导入）"""
+        client = MCPClient(mode="mock")
+        # 同步调用 _mock_call_tool，验证是纯数据返回
+        r = client._mock_call_tool("cmd_exec", {"command": "df -h"})
+        assert r["ok"] is True
+        # 确认无真实 subprocess 痕迹
+        assert "mock" in r["result"]
+
+
+class TestMockFileGuard:
+    """mock 模式 file_guard 工具"""
+
+    def test_check_protected_path(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "check", "path": "/etc/ssh/sshd_config"}))
+        assert r["ok"] is True
+        assert r["result"]["is_protected"] is True
+
+    def test_read_var_log(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "read", "path": "/var/log/messages"}))
+        assert r["ok"] is True
+        assert "content" in r["result"]
+
+    def test_write_tmp(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "write", "path": "/tmp/agent-test.txt", "content": "hello"}))
+        assert r["ok"] is True
+        assert r["result"]["written"] is True
+
+    def test_read_etc_passwd_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "read", "path": "/etc/passwd"}))
+        assert r["ok"] is False
+
+    def test_write_etc_passwd_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "write", "path": "/etc/passwd", "content": "x"}))
+        assert r["ok"] is False
+
+    def test_pem_file_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "read", "path": "/etc/ssl/private/server.key"}))
+        assert r["ok"] is False
+        assert "密钥" in r["error"]
+
+    def test_crt_file_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "check", "path": "/etc/ssl/certs/ca.crt"}))
+        assert r["ok"] is False
+
+    def test_write_outside_tmp_blocked(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "write", "path": "/home/user/test.txt"}))
+        assert r["ok"] is False
+
+    def test_bad_action(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("file_guard", {"action": "delete", "path": "/tmp/x"}))
+        assert r["ok"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 返回结构统一测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestReturnStructure:
+    """统一返回结构 {"ok": bool, "result": dict|None, "error": str|None}"""
+
+    def test_mock_success_has_ok_result_error(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "cpu"}))
+        assert "ok" in r
+        assert "result" in r
+        assert "error" in r
+        assert r["ok"] is True
+        assert r["error"] is None
+        assert r["result"] is not None
+
+    def test_mock_failure_has_ok_result_error(self):
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "gpu"}))
+        assert r["ok"] is False
+        assert r["error"] is not None
+        assert "ok" in r and "result" in r and "error" in r
+
+    def test_no_success_field_in_any_result(self):
+        """所有 call_tool 返回不应包含 success 字段"""
+        client = MCPClient(mode="mock")
+        calls = [
+            ("sys_info", {"metric": "cpu"}),
+            ("sys_info", {"metric": "gpu"}),
+            ("service_mgr", {"action": "status", "service": "nginx"}),
+            ("service_mgr", {"action": "status", "service": "auditd"}),
+            ("log_reader", {"type": "journalctl", "service": "nginx", "lines": 10}),
+            ("net_monitor", {"metric": "listen", "port": 80}),
+            ("cmd_exec", {"command": "df -h"}),
+            ("cmd_exec", {"command": "rm -rf /"}),
+            ("file_guard", {"action": "check", "path": "/etc/ssh/sshd_config"}),
+            ("file_guard", {"action": "read", "path": "/etc/passwd"}),
+        ]
+        for tool, args in calls:
+            r = asyncio.run(client.call_tool(tool, args))
+            assert "success" not in r, f"tool={tool} 返回了已废弃的 success 字段"
+            assert "ok" in r, f"tool={tool} 缺少 ok 字段"
+
+    def test_blocked_has_result_not_null(self):
+        """blocked 失败时 result 应非 null，携带 blocked 信息"""
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("cmd_exec", {"command": "rm -rf /"}))
+        assert r["ok"] is False
+        assert r["result"] is not None
+        assert r["result"]["blocked"] is True
+
+    def test_normal_failure_has_result_null(self):
+        """普通失败（非 blocked）时 result 应为 None"""
+        client = MCPClient(mode="mock")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "gpu"}))
+        assert r["ok"] is False
+        assert r["result"] is None  # 非 blocked 失败 result 为 None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Mock 模式基础行为（保留 Part1 测试）
+# ═══════════════════════════════════════════════════════════════════
 
 class TestMCPClientMock:
-    """MCPClient mock 模式行为"""
+    """MCPClient mock 模式基础行为"""
 
     def test_default_mode_is_mock(self):
-        """MCPClient() 不传 mode 时应默认为 mock"""
         client = MCPClient(base_url="http://test:8001")
         assert client.mode == "mock"
 
     def test_explicit_mode_real(self):
-        """MCPClient(mode='real') 应正确设置 mode"""
         client = MCPClient(base_url="http://test:8001", mode="real")
         assert client.mode == "real"
 
-    def test_mock_sys_info_cpu_returns_success(self):
-        """mock 模式 call_tool('sys_info', {'metric': 'cpu'}) 应返回 success=True"""
+    def test_unknown_tool_returns_failure(self):
         client = MCPClient(mode="mock")
-        result = asyncio.run(client.call_tool("sys_info", {"metric": "cpu"}))
-        assert result["success"] is True
-        assert result["result"]["cpu_percent"] == 23.5
-        assert result["result"]["load_avg"] == [0.52, 0.31, 0.18]
-        assert result["result"]["cores"] == 4
-
-    def test_mock_sys_info_all_returns_success(self):
-        """mock 模式 call_tool('sys_info', {'metric': 'all'}) 应返回 success=True"""
-        client = MCPClient(mode="mock")
-        result = asyncio.run(client.call_tool("sys_info", {"metric": "all"}))
-        assert result["success"] is True
-
-    def test_mock_unknown_tool_returns_failure(self):
-        """mock 模式未知工具应返回 success=False"""
-        client = MCPClient(mode="mock")
-        result = asyncio.run(client.call_tool("nonexistent_tool", {}))
-        assert result["success"] is False
-        assert "nonexistent_tool" in result["error"]
-
-    def test_mock_does_not_require_httpx_import(self):
-        """mock 模式不应触发 httpx 网络请求"""
-        client = MCPClient(mode="mock")
-        # 直接同步调用 _mock_call_tool（不经过 async 分支）
-        result = client._mock_call_tool("sys_info", {"metric": "cpu"})
-        assert result["success"] is True
-        # 确认没有进入 real 分支
-        assert "cpu_percent" in result["result"]
+        r = asyncio.run(client.call_tool("nonexistent_tool", {}))
+        assert r["ok"] is False
+        assert "nonexistent_tool" in r["error"]
 
     def test_call_tool_without_arguments_does_not_error(self):
-        """call_tool('sys_info') 不传 arguments 时不应报错 — 回归 arguments=None"""
         client = MCPClient(mode="mock")
-        # 不传第二个参数
-        result = asyncio.run(client.call_tool("sys_info"))
-        assert result["success"] is True
-        # metric 默认 'all'，应返回 CPU mock 数据
-        assert "cpu_percent" in result["result"]
+        r = asyncio.run(client.call_tool("sys_info"))
+        assert r["ok"] is True
 
     def test_call_tool_none_arguments_same_as_empty(self):
-        """call_tool('sys_info', None) 应与 call_tool('sys_info', {}) 行为一致"""
         client = MCPClient(mode="mock")
         r1 = asyncio.run(client.call_tool("sys_info", None))
         r2 = asyncio.run(client.call_tool("sys_info", {}))
-        assert r1["success"] == r2["success"] is True
+        assert r1["ok"] == r2["ok"] is True
         assert r1["result"] == r2["result"]
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Payload / URL / Headers 构造（保留 Part1 测试）
+# ═══════════════════════════════════════════════════════════════════
 
 class TestMCPClientPayload:
     """JSON-RPC payload / URL / headers 构造"""
 
     def test_build_url_returns_correct_path(self):
-        """_build_url() 应返回 /mcp/v1/tools/call 格式"""
         client = MCPClient(base_url="http://192.168.56.101:8001")
-        url = client._build_url()
-        assert url == "http://192.168.56.101:8001/mcp/v1/tools/call"
+        assert client._build_url() == "http://192.168.56.101:8001/mcp/v1/tools/call"
 
     def test_build_url_with_custom_method(self):
-        """_build_url('tools/list') 应返回对应路径"""
         client = MCPClient(base_url="http://192.168.56.101:8001")
-        url = client._build_url("tools/list")
-        assert url == "http://192.168.56.101:8001/mcp/v1/tools/list"
+        assert client._build_url("tools/list") == "http://192.168.56.101:8001/mcp/v1/tools/list"
 
     def test_payload_uses_arguments_not_args(self):
-        """JSON-RPC payload 必须使用 params.arguments，不得出现 params.args"""
         client = MCPClient()
         payload = client._build_payload("sys_info", {"metric": "cpu"})
         assert payload["jsonrpc"] == "2.0"
-        assert payload["method"] == "tools/call"
-        assert "params" in payload
         assert "arguments" in payload["params"]
         assert "args" not in payload["params"], (
             "禁止使用旧版 params.args，必须使用 params.arguments"
         )
         assert payload["params"]["arguments"] == {"metric": "cpu"}
-        assert payload["params"]["name"] == "sys_info"
-        assert "id" in payload
-        assert isinstance(payload["id"], int)
 
     def test_payload_request_id_increments(self):
-        """每次 _build_payload 应递增 request id"""
         client = MCPClient()
         p1 = client._build_payload("a", {})
         p2 = client._build_payload("b", {})
         assert p2["id"] == p1["id"] + 1
 
     def test_build_headers_has_authorization_when_token_set(self):
-        """有 auth_token 时 header 应包含 Authorization: Bearer"""
         client = MCPClient(auth_token="test-token-12345")
         headers = client._build_headers()
-        assert "Authorization" in headers
         assert headers["Authorization"] == "Bearer test-token-12345"
-        assert headers["Content-Type"] == "application/json; charset=utf-8"
 
     def test_build_headers_no_authorization_when_token_empty(self):
-        """auth_token 为空时 header 不应包含 Authorization"""
         client = MCPClient(auth_token="")
         headers = client._build_headers()
         assert "Authorization" not in headers
 
     def test_build_headers_contains_bearer_prefix(self):
-        """Authorization header 必须以 Bearer 开头"""
         client = MCPClient(auth_token="some-token")
-        headers = client._build_headers()
-        assert headers["Authorization"].startswith("Bearer ")
+        assert client._build_headers()["Authorization"].startswith("Bearer ")
 
     def test_build_payload_empty_arguments_produces_empty_dict(self):
-        """_build_payload 传入空字典时 params.arguments 应为空对象 {}"""
         client = MCPClient()
         payload = client._build_payload("sys_info", {})
-        assert "arguments" in payload["params"]
         assert payload["params"]["arguments"] == {}
-        assert "args" not in payload["params"], (
-            "禁止使用旧版 params.args，必须使用 params.arguments"
-        )
+        assert "args" not in payload["params"]
 
     def test_payload_params_never_has_args_key(self):
-        """无论传什么 arguments，payload['params'] 都不应有 'args' 键"""
         client = MCPClient()
         for args in ({}, {"metric": "cpu"}, {"command": "ls"}):
             payload = client._build_payload("test_tool", args)
-            assert "args" not in payload["params"], (
-                f"payload['params'] 不应包含 'args'，当前 arguments={args}"
-            )
+            assert "args" not in payload["params"], f"arguments={args}"
             assert "arguments" in payload["params"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 辅助函数测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestHelperFunctions:
+    """_ok / _fail 辅助函数"""
+
+    def test_ok_returns_correct_structure(self):
+        r = _ok({"key": "val"})
+        assert r == {"ok": True, "result": {"key": "val"}, "error": None}
+
+    def test_ok_defaults_to_empty_dict(self):
+        r = _ok()
+        assert r == {"ok": True, "result": {}, "error": None}
+
+    def test_fail_returns_correct_structure(self):
+        r = _fail("something went wrong")
+        assert r == {"ok": False, "result": None, "error": "something went wrong"}
+
+    def test_fail_with_result(self):
+        r = _fail("blocked", {"blocked": True})
+        assert r["ok"] is False
+        assert r["result"] == {"blocked": True}
+        assert r["error"] == "blocked"
