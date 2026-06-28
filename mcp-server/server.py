@@ -424,15 +424,20 @@ def restart_server(new_host=None, new_port=None):
     )
 
     # 1. 创建新 socket 并绑定
+    #    设置 SO_REUSEADDR + SO_REUSEPORT，允许新旧 socket 同时监听同一端口，
+    #    从而避免"先关旧 socket 再绑新 socket"导致的服务中断窗口。
     import socket
     new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
+        new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass  # 非 Linux 平台（macOS/Windows）不支持 SO_REUSEPORT，静默忽略
+
+    try:
         new_sock.bind((target_host, target_port))
         new_sock.listen(5)
     except OSError as e:
-        # 如果失败且目标地址与旧地址冲突（如只改 host 不改 port），
-        # 尝试先关闭旧 socket 再重新绑定
         if old_host == target_host and old_port == target_port:
             new_sock.close()
             logger.error("[Server] 目标地址与当前相同，无需变更: %s:%d", target_host, target_port)
@@ -441,12 +446,16 @@ def restart_server(new_host=None, new_port=None):
                 "current": {"host": old_host, "port": old_port},
             }
         if old_port == target_port:
-            logger.warning("[Server] 端口冲突（%s:%d），尝试先关闭旧 socket 后重新绑定...",
-                          target_host, target_port)
+            # SO_REUSEPORT 未能生效（非 Linux 平台降级路径）：
+            # 必须先关闭旧 socket 释放端口，再绑定新 socket。
+            # 为最小化服务中断，关闭与绑定之间不做 sleep。
+            logger.warning(
+                "[Server] 端口冲突 %s:%d，SO_REUSEPORT 不可用，关闭旧 socket 后重试绑定...",
+                target_host, target_port,
+            )
             try:
                 old_sock = server_instance.socket
                 old_sock.close()
-                time.sleep(0.5)
                 new_sock.bind((target_host, target_port))
                 new_sock.listen(5)
             except OSError as e2:
@@ -460,8 +469,11 @@ def restart_server(new_host=None, new_port=None):
                     restore_sock.listen(5)
                     server_instance.socket = restore_sock
                     logger.info("[Server] 已恢复旧监听 %s:%d", old_host, old_port)
-                except Exception:
-                    logger.critical("[Server] 无法恢复监听！服务可能不可用！")
+                except Exception as restore_err:
+                    logger.critical(
+                        "[Server] 无法恢复监听！旧地址 %s:%d，错误: %s",
+                        old_host, old_port, restore_err,
+                    )
                 return {
                     "error": f"端口绑定失败: {e2}",
                     "current": {"host": old_host, "port": old_port},
@@ -485,10 +497,6 @@ def restart_server(new_host=None, new_port=None):
         old_sock = server_instance.socket
         server_instance.socket = new_sock
         server_instance.server_address = (target_host, target_port)
-        # 关闭旧 socket
-        old_sock.close()
-        logger.info("[Server] socket 已替换: %s:%d -> %s:%d",
-                     old_host, old_port, target_host, target_port)
     except Exception as e:
         new_sock.close()
         logger.exception("[Server] socket 替换失败: %s", e)
@@ -496,6 +504,16 @@ def restart_server(new_host=None, new_port=None):
             "error": f"socket 替换失败: {e}",
             "current": {"host": old_host, "port": old_port},
         }
+
+    # 安全关闭旧 socket（此时 new_sock 已生效，关闭旧 socket
+    # 即使失败也不影响新 socket 正常工作）
+    try:
+        old_sock.close()
+    except Exception:
+        logger.warning("[Server] 关闭旧 socket 时出现异常（不影响新 socket）", exc_info=True)
+
+    logger.info("[Server] socket 已替换: %s:%d -> %s:%d",
+                 old_host, old_port, target_host, target_port)
 
     # 更新 mcp_self_monitor 中的 server_instance 引用
     mcp_self_monitor.server_instance = server_instance
@@ -513,9 +531,9 @@ def main():
     global logger, server_start_time
     logger = setup_logging()
 
-    _init_self_monitor()
-
     server_start_time = time.time()
+
+    _init_self_monitor()
 
     logger.info("=" * 60)
     logger.info("MCP Server for Kylin OS Agent 启动中...")
