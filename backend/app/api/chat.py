@@ -4,7 +4,9 @@
 前端消息类型：chat / confirm / ping
 后端消息类型：status / chunk / risk_alert / tool_call / error / done / pong
 
-当前为 Day2 Mock 流程，不接真实 LLM 和 MCP Server。
+支持双模式：
+  - USE_REAL_LLM=true   → 真实 DeepSeek + MCP 链路（需配置 API Key 和 MCP Server）
+  - USE_REAL_LLM=false  → Mock 编排器（关键词匹配，仅供前端联调）
 """
 import json
 import logging
@@ -13,7 +15,10 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from config import settings
 from app.audit.logger import log_chain
+from app.llm.router import route_request
+from app.mcp.executor import Executor
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import mock_orchestrate
 from app.services.safety_guard import SafetyGuard
@@ -110,7 +115,10 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
             user_input = popped.get("user_input", "")
             trace_id = popped.get("trace_id", str(uuid.uuid4())[:16])
             risk_level = popped.get("risk_level", "medium")
-            await _stream_orchestrator(websocket, user_input, trace_id, risk_level)
+            if settings.USE_REAL_LLM:
+                await _real_orchestrate(websocket, session_id, user_input, trace_id, risk_level)
+            else:
+                await _stream_orchestrator(websocket, user_input, trace_id, risk_level)
             return
 
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
@@ -170,8 +178,11 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
         )
         return
 
-    # 3. 低危：Mock 编排流式返回
-    await _stream_orchestrator(websocket, user_input, trace_id, safety["risk_level"])
+    # 3. 低危：根据配置选择链路
+    if settings.USE_REAL_LLM:
+        await _real_orchestrate(websocket, session_id, user_input, trace_id, safety["risk_level"])
+    else:
+        await _stream_orchestrator(websocket, user_input, trace_id, safety["risk_level"])
 
 
 async def _stream_orchestrator(
@@ -198,6 +209,95 @@ async def _stream_orchestrator(
             response_text_parts.append(msg["content"])
 
     final_response = "".join(response_text_parts) if response_text_parts else "Mock 流程已完成"
+
+    # 记录审计
+    await log_chain(
+        trace_id=trace_id,
+        user_input=user_input,
+        risk_level=risk_level,
+        final_response=final_response,
+    )
+
+
+async def _real_orchestrate(
+    websocket: WebSocket, session_id: str, user_input: str, trace_id: str, risk_level: str = "low"
+) -> None:
+    """调用真实 DeepSeek + MCP 链路并流式返回结果
+
+    流程：
+    1. LLMRouter 解析意图 → tool_call 参数
+    2. 调用 MCP Executor 执行工具
+    3. 流式返回 status / chunk / tool_call / done 消息
+    """
+    response_text_parts: list[str] = []
+
+    await _send(websocket, "status", content="正在解析您的意图...", trace_id=trace_id)
+
+    # 1. 意图解析
+    try:
+        route_result = await route_request(user_input)
+    except Exception as e:
+        logger.exception(f"[Real] 意图解析失败: {e}")
+        await _send(websocket, "error", message="意图解析失败，请稍后重试", trace_id=trace_id)
+        await _send(websocket, "done", trace_id=trace_id)
+        await log_chain(
+            trace_id=trace_id,
+            user_input=user_input,
+            risk_level=risk_level,
+            final_response="意图解析失败",
+        )
+        return
+
+    action = route_result.get("action", "")
+
+    if action == "tool_call":
+        data = route_result.get("data", {})
+        tool = data.get("tool", "")
+        args = data.get("args", {})
+
+        await _send(websocket, "status", content=f"正在执行 {tool}...", trace_id=trace_id)
+
+        # 2. 执行 MCP 工具调用
+        executor = Executor()
+        try:
+            result = await executor.execute(tool, args)
+        except Exception as e:
+            logger.exception(f"[Real] MCP 执行失败: {e}")
+            await _send(websocket, "tool_call", tool=tool, params=args, result={"error": str(e)}, trace_id=trace_id)
+            await _send(websocket, "error", message=f"工具 {tool} 执行失败", trace_id=trace_id)
+            await _send(websocket, "done", trace_id=trace_id)
+            await log_chain(
+                trace_id=trace_id,
+                user_input=user_input,
+                risk_level=risk_level,
+                final_response=f"工具 {tool} 执行失败: {e}",
+            )
+            return
+
+        # 3. 发送 tool_call 结果
+        await _send(websocket, "tool_call", tool=tool, tool_call_id=f"tc_{uuid.uuid4().hex[:8]}",
+                    params=args, result=result, trace_id=trace_id)
+        content = f"工具 {tool} 执行完成。"
+        await _send(websocket, "chunk", content=content, trace_id=trace_id)
+        response_text_parts.append(content)
+
+    elif action == "direct_reply":
+        content = data.get("reply", "") if isinstance(data, dict) else str(data)
+        await _send(websocket, "chunk", content=content, trace_id=trace_id)
+        response_text_parts.append(content)
+
+    elif action == "root_cause":
+        await _send(websocket, "status", content="正在进行根因分析...", trace_id=trace_id)
+        data = route_result.get("data", {})
+        content = data.get("query", user_input)
+        await _send(websocket, "chunk", content=f"根因分析结果: {content[:200]}", trace_id=trace_id)
+        response_text_parts.append(content[:200])
+    else:
+        await _send(websocket, "chunk", content=f"已收到: {user_input}", trace_id=trace_id)
+        response_text_parts.append(user_input)
+
+    await _send(websocket, "done", trace_id=trace_id)
+    final_response = "".join(response_text_parts) if response_text_parts else "处理完成"
 
     # 记录审计
     await log_chain(

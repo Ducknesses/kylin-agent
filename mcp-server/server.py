@@ -6,6 +6,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import time
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -14,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
 from plugins import sys_info, service_mgr, log_reader, net_monitor, cmd_exec, file_guard
+from plugins import mcp_self_monitor
 
 # ============================================================
 # 工具注册表
@@ -25,6 +27,7 @@ TOOLS = {
     "net_monitor": net_monitor.handle,
     "cmd_exec": cmd_exec.handle,
     "file_guard": file_guard.handle,
+    "mcp_self_monitor": mcp_self_monitor.handle,
 }
 
 # JSON-RPC 2.0 标准错误码
@@ -182,11 +185,16 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
     method: "tools/call" | "tools/list" | "ping"
     params: {"name": "sys_info", "arguments": {"metric": "cpu"}}  (tools/call)
     """
+    # 请求统计
+    mcp_self_monitor.request_stats["total"] += 1
+
     # 方法路由
     if method == "ping":
+        mcp_self_monitor.request_stats["success"] += 1
         return make_jsonrpc_response({"pong": True, "version": "1.0.0", "tools_count": len(TOOLS)}, req_id)
 
     if method == "tools/list":
+        mcp_self_monitor.request_stats["success"] += 1
         return handle_tools_list(req_id)
 
     if method == "tools/call":
@@ -194,10 +202,12 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
         arguments = params.get("arguments", {})
 
         if not tool_name:
+            mcp_self_monitor.request_stats["errors"] += 1
             return make_jsonrpc_error(*JSONRPC_ERRORS["INVALID_PARAMS"], req_id,
                                       extra={"detail": "缺少参数: name"})
 
         if tool_name not in TOOLS:
+            mcp_self_monitor.request_stats["errors"] += 1
             return make_jsonrpc_error(*JSONRPC_ERRORS["METHOD_NOT_FOUND"], req_id,
                                       extra={"detail": f"未知工具: {tool_name}", "available": list(TOOLS.keys())})
 
@@ -205,14 +215,17 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
         logger.info("[Server] 调用工具: %s, 参数: %s", tool_name, arguments)
         try:
             result = TOOLS[tool_name](arguments)
+            mcp_self_monitor.request_stats["success"] += 1
             return make_jsonrpc_response(result, req_id)
         except Exception as e:
+            mcp_self_monitor.request_stats["errors"] += 1
             tb = traceback.format_exc()
             logger.error("[Server] 工具 %s 执行异常:\n%s", tool_name, tb)
             return make_jsonrpc_error(*JSONRPC_ERRORS["INTERNAL_ERROR"], req_id,
                                       extra={"detail": str(e), "tool": tool_name})
 
     # 未知方法
+    mcp_self_monitor.request_stats["errors"] += 1
     return make_jsonrpc_error(*JSONRPC_ERRORS["METHOD_NOT_FOUND"], req_id,
                               extra={"detail": f"未知方法: {method}"})
 
@@ -365,21 +378,160 @@ class MCPHandler(BaseHTTPRequestHandler):
 
 def create_server():
     """创建并配置 HTTP Server"""
+    global server_instance
     server = HTTPServer((config.HOST, config.PORT), MCPHandler)
 
     # 设置超时
     server.timeout = 5
+    server_instance = server
 
     return server
 
 
+# ============================================================
+# 模块级全局变量（供 mcp_self_monitor 插件访问）
+# ============================================================
+server_instance = None   # 当前 HTTPServer 实例
+server_start_time = 0.0  # time.time() 启动时间戳
+
 logger = None  # 模块级，setup_logging() 后设置
+
+
+def restart_server(new_host=None, new_port=None):
+    """热重启 HTTP Server，动态变更监听地址和端口
+
+    在 Python HTTPServer（单线程阻塞）架构下，采用方式：
+      1. 先创建新 socket 并绑定新地址（验证端口可用）
+      2. 更新配置
+      3. 将新 socket 塞入旧 server 实例（替换 server.socket）
+      4. 旧 socket 关闭
+      这样 serve_forever 继续运行，但使用新的 socket。
+
+    替代方案（如果 socket 替换失败）：
+      - 记录变更信息，下一次重启进程时生效
+    """
+    global server_instance
+
+    old_host = config.HOST
+    old_port = config.PORT
+
+    target_host = new_host if new_host is not None else old_host
+    target_port = new_port if new_port is not None else old_port
+
+    logger.info(
+        "[Server] 正在热重启 %s:%d -> %s:%d ...",
+        old_host, old_port, target_host, target_port,
+    )
+
+    # 1. 创建新 socket 并绑定
+    #    设置 SO_REUSEADDR + SO_REUSEPORT，允许新旧 socket 同时监听同一端口，
+    #    从而避免"先关旧 socket 再绑新 socket"导致的服务中断窗口。
+    import socket
+    new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass  # 非 Linux 平台（macOS/Windows）不支持 SO_REUSEPORT，静默忽略
+
+    try:
+        new_sock.bind((target_host, target_port))
+        new_sock.listen(5)
+    except OSError as e:
+        if old_host == target_host and old_port == target_port:
+            new_sock.close()
+            logger.error("[Server] 目标地址与当前相同，无需变更: %s:%d", target_host, target_port)
+            return {
+                "error": f"目标地址与当前相同: {target_host}:{target_port}",
+                "current": {"host": old_host, "port": old_port},
+            }
+        if old_port == target_port:
+            # SO_REUSEPORT 未能生效（非 Linux 平台降级路径）：
+            # 必须先关闭旧 socket 释放端口，再绑定新 socket。
+            # 为最小化服务中断，关闭与绑定之间不做 sleep。
+            logger.warning(
+                "[Server] 端口冲突 %s:%d，SO_REUSEPORT 不可用，关闭旧 socket 后重试绑定...",
+                target_host, target_port,
+            )
+            try:
+                old_sock = server_instance.socket
+                old_sock.close()
+                new_sock.bind((target_host, target_port))
+                new_sock.listen(5)
+            except OSError as e2:
+                new_sock.close()
+                logger.error("[Server] 重试绑定仍失败 %s:%d - %s", target_host, target_port, e2)
+                # 恢复旧 socket 绑定（重新绑定旧端口）
+                try:
+                    restore_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    restore_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    restore_sock.bind((old_host, old_port))
+                    restore_sock.listen(5)
+                    server_instance.socket = restore_sock
+                    logger.info("[Server] 已恢复旧监听 %s:%d", old_host, old_port)
+                except Exception as restore_err:
+                    logger.critical(
+                        "[Server] 无法恢复监听！旧地址 %s:%d，错误: %s",
+                        old_host, old_port, restore_err,
+                    )
+                return {
+                    "error": f"端口绑定失败: {e2}",
+                    "current": {"host": old_host, "port": old_port},
+                }
+        else:
+            new_sock.close()
+            logger.error("[Server] 端口绑定失败 %s:%d - %s", target_host, target_port, e)
+            return {
+                "error": f"端口绑定失败: {e}",
+                "current": {"host": old_host, "port": old_port},
+            }
+
+    # 2. 更新配置
+    if new_host is not None:
+        config.update_runtime("HOST", target_host)
+    if new_port is not None:
+        config.update_runtime("PORT", target_port)
+
+    # 3. 替换 server 的 socket
+    try:
+        old_sock = server_instance.socket
+        server_instance.socket = new_sock
+        server_instance.server_address = (target_host, target_port)
+    except Exception as e:
+        new_sock.close()
+        logger.exception("[Server] socket 替换失败: %s", e)
+        return {
+            "error": f"socket 替换失败: {e}",
+            "current": {"host": old_host, "port": old_port},
+        }
+
+    # 安全关闭旧 socket（此时 new_sock 已生效，关闭旧 socket
+    # 即使失败也不影响新 socket 正常工作）
+    try:
+        old_sock.close()
+    except Exception:
+        logger.warning("[Server] 关闭旧 socket 时出现异常（不影响新 socket）", exc_info=True)
+
+    logger.info("[Server] socket 已替换: %s:%d -> %s:%d",
+                 old_host, old_port, target_host, target_port)
+
+    # 更新 mcp_self_monitor 中的 server_instance 引用
+    mcp_self_monitor.server_instance = server_instance
+
+    return {
+        "success": True,
+        "previous": {"host": old_host, "port": old_port},
+        "current": {"host": target_host, "port": target_port},
+        "message": f"监听地址已从 {old_host}:{old_port} 变更为 {target_host}:{target_port}",
+    }
 
 
 def main():
     """启动 MCP Server"""
-    global logger
+    global logger, server_start_time
     logger = setup_logging()
+
+    server_start_time = time.time()
 
     logger.info("=" * 60)
     logger.info("MCP Server for Kylin OS Agent 启动中...")
@@ -388,8 +540,9 @@ def main():
     logger.info("日志文件: %s", config.LOG_FILE)
     logger.info("=" * 60)
 
-    # 优雅退出处理
     server = create_server()
+
+    _init_self_monitor()
 
     def shutdown_handler(signum, frame):
         logger.info("收到信号 %s，正在关闭服务器...", signum)
@@ -410,6 +563,19 @@ def main():
     finally:
         server.server_close()
         logger.info("MCP Server 已关闭")
+
+
+def _init_self_monitor():
+    """初始化 mcp_self_monitor 插件的内部引用"""
+    mcp_self_monitor.server_instance = server_instance
+    mcp_self_monitor.server_start_time = server_start_time
+    mcp_self_monitor.request_stats = {
+        "total": 0,
+        "success": 0,
+        "errors": 0,
+        "last_reset": time.time(),
+    }
+    mcp_self_monitor.restart_server_cb = restart_server
 
 
 if __name__ == "__main__":

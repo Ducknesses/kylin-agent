@@ -3,11 +3,25 @@ import os
 
 
 class Config:
-    """全局配置，优先从环境变量读取"""
+    """全局配置，优先从环境变量读取。支持运行时动态更新部分字段。"""
 
     # HTTP 服务
     HOST: str = os.getenv("MCP_HOST", "127.0.0.1")
     PORT: int = int(os.getenv("MCP_PORT", "8001"))
+
+    def update_runtime(self, key: str, value):
+        """
+        运行时动态更新配置项。
+        当前仅支持更新 HOST 和 PORT。
+        更新后返回 True，如果 key 不支持动态更新则返回 False。
+        """
+        if key == "HOST":
+            self.HOST = str(value)
+            return True
+        elif key == "PORT":
+            self.PORT = int(value)
+            return True
+        return False
 
     # Bearer Token 认证
     API_TOKEN: str = os.getenv("API_TOKEN", "change-me-in-production")
