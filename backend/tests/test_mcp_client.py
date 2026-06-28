@@ -9,6 +9,7 @@
 Real 模式测试使用 monkeypatch 模拟 httpx.AsyncClient.post，无需真实 MCP Server。
 """
 import asyncio
+import os
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -1211,3 +1212,225 @@ class TestRealHelpers:
         assert MCP._is_blocked_result({"cpu": 50}) is False
         assert MCP._is_blocked_result("not dict") is False
         assert MCP._is_blocked_result(None) is False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 接口一致性防回归测试（Day4-Part4 收口）
+# ═══════════════════════════════════════════════════════════════════
+
+class TestAntiRegressionProductionCode:
+    """扫描 production 代码，确认无旧字段回退"""
+
+    _FORBIDDEN_PATTERNS = [
+        # 旧 success 字段
+        ('"success"', "禁止在 production 代码中使用旧 success 字段"),
+        ("'success'", "禁止在 production 代码中使用旧 success 字段"),
+        # 旧 get("success") 调用（注意括号变体）
+        ('get("success"', "禁止在 production 代码中调用 get(\"success\")"),
+        ("get('success'", "禁止在 production 代码中调用 get('success')"),
+        # 旧 params.args
+        ('"args"', "禁止在 JSON-RPC payload 中使用旧的 params.args"),
+        ("'args'", "禁止在 JSON-RPC payload 中使用旧的 params.args"),
+        # 旧路径
+        ('/rpc', "禁止使用旧 MCP 路径 /rpc"),
+    ]
+
+    def test_production_code_has_no_forbidden_patterns(self):
+        """扫描 backend/app/mcp/ 下所有 .py 文件，断言不存在旧字段"""
+        import os
+
+        app_dir = os.path.join(os.path.dirname(__file__), "..", "app", "mcp")
+        app_dir = os.path.abspath(app_dir)
+
+        violations = []
+        for root, _dirs, files in os.walk(app_dir):
+            # 跳过 __pycache__
+            if "__pycache__" in root:
+                continue
+            for fname in files:
+                if not fname.endswith(".py"):
+                    continue
+                fpath = os.path.join(root, fname)
+                with open(fpath, encoding="utf-8") as f:
+                    lines = f.readlines()
+                for lineno, line in enumerate(lines, 1):
+                    for pattern, msg in self._FORBIDDEN_PATTERNS:
+                        if pattern == '"args"' or pattern == "'args'":
+                            # args 在注释/测试说明中允许，检查是否在有 payload 上下文的行
+                            if pattern in line:
+                                stripped = line.strip()
+                                # 允许注释、测试说明、docstring
+                                if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
+                                    continue
+                                if "不使用" in stripped or "禁止" in stripped or "not in payload" in stripped or "不应包含" in stripped:
+                                    continue
+                                # 检查是否在 payload 构造上下文中（不含 "not" 的 args 引用）
+                                if '"arguments"' in line or "'arguments'" in line:
+                                    continue
+                                violations.append(
+                                    f"{os.path.relpath(fpath)}:{lineno}: {msg}\n  → {stripped[:120]}"
+                                )
+                            continue
+
+                        if pattern in line:
+                            stripped = line.strip()
+                            # 跳过纯注释行
+                            if stripped.startswith("#"):
+                                continue
+                            # 跳过文档中的示例代码
+                            if pattern == '"success"' and "不是" in stripped:
+                                continue
+                            if pattern in ('"success"', "'success'") and ("assert" in stripped and "not in" in stripped):
+                                continue
+                            violations.append(
+                                f"{os.path.relpath(fpath)}:{lineno}: {msg}\n  → {stripped[:120]}"
+                            )
+
+        assert not violations, (
+            f"发现 {len(violations)} 处禁止模式:\n" + "\n".join(violations)
+        )
+
+    def test_payload_method_is_tools_call(self):
+        """_build_payload method 字段必须是 tools/call"""
+        client = MCPClient()
+        payload = client._build_payload("sys_info", {"metric": "cpu"})
+        assert payload["method"] == "tools/call"
+        assert payload["jsonrpc"] == "2.0"
+
+    def test_url_ends_with_mcp_v1_tools_call(self):
+        """_build_url 默认必须以 /mcp/v1/tools/call 结尾"""
+        client = MCPClient(base_url="http://test:8001")
+        url = client._build_url()
+        assert url.endswith("/mcp/v1/tools/call"), f"URL={url}"
+
+
+class TestSensitiveInfoNotLeaked:
+    """确认错误消息中不泄露敏感信息"""
+
+    def test_connect_error_message_has_no_token_or_url(self):
+        """ConnectError 错误消息不应包含 Bearer、Authorization 或 auth_token 值"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("refused")):
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        error = r["error"]
+        # 不能出现敏感信息
+        assert "Bearer" not in error
+        assert "Authorization" not in error
+        # 不能泄露 auth_token 值
+        assert "tk" not in error
+
+    def test_timeout_message_has_no_sensitive_info(self):
+        """Timeout 错误消息不应包含 Bearer 或 auth_token 值"""
+        client = MCPClient(mode="real", auth_token="secret-123")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", side_effect=httpx.TimeoutException("timeout")):
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        error = r["error"]
+        assert "Bearer" not in error
+        assert "secret" not in error
+
+    def test_http_error_messages_are_sanitized(self):
+        """所有 HTTP 错误分类消息均不包含 Bearer 或 Authorization"""
+        from app.mcp.client import MCPClient as MCP
+        for code in (401, 403, 404, 500, 503):
+            r = MCP._handle_http_error(code)
+            assert "Bearer" not in r["error"]
+            assert "Authorization" not in r["error"]
+
+    def test_jsonrpc_error_messages_are_sanitized(self):
+        """所有 JSON-RPC 错误分类消息均不包含 Bearer 或敏感前缀"""
+        from app.mcp.client import MCPClient as MCP
+        for code in (-32700, -32600, -32601, -32602, -32603, -32000, -32001):
+            r = MCP._handle_jsonrpc_error({"code": code})
+            assert "Bearer" not in r["error"]
+            assert "Authorization" not in r["error"]
+            # "Token" 作为分类名（如 "MCP Token 认证失败"）是合法的脱敏消息
+
+    def test_logger_does_not_print_authorization(self):
+        """MCPClient 源代码中 logger 调用不应包含 Authorization 关键词"""
+        import os
+        client_path = os.path.join(
+            os.path.dirname(__file__), "..", "app", "mcp", "client.py"
+        )
+        client_path = os.path.abspath(client_path)
+        with open(client_path, encoding="utf-8") as f:
+            content = f.read()
+        # 查找同时包含 "logger" 和 "Authorization" 的行
+        lines = content.split("\n")
+        for lineno, line in enumerate(lines, 1):
+            if "logger" in line and "Authorization" in line:
+                # 允许 docstring/comment 中提到 Authorization
+                stripped = line.strip()
+                if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
+                    continue
+                assert False, (
+                    f"client.py:{lineno}: logger 调用中包含 Authorization\n  → {stripped[:120]}"
+                )
+
+
+class FakeMCPClient:
+    """避免 Executor 测试真实连接 MCPClient（无副作用 stub）"""
+
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, tool_name, arguments):
+        self.calls.append((tool_name, arguments))
+        return {"ok": True, "result": {"mock": True}, "error": None}
+
+
+class TestExecutorBasic:
+    """Executor 调度入口基础功能测试"""
+
+    def test_executor_has_execute_method(self):
+        """修复后 Executor 实例应有可调用的 execute 方法"""
+        from app.mcp.executor import Executor
+        executor = Executor(client=FakeMCPClient())
+        assert hasattr(executor, "execute"), "Executor 缺少 execute 方法（缩进 bug 未修复？）"
+        assert callable(executor.execute)
+
+    def test_executor_unknown_tool_returns_ok_false(self):
+        """非法工具返回 ok=false，且不含 success 字段"""
+        from app.mcp.executor import Executor
+
+        executor = Executor(client=FakeMCPClient())
+        result = asyncio.run(executor.execute("unknown_tool", {}))
+
+        assert result["ok"] is False
+        assert result["result"] is None
+        assert "未知工具" in result["error"]
+        assert "success" not in result
+
+    def test_executor_forwards_valid_tool_and_normalizes_arguments(self):
+        """有效工具转发给 MCPClient，arguments=None 归一化为 {}"""
+        from app.mcp.executor import Executor
+
+        client = FakeMCPClient()
+        executor = Executor(client=client)
+
+        result = asyncio.run(executor.execute("sys_info"))
+
+        assert result["ok"] is True
+        assert result["result"] == {"mock": True}
+        assert result["error"] is None
+        assert "success" not in result
+        assert client.calls == [("sys_info", {})]
+
+    def test_executor_import_ok(self):
+        """Executor 模块可正常导入"""
+        from app.mcp.executor import Executor  # noqa: F811
+        assert Executor is not None
+
+    def test_executor_instantiation_default(self):
+        """Executor 默认构造不报错（使用真实 MCPClient mock 模式）"""
+        from app.mcp.executor import Executor
+        ex = Executor()
+        assert ex.client is not None
+        assert ex.client.mode == "mock"

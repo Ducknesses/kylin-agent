@@ -25,7 +25,7 @@ class Executor:
     def __init__(self, client: MCPClient | None = None):
         self.client = client or MCPClient()
 
-        async def execute(
+    async def execute(
             self,
             tool_name: str,
             arguments: Dict | None = None,
