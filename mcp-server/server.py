@@ -533,8 +533,6 @@ def main():
 
     server_start_time = time.time()
 
-    _init_self_monitor()
-
     logger.info("=" * 60)
     logger.info("MCP Server for Kylin OS Agent 启动中...")
     logger.info("监听地址: %s:%d", config.HOST, config.PORT)
@@ -543,6 +541,8 @@ def main():
     logger.info("=" * 60)
 
     server = create_server()
+
+    _init_self_monitor()
 
     def shutdown_handler(signum, frame):
         logger.info("收到信号 %s，正在关闭服务器...", signum)
