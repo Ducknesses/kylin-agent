@@ -11,6 +11,8 @@ Real 模式测试使用 monkeypatch 模拟 httpx.AsyncClient.post，无需真实
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from app.mcp.client import MCPClient, _ok, _fail
 
 
@@ -40,7 +42,7 @@ class TestMCPClientBlocked:
 
     def test_call_tool_treats_blocked_result_as_failure(self):
         """MCP Server 返回 HTTP 200 + result.blocked=true → 应返回 ok=false"""
-        client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
 
         blocked_response = {
             "jsonrpc": "2.0",
@@ -62,13 +64,13 @@ class TestMCPClientBlocked:
 
         assert result["ok"] is False
         assert result["result"]["blocked"] is True
-        assert "命令不在白名单中" in str(result["error"])
+        assert result["error"] == "命令被安全策略拦截"
         assert result["result"]["command"] == "rm -rf /tmp/*"
         assert result["result"]["reason"] == "命令不在白名单中: rm -rf /tmp/*"
 
     def test_call_tool_keeps_normal_result_successful(self):
         """MCP Server 正常返回（无 blocked）→ 应返回 ok=true"""
-        client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
 
         normal_response = {
             "jsonrpc": "2.0",
@@ -95,7 +97,7 @@ class TestMCPClientBlocked:
 
     def test_call_tool_handles_jsonrpc_error(self):
         """MCP Server 返回 JSON-RPC error → 应返回 ok=false"""
-        client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
 
         error_response = {
             "jsonrpc": "2.0",
@@ -112,12 +114,11 @@ class TestMCPClientBlocked:
         result = asyncio.run(_run())
 
         assert result["ok"] is False
-        assert result["error"] is not None
-        assert "Method not found" in result["error"]
+        assert result["error"] == "MCP 方法或工具不存在"
 
     def test_call_tool_blocked_without_reason_uses_default(self):
         """MCP Server blocked 但未提供 reason → 应使用默认错误消息"""
-        client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
 
         blocked_no_reason = {
             "jsonrpc": "2.0",
@@ -137,11 +138,11 @@ class TestMCPClientBlocked:
 
         assert result["ok"] is False
         assert result["result"]["blocked"] is True
-        assert result["error"] == "MCP 工具调用被安全策略拦截"
+        assert result["error"] == "命令被安全策略拦截"
 
     def test_call_tool_blocked_result_preserves_full_mcp_response(self):
         """blocked 响应的 result 字段应完整保留 MCP Server 返回的所有信息"""
-        client = MCPClient(base_url="http://mock-mcp:8001", mode="real")
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
 
         full_blocked = {
             "jsonrpc": "2.0",
@@ -165,7 +166,7 @@ class TestMCPClientBlocked:
 
         assert result["ok"] is False
         assert result["result"]["blocked"] is True
-        assert result["error"] == "管道执行被拦截"
+        assert result["error"] == "命令被安全策略拦截"
         assert result["result"]["policy"] == "no_pipe_exec"
         assert result["result"]["severity"] == "high"
 
@@ -695,3 +696,518 @@ class TestHelperFunctions:
         assert r["ok"] is False
         assert r["result"] == {"blocked": True}
         assert r["error"] == "blocked"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Real 模式错误处理：HTTP / JSON-RPC / 异常分类
+# ═══════════════════════════════════════════════════════════════════
+
+class FakeResponseWithBadJson:
+    """模拟 json() 解析失败的 httpx.Response"""
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+    def json(self):
+        raise ValueError("模拟 JSON 解析失败")
+
+    def raise_for_status(self):
+        pass
+
+
+class TestMCPClientRealErrors:
+    """Real 模式完整错误分类：token / timeout / connect / HTTP / JSON-RPC / blocked"""
+
+    # ── Token 缺失 ────────────────────────────────────────────────
+
+    def test_real_mode_missing_token(self):
+        """mode=real 且 token 为空 → MCP 认证令牌未配置"""
+        client = MCPClient(base_url="http://test:8001", mode="real", auth_token="")
+        r = asyncio.run(client.call_tool("sys_info", {"metric": "cpu"}))
+        assert r["ok"] is False
+        assert r["error"] == "MCP 认证令牌未配置"
+        assert r["result"] is None
+
+    # ── Timeout ────────────────────────────────────────────────────
+
+    def test_timeout(self):
+        """httpx.TimeoutException → MCP Server 请求超时"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", side_effect=httpx.TimeoutException("timeout")):
+                return await client._real_call_tool("sys_info", {"metric": "cpu"})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 请求超时"
+        assert r["result"] is None
+
+    # ── ConnectError ───────────────────────────────────────────────
+
+    def test_connect_error(self):
+        """httpx.ConnectError → MCP Server 连接失败（脱敏，不暴露 URL）"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("refused")):
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 连接失败"
+        assert r["result"] is None
+        # 确认没有泄露 URL
+        assert "192.168" not in r["error"]
+
+    # ── HTTP 401 ───────────────────────────────────────────────────
+
+    def test_http_401(self):
+        """HTTP 401 → MCP Server 认证失败"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=401)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 认证失败"
+
+    # ── HTTP 403 ───────────────────────────────────────────────────
+
+    def test_http_403(self):
+        """HTTP 403 → MCP Server 权限不足"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=403)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 权限不足"
+
+    # ── HTTP 404 ───────────────────────────────────────────────────
+
+    def test_http_404(self):
+        """HTTP 404 → MCP 工具调用接口不存在"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=404)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 工具调用接口不存在"
+
+    # ── HTTP 422 ───────────────────────────────────────────────────
+
+    def test_http_422(self):
+        """HTTP 422 → MCP 请求参数错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=422)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 请求参数错误"
+
+    # ── HTTP 400 ───────────────────────────────────────────────────
+
+    def test_http_400(self):
+        """HTTP 400 → MCP 请求参数错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=400)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 请求参数错误"
+
+    # ── HTTP 500 ───────────────────────────────────────────────────
+
+    def test_http_500(self):
+        """HTTP 500 → MCP Server 内部错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=500)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 内部错误"
+
+    # ── HTTP 503 ───────────────────────────────────────────────────
+
+    def test_http_503(self):
+        """HTTP 503 → MCP Server 内部错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=503)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 内部错误"
+
+    # ── HTTP 其他非 2xx ────────────────────────────────────────────
+
+    def test_http_418_other_non_2xx(self):
+        """HTTP 418 (或其他非分类状态码) → MCP Server 响应异常"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=418)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 响应异常"
+
+    # ── JSON 解析失败 ─────────────────────────────────────────────
+
+    def test_json_decode_error(self):
+        """response.json() 失败 → MCP Server 返回格式错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponseWithBadJson(status_code=200)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 返回格式错误"
+
+    # ── JSON-RPC error -32700 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32700(self):
+        """JSON-RPC error code=-32700 → MCP 返回 JSON 解析错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32700, "message": "Parse error"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 返回 JSON 解析错误"
+
+    # ── JSON-RPC error -32600 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32600(self):
+        """JSON-RPC error code=-32600 → MCP 请求格式无效"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 请求格式无效"
+
+    # ── JSON-RPC error -32601 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32601(self):
+        """JSON-RPC error code=-32601 → MCP 方法或工具不存在"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32601, "message": "Method not found"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("nonexistent", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 方法或工具不存在"
+
+    # ── JSON-RPC error -32602 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32602(self):
+        """JSON-RPC error code=-32602 → MCP 工具参数错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32602, "message": "Invalid params"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 工具参数错误"
+
+    # ── JSON-RPC error -32603 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32603(self):
+        """JSON-RPC error code=-32603 → MCP 工具内部错误"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": "Internal error"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 工具内部错误"
+
+    # ── JSON-RPC error -32000 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32000(self):
+        """JSON-RPC error code=-32000 → MCP 命令执行失败"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "Command failed"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("cmd_exec", {"command": "bad"})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 命令执行失败"
+
+    # ── JSON-RPC error -32001 ──────────────────────────────────────
+
+    def test_jsonrpc_error_minus_32001(self):
+        """JSON-RPC error code=-32001 → MCP Token 认证失败"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32001, "message": "Invalid token"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Token 认证失败"
+
+    # ── JSON-RPC error 未知 code ───────────────────────────────────
+
+    def test_jsonrpc_error_unknown_code(self):
+        """JSON-RPC error code=-32099（未分类） → MCP 调用失败"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32099, "message": "Unknown"},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 调用失败"
+
+    # ── 缺少 result/error ──────────────────────────────────────────
+
+    def test_missing_result_and_error(self):
+        """HTTP 200 但响应体缺少 result 和 error → MCP Server 返回内容不完整"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({"jsonrpc": "2.0", "id": 1})
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP Server 返回内容不完整"
+
+    # ── HTTP 200 + blocked=true ────────────────────────────────────
+
+    def test_http_200_blocked(self):
+        """HTTP 200 + result.blocked=true → ok=false，result 保留 blocked 信息"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "blocked": True,
+                        "command": "rm -rf /",
+                        "reason": "命令不在白名单中",
+                    },
+                    "id": 1,
+                })
+                return await client._real_call_tool("cmd_exec", {"command": "rm -rf /"})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "命令被安全策略拦截"
+        assert r["result"]["blocked"] is True
+        assert r["result"]["command"] == "rm -rf /"
+        assert r["result"]["reason"] == "命令不在白名单中"
+        assert "success" not in r
+
+    # ── HTTP 200 正常 ──────────────────────────────────────────────
+
+    def test_http_200_normal(self):
+        """HTTP 200 + 正常 result → ok=true"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({
+                    "jsonrpc": "2.0",
+                    "result": {"cpu_percent": 42.0},
+                    "id": 1,
+                })
+                return await client._real_call_tool("sys_info", {"metric": "cpu"})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is True
+        assert r["result"]["cpu_percent"] == 42.0
+        assert r["error"] is None
+
+    # ── 通用异常 ───────────────────────────────────────────────────
+
+    def test_generic_exception(self):
+        """非 httpx 异常 → MCP 工具调用异常"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run():
+            with patch("httpx.AsyncClient.post", side_effect=RuntimeError("unexpected")):
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run())
+        assert r["ok"] is False
+        assert r["error"] == "MCP 工具调用异常"
+
+    # ── 返回结构完整性 ────────────────────────────────────────────
+
+    def test_all_real_error_responses_have_ok_result_error(self):
+        """所有 real 模式错误响应都应包含 ok/result/error 三元组"""
+        client = MCPClient(mode="real", auth_token="tk")
+
+        async def _run_401():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = FakeResponse({}, status_code=401)
+                return await client._real_call_tool("sys_info", {})
+
+        r = asyncio.run(_run_401())
+        assert "ok" in r and "result" in r and "error" in r
+        assert "success" not in r
+
+    # ── payload 标准保持不变 ──────────────────────────────────────
+
+    def test_real_mode_still_uses_params_arguments(self):
+        """real 模式 payload 仍使用 params.arguments，不含 params.args"""
+        client = MCPClient(mode="real", auth_token="tk")
+        payload = client._build_payload("sys_info", {"metric": "cpu"})
+        assert "arguments" in payload["params"]
+        assert "args" not in payload["params"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 静态 helper 方法测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestRealHelpers:
+    """_handle_http_error / _handle_jsonrpc_error / _is_blocked_result"""
+
+    def test_handle_http_error_401(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_http_error(401)
+        assert r["error"] == "MCP Server 认证失败"
+        assert r["ok"] is False
+
+    def test_handle_http_error_500(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_http_error(500)
+        assert r["error"] == "MCP Server 内部错误"
+
+    def test_handle_http_error_unknown(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_http_error(418)
+        assert r["error"] == "MCP Server 响应异常"
+
+    def test_handle_jsonrpc_error_minus_32700(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_jsonrpc_error({"code": -32700})
+        assert r["error"] == "MCP 返回 JSON 解析错误"
+
+    def test_handle_jsonrpc_error_minus_32600(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_jsonrpc_error({"code": -32600})
+        assert r["error"] == "MCP 请求格式无效"
+
+    def test_handle_jsonrpc_error_minus_32601(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_jsonrpc_error({"code": -32601})
+        assert r["error"] == "MCP 方法或工具不存在"
+
+    def test_handle_jsonrpc_error_minus_32000(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_jsonrpc_error({"code": -32000})
+        assert r["error"] == "MCP 命令执行失败"
+
+    def test_handle_jsonrpc_error_unknown_code(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_jsonrpc_error({"code": -99999})
+        assert r["error"] == "MCP 调用失败"
+
+    def test_handle_jsonrpc_error_non_dict(self):
+        from app.mcp.client import MCPClient as MCP
+        r = MCP._handle_jsonrpc_error("some string error")
+        assert r["ok"] is False
+        assert r["error"] == "MCP 调用失败"
+
+    def test_is_blocked_result_true(self):
+        from app.mcp.client import MCPClient as MCP
+        assert MCP._is_blocked_result({"blocked": True}) is True
+
+    def test_is_blocked_result_false(self):
+        from app.mcp.client import MCPClient as MCP
+        assert MCP._is_blocked_result({"blocked": False}) is False
+        assert MCP._is_blocked_result({"cpu": 50}) is False
+        assert MCP._is_blocked_result("not dict") is False
+        assert MCP._is_blocked_result(None) is False

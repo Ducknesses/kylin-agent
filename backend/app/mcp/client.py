@@ -551,6 +551,50 @@ class MCPClient:
             "mock": True,
         })
 
+    # ── Real 模式错误分类（静态/类方法，便于测试） ─────────────
+
+    @staticmethod
+    def _handle_http_error(status_code: int) -> Dict:
+        """HTTP 非 2xx 状态码 → 脱敏错误响应"""
+        mapping = {
+            401: "MCP Server 认证失败",
+            403: "MCP Server 权限不足",
+            404: "MCP 工具调用接口不存在",
+            400: "MCP 请求参数错误",
+            422: "MCP 请求参数错误",
+            500: "MCP Server 内部错误",
+            502: "MCP Server 内部错误",
+            503: "MCP Server 内部错误",
+            504: "MCP Server 内部错误",
+        }
+        msg = mapping.get(status_code)
+        if msg:
+            return _fail(msg)
+        return _fail("MCP Server 响应异常")
+
+    @staticmethod
+    def _handle_jsonrpc_error(error_obj: Any) -> Dict:
+        """JSON-RPC error 对象 → 脱敏错误响应（按 code 分类）"""
+        code = error_obj.get("code", 0) if isinstance(error_obj, dict) else 0
+        mapping = {
+            -32700: "MCP 返回 JSON 解析错误",
+            -32600: "MCP 请求格式无效",
+            -32601: "MCP 方法或工具不存在",
+            -32602: "MCP 工具参数错误",
+            -32603: "MCP 工具内部错误",
+            -32000: "MCP 命令执行失败",
+            -32001: "MCP Token 认证失败",
+        }
+        msg = mapping.get(code)
+        if msg:
+            return _fail(msg)
+        return _fail("MCP 调用失败")
+
+    @staticmethod
+    def _is_blocked_result(result: Any) -> bool:
+        """判断 MCP result 是否为安全拦截"""
+        return isinstance(result, dict) and result.get("blocked") is True
+
     # ── 主调用入口 ───────────────────────────────────────────────
 
     async def call_tool(
@@ -573,7 +617,15 @@ class MCPClient:
         if self.mode == "mock":
             return self._mock_call_tool(tool_name, arguments)
 
-        # ── Real 模式：HTTP JSON-RPC 2.0 调用 ──
+        # Real 模式：检查认证令牌
+        if not self.auth_token:
+            logger.warning(f"[MCP] real 模式缺少 MCP_AUTH_TOKEN")
+            return _fail("MCP 认证令牌未配置")
+
+        return await self._real_call_tool(tool_name, arguments)
+
+    async def _real_call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict:
+        """Real 模式：HTTP JSON-RPC 2.0 调用 + 完整错误分类"""
         payload = self._build_payload(tool_name, arguments)
         headers = self._build_headers()
         url = self._build_url()
@@ -582,26 +634,40 @@ class MCPClient:
             timeout = httpx.Timeout(self.timeout + 5.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
 
-                # JSON-RPC error
+                # ── HTTP 非 2xx ──
+                if resp.status_code >= 400:
+                    logger.warning(
+                        f"[MCP] HTTP {resp.status_code} — {tool_name}"
+                    )
+                    return self._handle_http_error(resp.status_code)
+
+                # ── JSON 解析 ──
+                try:
+                    data = resp.json()
+                except Exception:
+                    logger.error(f"[MCP] JSON 解析失败 — {tool_name}")
+                    return _fail("MCP Server 返回格式错误")
+
+                # ── JSON-RPC error ──
                 if "error" in data:
-                    logger.error(f"[MCP] 工具调用错误: {data['error']}")
-                    return _fail(json.dumps(data["error"]))
+                    logger.warning(f"[MCP] JSON-RPC error — {tool_name}: {data['error']}")
+                    return self._handle_jsonrpc_error(data["error"])
 
-                result = data.get("result", {})
+                # ── 缺少 result ──
+                if "result" not in data:
+                    logger.error(f"[MCP] 缺少 result — {tool_name}")
+                    return _fail("MCP Server 返回内容不完整")
 
-                # MCP Server 可能在 HTTP 200 下通过 result.blocked 表示安全拦截
-                if isinstance(result, dict) and result.get("blocked") is True:
+                result = data["result"]
+
+                # ── result.blocked ──
+                if self._is_blocked_result(result):
                     logger.warning(
                         f"[MCP] 工具 {tool_name} 被 MCP Server 安全拦截: "
                         f"{result.get('reason', '未知原因')}"
                     )
-                    return _fail(
-                        result.get("reason") or "MCP 工具调用被安全策略拦截",
-                        result,
-                    )
+                    return _fail("命令被安全策略拦截", result)
 
                 logger.info(f"[MCP] 工具 {tool_name} 调用成功")
                 return _ok(result)
@@ -610,10 +676,10 @@ class MCPClient:
             logger.error(f"[MCP] 工具 {tool_name} 调用超时")
             return _fail("MCP Server 请求超时")
         except httpx.ConnectError:
-            logger.error(f"[MCP] 连接失败: {self.base_url}")
-            return _fail("无法连接到 MCP Server")
-        except Exception as e:
-            logger.exception(f"[MCP] 工具调用异常: {e}")
+            logger.error(f"[MCP] MCP Server 连接失败 — {tool_name}")
+            return _fail("MCP Server 连接失败")
+        except Exception:
+            logger.exception(f"[MCP] 工具调用异常 — {tool_name}")
             return _fail("MCP 工具调用异常")
 
     # ── 便捷方法 ────────────────────────────────────────────────
