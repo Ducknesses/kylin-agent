@@ -24,7 +24,9 @@
 <script setup>
 import { computed } from 'vue'
 import { marked } from 'marked'
+import hljs from 'highlight.js'
 import ToolCallCard from './ToolCallCard.vue'
+import 'highlight.js/lib/common'
 
 const props = defineProps({
   msg: {
@@ -46,7 +48,28 @@ function levelText(level) {
 }
 
 function renderMarkdown(text) {
-  return marked.parse(text || '', { breaks: true })
+  if (!text) return ''
+
+  // 配置 marked 使用 highlight.js
+  const renderer = new marked.Renderer()
+  renderer.code = ({ text: code, lang }) => {
+    let highlighted
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        highlighted = hljs.highlight(code, { language: lang }).value
+      } catch (_) {
+        highlighted = hljs.highlightAuto(code).value
+      }
+    } else {
+      highlighted = hljs.highlightAuto(code).value
+    }
+    return `<pre><code class="hljs${lang ? ` language-${lang}` : ''}">${highlighted}</code></pre>`
+  }
+
+  return marked.parse(text, {
+    breaks: true,
+    renderer
+  })
 }
 </script>
 
@@ -126,5 +149,12 @@ function renderMarkdown(text) {
   padding: 10px;
   border-radius: 6px;
   overflow-x: auto;
+}
+.assistant-text :deep(code.hljs) {
+  background: transparent;
+  padding: 0;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
 }
 </style>

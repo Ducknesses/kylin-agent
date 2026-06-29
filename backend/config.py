@@ -35,6 +35,11 @@ class Settings:
     # Token 认证（空字符串表示不启用认证，向后兼容）
     API_TOKEN: str = os.getenv("API_TOKEN", "")
 
+    # Mock/Real 模式切换
+    # true  → 走真实 DeepSeek + MCP 链路
+    # false → 走 Mock 编排器（仅供前端联调）
+    USE_REAL_LLM: bool = os.getenv("USE_REAL_LLM", "false").lower() == "true"
+
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
