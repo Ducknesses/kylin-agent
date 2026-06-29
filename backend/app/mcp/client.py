@@ -693,6 +693,10 @@ class MCPClient:
         if self.mode == "mock":
             return _ok({"tools": []})
 
+        if not self.auth_token:
+            logger.warning("[MCP] list_tools 缺少 MCP_AUTH_TOKEN")
+            return _fail("MCP 认证令牌未配置")
+
         payload = {
             "jsonrpc": "2.0",
             "method": "tools/list",
@@ -702,10 +706,38 @@ class MCPClient:
         url = self._build_url("tools/list")
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            timeout = httpx.Timeout(10.0, connect=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as e:
-            logger.error(f"[MCP] 获取工具列表失败: {e}")
-            return _fail(str(e))
+
+                # ── HTTP 非 2xx ──
+                if resp.status_code >= 400:
+                    logger.warning(
+                        f"[MCP] list_tools HTTP {resp.status_code}"
+                    )
+                    return self._handle_http_error(resp.status_code)
+
+                # ── JSON 解析 ──
+                try:
+                    data = resp.json()
+                except Exception:
+                    logger.error("[MCP] list_tools JSON 解析失败")
+                    return _fail("MCP Server 返回格式错误")
+
+                # ── JSON-RPC error ──
+                if "error" in data:
+                    logger.warning(f"[MCP] list_tools JSON-RPC error: {data['error']}")
+                    return self._handle_jsonrpc_error(data["error"])
+
+                # ── 提取 result ──
+                return _ok(data.get("result", data))
+
+        except httpx.TimeoutException:
+            logger.error("[MCP] 获取工具列表超时")
+            return _fail("获取工具列表超时")
+        except httpx.ConnectError:
+            logger.error("[MCP] MCP Server 连接失败 — tools/list")
+            return _fail("MCP Server 连接失败")
+        except Exception:
+            logger.exception("[MCP] 获取工具列表异常")
+            return _fail("获取工具列表失败")
