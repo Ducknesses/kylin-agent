@@ -14,7 +14,7 @@ __pycache__/
 # Environment
 .env
 .env.*
-!.env.example
+!backend/.env.example
 frontend/.env.development.local
 frontend/.env.production
 backend/.env
