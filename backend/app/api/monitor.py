@@ -35,7 +35,6 @@ def _collect_nested_metrics() -> dict:
     disk_total_gb = round(disk.total / (1024**3), 1)
     disk_used_gb = round(disk.used / (1024**3), 1)
 
-    # 计算网络速率（两次采样差值，非负保护避免计数器重置导致负数）
     global _prev_net
     now_ts = datetime.now().timestamp()
     rx_kbps, tx_kbps = 0.0, 0.0
@@ -74,7 +73,6 @@ def _collect_nested_metrics() -> dict:
 def _collect_flat_metrics() -> dict:
     """采集系统指标 —— 扁平结构，用于 /api/monitor/stream SSE"""
     nested = _collect_nested_metrics()
-    # 采样 loadavg
     try:
         load_avg = [round(v, 2) for v in os.getloadavg()]
     except (OSError, AttributeError):
@@ -98,16 +96,14 @@ async def _mcp_metrics_generator():
         try:
             try:
                 result = await client.get_system_metrics()
-                raw = result.get("result", {}) if result.get("success") else {}
+                raw = result.get("result", {}) if result.get("ok") else {}
             except Exception:
                 raw = {}
 
-            # 从 MCP 返回的嵌套结构中提取扁平指标
             cpu_data = raw.get("cpu", {})
             mem_data = raw.get("memory", {})
             load_data = raw.get("load", {})
 
-            # 类型收窄：disk 可能为 list 或 dict，统一转为 dict 后取 percent
             disk_raw = raw.get("disk", {})
             if isinstance(disk_raw, list):
                 disk_data = disk_raw[0] if disk_raw and isinstance(disk_raw[0], dict) else {}
@@ -132,12 +128,8 @@ async def _mcp_metrics_generator():
             yield f"data: {json.dumps(data)}\n\n"
         except Exception as e:
             logger.error(f"[Monitor] MCP 获取指标失败: {e}")
-            # 不把内部异常详情返回给前端
             yield f"data: {json.dumps({'error': '监控数据采集失败'})}\n\n"
         await asyncio.sleep(3)
-
-
-# ── 正式监控接口（最新规范 v1.0） ───────────────────────────────────
 
 
 @router.get("/monitor/metrics")
@@ -157,7 +149,6 @@ async def monitor_stream():
                 yield f"data: {json.dumps(data)}\n\n"
             except Exception as e:
                 logger.error(f"[Monitor] SSE 采集失败: {e}")
-                # fallback 保持与正常数据相同的字段结构，避免前端图表组件缺字段
                 fallback = {
                     "cpu_percent": 0.0,
                     "load_avg": [0.0, 0.0, 0.0],

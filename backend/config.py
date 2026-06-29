@@ -14,6 +14,8 @@ class Settings:
     MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://192.168.56.101:8001")
     # 执行器 C 通过 Bearer Token 校验后端身份，生产环境必须配置
     MCP_AUTH_TOKEN: str = os.getenv("MCP_AUTH_TOKEN", "")
+    # MCP 模式：mock（默认，B 独立开发）/ real（对接执行器 C）
+    MCP_MODE: str = os.getenv("MCP_MODE", "mock")
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
