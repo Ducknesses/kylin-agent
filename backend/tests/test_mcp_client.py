@@ -460,10 +460,8 @@ class TestMockCmdExec:
     def test_no_subprocess_execution(self):
         """确认 mock 模式不真实执行命令（无 subprocess 导入）"""
         client = MCPClient(mode="mock")
-        # 同步调用 _mock_call_tool，验证是纯数据返回
         r = client._mock_call_tool("cmd_exec", {"command": "df -h"})
         assert r["ok"] is True
-        # 确认无真实 subprocess 痕迹
         assert "mock" in r["result"]
 
 
@@ -577,11 +575,11 @@ class TestReturnStructure:
         client = MCPClient(mode="mock")
         r = asyncio.run(client.call_tool("sys_info", {"metric": "gpu"}))
         assert r["ok"] is False
-        assert r["result"] is None  # 非 blocked 失败 result 为 None
+        assert r["result"] is None
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Mock 模式基础行为（保留 Part1 测试）
+# Mock 模式基础行为
 # ═══════════════════════════════════════════════════════════════════
 
 class TestMCPClientMock:
@@ -615,7 +613,7 @@ class TestMCPClientMock:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Payload / URL / Headers 构造（保留 Part1 测试）
+# Payload / URL / Headers 构造
 # ═══════════════════════════════════════════════════════════════════
 
 class TestMCPClientPayload:
@@ -634,9 +632,7 @@ class TestMCPClientPayload:
         payload = client._build_payload("sys_info", {"metric": "cpu"})
         assert payload["jsonrpc"] == "2.0"
         assert "arguments" in payload["params"]
-        assert "args" not in payload["params"], (
-            "禁止使用旧版 params.args，必须使用 params.arguments"
-        )
+        assert "args" not in payload["params"], "禁止使用旧版 params.args，必须使用 params.arguments"
         assert payload["params"]["arguments"] == {"metric": "cpu"}
 
     def test_payload_request_id_increments(self):
@@ -718,8 +714,6 @@ class FakeResponseWithBadJson:
 class TestMCPClientRealErrors:
     """Real 模式完整错误分类：token / timeout / connect / HTTP / JSON-RPC / blocked"""
 
-    # ── Token 缺失 ────────────────────────────────────────────────
-
     def test_real_mode_missing_token(self):
         """mode=real 且 token 为空 → MCP 认证令牌未配置"""
         client = MCPClient(base_url="http://test:8001", mode="real", auth_token="")
@@ -727,8 +721,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 认证令牌未配置"
         assert r["result"] is None
-
-    # ── Timeout ────────────────────────────────────────────────────
 
     def test_timeout(self):
         """httpx.TimeoutException → MCP Server 请求超时"""
@@ -743,8 +735,6 @@ class TestMCPClientRealErrors:
         assert r["error"] == "MCP Server 请求超时"
         assert r["result"] is None
 
-    # ── ConnectError ───────────────────────────────────────────────
-
     def test_connect_error(self):
         """httpx.ConnectError → MCP Server 连接失败（脱敏，不暴露 URL）"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -757,10 +747,7 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP Server 连接失败"
         assert r["result"] is None
-        # 确认没有泄露 URL
         assert "192.168" not in r["error"]
-
-    # ── HTTP 401 ───────────────────────────────────────────────────
 
     def test_http_401(self):
         """HTTP 401 → MCP Server 认证失败"""
@@ -775,8 +762,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP Server 认证失败"
 
-    # ── HTTP 403 ───────────────────────────────────────────────────
-
     def test_http_403(self):
         """HTTP 403 → MCP Server 权限不足"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -789,8 +774,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP Server 权限不足"
-
-    # ── HTTP 404 ───────────────────────────────────────────────────
 
     def test_http_404(self):
         """HTTP 404 → MCP 工具调用接口不存在"""
@@ -805,8 +788,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 工具调用接口不存在"
 
-    # ── HTTP 422 ───────────────────────────────────────────────────
-
     def test_http_422(self):
         """HTTP 422 → MCP 请求参数错误"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -819,8 +800,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP 请求参数错误"
-
-    # ── HTTP 400 ───────────────────────────────────────────────────
 
     def test_http_400(self):
         """HTTP 400 → MCP 请求参数错误"""
@@ -835,8 +814,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 请求参数错误"
 
-    # ── HTTP 500 ───────────────────────────────────────────────────
-
     def test_http_500(self):
         """HTTP 500 → MCP Server 内部错误"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -849,8 +826,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP Server 内部错误"
-
-    # ── HTTP 503 ───────────────────────────────────────────────────
 
     def test_http_503(self):
         """HTTP 503 → MCP Server 内部错误"""
@@ -865,8 +840,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP Server 内部错误"
 
-    # ── HTTP 其他非 2xx ────────────────────────────────────────────
-
     def test_http_418_other_non_2xx(self):
         """HTTP 418 (或其他非分类状态码) → MCP Server 响应异常"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -880,8 +853,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP Server 响应异常"
 
-    # ── JSON 解析失败 ─────────────────────────────────────────────
-
     def test_json_decode_error(self):
         """response.json() 失败 → MCP Server 返回格式错误"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -894,8 +865,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP Server 返回格式错误"
-
-    # ── JSON-RPC error -32700 ──────────────────────────────────────
 
     def test_jsonrpc_error_minus_32700(self):
         """JSON-RPC error code=-32700 → MCP 返回 JSON 解析错误"""
@@ -914,8 +883,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 返回 JSON 解析错误"
 
-    # ── JSON-RPC error -32600 ──────────────────────────────────────
-
     def test_jsonrpc_error_minus_32600(self):
         """JSON-RPC error code=-32600 → MCP 请求格式无效"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -932,8 +899,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP 请求格式无效"
-
-    # ── JSON-RPC error -32601 ──────────────────────────────────────
 
     def test_jsonrpc_error_minus_32601(self):
         """JSON-RPC error code=-32601 → MCP 方法或工具不存在"""
@@ -952,8 +917,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 方法或工具不存在"
 
-    # ── JSON-RPC error -32602 ──────────────────────────────────────
-
     def test_jsonrpc_error_minus_32602(self):
         """JSON-RPC error code=-32602 → MCP 工具参数错误"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -970,8 +933,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP 工具参数错误"
-
-    # ── JSON-RPC error -32603 ──────────────────────────────────────
 
     def test_jsonrpc_error_minus_32603(self):
         """JSON-RPC error code=-32603 → MCP 工具内部错误"""
@@ -990,8 +951,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 工具内部错误"
 
-    # ── JSON-RPC error -32000 ──────────────────────────────────────
-
     def test_jsonrpc_error_minus_32000(self):
         """JSON-RPC error code=-32000 → MCP 命令执行失败"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -1008,8 +967,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP 命令执行失败"
-
-    # ── JSON-RPC error -32001 ──────────────────────────────────────
 
     def test_jsonrpc_error_minus_32001(self):
         """JSON-RPC error code=-32001 → MCP Token 认证失败"""
@@ -1028,8 +985,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP Token 认证失败"
 
-    # ── JSON-RPC error 未知 code ───────────────────────────────────
-
     def test_jsonrpc_error_unknown_code(self):
         """JSON-RPC error code=-32099（未分类） → MCP 调用失败"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -1047,8 +1002,6 @@ class TestMCPClientRealErrors:
         assert r["ok"] is False
         assert r["error"] == "MCP 调用失败"
 
-    # ── 缺少 result/error ──────────────────────────────────────────
-
     def test_missing_result_and_error(self):
         """HTTP 200 但响应体缺少 result 和 error → MCP Server 返回内容不完整"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -1061,8 +1014,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP Server 返回内容不完整"
-
-    # ── HTTP 200 + blocked=true ────────────────────────────────────
 
     def test_http_200_blocked(self):
         """HTTP 200 + result.blocked=true → ok=false，result 保留 blocked 信息"""
@@ -1089,8 +1040,6 @@ class TestMCPClientRealErrors:
         assert r["result"]["reason"] == "命令不在白名单中"
         assert "success" not in r
 
-    # ── HTTP 200 正常 ──────────────────────────────────────────────
-
     def test_http_200_normal(self):
         """HTTP 200 + 正常 result → ok=true"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -1109,8 +1058,6 @@ class TestMCPClientRealErrors:
         assert r["result"]["cpu_percent"] == 42.0
         assert r["error"] is None
 
-    # ── 通用异常 ───────────────────────────────────────────────────
-
     def test_generic_exception(self):
         """非 httpx 异常 → MCP 工具调用异常"""
         client = MCPClient(mode="real", auth_token="tk")
@@ -1122,8 +1069,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run())
         assert r["ok"] is False
         assert r["error"] == "MCP 工具调用异常"
-
-    # ── 返回结构完整性 ────────────────────────────────────────────
 
     def test_all_real_error_responses_have_ok_result_error(self):
         """所有 real 模式错误响应都应包含 ok/result/error 三元组"""
@@ -1137,8 +1082,6 @@ class TestMCPClientRealErrors:
         r = asyncio.run(_run_401())
         assert "ok" in r and "result" in r and "error" in r
         assert "success" not in r
-
-    # ── payload 标准保持不变 ──────────────────────────────────────
 
     def test_real_mode_still_uses_params_arguments(self):
         """real 模式 payload 仍使用 params.arguments，不含 params.args"""
@@ -1215,28 +1158,23 @@ class TestRealHelpers:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 接口一致性防回归测试（Day4-Part4 收口）
+# 接口一致性防回归测试
 # ═══════════════════════════════════════════════════════════════════
 
 class TestAntiRegressionProductionCode:
     """扫描 production 代码，确认无旧字段回退"""
 
     _FORBIDDEN_PATTERNS = [
-        # 旧 success 字段
         ('"success"', "禁止在 production 代码中使用旧 success 字段"),
         ("'success'", "禁止在 production 代码中使用旧 success 字段"),
-        # 旧 get("success") 调用（注意括号变体）
         ('get("success"', "禁止在 production 代码中调用 get(\"success\")"),
         ("get('success'", "禁止在 production 代码中调用 get('success')"),
-        # 旧 params.args
         ('"args"', "禁止在 JSON-RPC payload 中使用旧的 params.args"),
         ("'args'", "禁止在 JSON-RPC payload 中使用旧的 params.args"),
-        # 旧路径
         ('/rpc', "禁止使用旧 MCP 路径 /rpc"),
     ]
 
     def test_production_code_has_no_forbidden_patterns(self):
-        """扫描 backend/app/mcp/ 下所有 .py 文件，断言不存在旧字段"""
         import os
 
         app_dir = os.path.join(os.path.dirname(__file__), "..", "app", "mcp")
@@ -1244,7 +1182,6 @@ class TestAntiRegressionProductionCode:
 
         violations = []
         for root, _dirs, files in os.walk(app_dir):
-            # 跳过 __pycache__
             if "__pycache__" in root:
                 continue
             for fname in files:
@@ -1256,15 +1193,12 @@ class TestAntiRegressionProductionCode:
                 for lineno, line in enumerate(lines, 1):
                     for pattern, msg in self._FORBIDDEN_PATTERNS:
                         if pattern == '"args"' or pattern == "'args'":
-                            # args 在注释/测试说明中允许，检查是否在有 payload 上下文的行
                             if pattern in line:
                                 stripped = line.strip()
-                                # 允许注释、测试说明、docstring
                                 if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
                                     continue
-                                if "不使用" in stripped or "禁止" in stripped or "not in payload" in stripped or "不应包含" in stripped:
+                                if "不使用" in stripped or "禁止" in stripped:
                                     continue
-                                # 检查是否在 payload 构造上下文中（不含 "not" 的 args 引用）
                                 if '"arguments"' in line or "'arguments'" in line:
                                     continue
                                 violations.append(
@@ -1274,10 +1208,8 @@ class TestAntiRegressionProductionCode:
 
                         if pattern in line:
                             stripped = line.strip()
-                            # 跳过纯注释行
                             if stripped.startswith("#"):
                                 continue
-                            # 跳过文档中的示例代码
                             if pattern == '"success"' and "不是" in stripped:
                                 continue
                             if pattern in ('"success"', "'success'") and ("assert" in stripped and "not in" in stripped):
@@ -1291,14 +1223,12 @@ class TestAntiRegressionProductionCode:
         )
 
     def test_payload_method_is_tools_call(self):
-        """_build_payload method 字段必须是 tools/call"""
         client = MCPClient()
         payload = client._build_payload("sys_info", {"metric": "cpu"})
         assert payload["method"] == "tools/call"
         assert payload["jsonrpc"] == "2.0"
 
     def test_url_ends_with_mcp_v1_tools_call(self):
-        """_build_url 默认必须以 /mcp/v1/tools/call 结尾"""
         client = MCPClient(base_url="http://test:8001")
         url = client._build_url()
         assert url.endswith("/mcp/v1/tools/call"), f"URL={url}"
@@ -1308,7 +1238,6 @@ class TestSensitiveInfoNotLeaked:
     """确认错误消息中不泄露敏感信息"""
 
     def test_connect_error_message_has_no_token_or_url(self):
-        """ConnectError 错误消息不应包含 Bearer、Authorization 或 auth_token 值"""
         client = MCPClient(mode="real", auth_token="tk")
 
         async def _run():
@@ -1317,14 +1246,11 @@ class TestSensitiveInfoNotLeaked:
 
         r = asyncio.run(_run())
         error = r["error"]
-        # 不能出现敏感信息
         assert "Bearer" not in error
         assert "Authorization" not in error
-        # 不能泄露 auth_token 值
         assert "tk" not in error
 
     def test_timeout_message_has_no_sensitive_info(self):
-        """Timeout 错误消息不应包含 Bearer 或 auth_token 值"""
         client = MCPClient(mode="real", auth_token="secret-123")
 
         async def _run():
@@ -1337,7 +1263,6 @@ class TestSensitiveInfoNotLeaked:
         assert "secret" not in error
 
     def test_http_error_messages_are_sanitized(self):
-        """所有 HTTP 错误分类消息均不包含 Bearer 或 Authorization"""
         from app.mcp.client import MCPClient as MCP
         for code in (401, 403, 404, 500, 503):
             r = MCP._handle_http_error(code)
@@ -1345,16 +1270,13 @@ class TestSensitiveInfoNotLeaked:
             assert "Authorization" not in r["error"]
 
     def test_jsonrpc_error_messages_are_sanitized(self):
-        """所有 JSON-RPC 错误分类消息均不包含 Bearer 或敏感前缀"""
         from app.mcp.client import MCPClient as MCP
         for code in (-32700, -32600, -32601, -32602, -32603, -32000, -32001):
             r = MCP._handle_jsonrpc_error({"code": code})
             assert "Bearer" not in r["error"]
             assert "Authorization" not in r["error"]
-            # "Token" 作为分类名（如 "MCP Token 认证失败"）是合法的脱敏消息
 
     def test_logger_does_not_print_authorization(self):
-        """MCPClient 源代码中 logger 调用不应包含 Authorization 关键词"""
         import os
         client_path = os.path.join(
             os.path.dirname(__file__), "..", "app", "mcp", "client.py"
@@ -1362,11 +1284,9 @@ class TestSensitiveInfoNotLeaked:
         client_path = os.path.abspath(client_path)
         with open(client_path, encoding="utf-8") as f:
             content = f.read()
-        # 查找同时包含 "logger" 和 "Authorization" 的行
         lines = content.split("\n")
         for lineno, line in enumerate(lines, 1):
             if "logger" in line and "Authorization" in line:
-                # 允许 docstring/comment 中提到 Authorization
                 stripped = line.strip()
                 if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
                     continue
@@ -1390,14 +1310,12 @@ class TestExecutorBasic:
     """Executor 调度入口基础功能测试"""
 
     def test_executor_has_execute_method(self):
-        """修复后 Executor 实例应有可调用的 execute 方法"""
         from app.mcp.executor import Executor
         executor = Executor(client=FakeMCPClient())
-        assert hasattr(executor, "execute"), "Executor 缺少 execute 方法（缩进 bug 未修复？）"
+        assert hasattr(executor, "execute"), "Executor 缺少 execute 方法"
         assert callable(executor.execute)
 
     def test_executor_unknown_tool_returns_ok_false(self):
-        """非法工具返回 ok=false，且不含 success 字段"""
         from app.mcp.executor import Executor
 
         executor = Executor(client=FakeMCPClient())
@@ -1409,7 +1327,6 @@ class TestExecutorBasic:
         assert "success" not in result
 
     def test_executor_forwards_valid_tool_and_normalizes_arguments(self):
-        """有效工具转发给 MCPClient，arguments=None 归一化为 {}"""
         from app.mcp.executor import Executor
 
         client = FakeMCPClient()
@@ -1424,12 +1341,10 @@ class TestExecutorBasic:
         assert client.calls == [("sys_info", {})]
 
     def test_executor_import_ok(self):
-        """Executor 模块可正常导入"""
-        from app.mcp.executor import Executor  # noqa: F811
+        from app.mcp.executor import Executor
         assert Executor is not None
 
     def test_executor_instantiation_default(self):
-        """Executor 默认构造不报错（使用真实 MCPClient mock 模式）"""
         from app.mcp.executor import Executor
         ex = Executor()
         assert ex.client is not None
