@@ -3,17 +3,22 @@
 正式接口：GET /api/audit（安全智能运维 Agent API 统一规范 v1.1）
 参数：limit / offset / start_date / end_date
 返回：审计记录数组（直接返回数组，不使用 code/data 包装）
+
+底层委托 AuditService.list_records() 查询。
 """
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Query
 
-from app.audit.logger import query_audit
 from app.schemas.models import AuditRecordOut
+from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# 模块级 AuditService 实例
+_audit_service = AuditService()
 
 
 # ── 正式审计接口（v1.1 规范：直接返回数组） ─────────────────────────
@@ -30,7 +35,7 @@ async def get_audit_logs(
     分页查询审计日志，支持日期范围过滤，返回审计记录数组（v1.1 规范）
     """
     try:
-        rows = await query_audit(
+        rows = await _audit_service.list_records(
             limit=limit,
             offset=offset,
             start_date=start_date,
