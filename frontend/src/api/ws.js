@@ -94,6 +94,11 @@ class WsClient {
     this.send({ type: 'confirm', confirm_id: confirmId, decision })
   }
 
+  // 发送工具确认
+  sendToolConfirm(toolConfirmId, approved = true) {
+    this.send({ type: 'tool_confirm', tool_confirm_id: toolConfirmId, approved })
+  }
+
   send(payload) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(payload))
@@ -165,6 +170,19 @@ class WsClient {
           content: data.message || '发生错误'
         })
         this.emit('error', data)
+        break
+      case 'pending_confirmation':
+        chatStore.addMessage(this.sessionId, {
+          role: 'system',
+          type: 'pending_confirmation',
+          tool: data.tool,
+          tool_confirm_id: data.tool_confirm_id,
+          params: data.params,
+          confirm_id: data.confirm_id,
+          reason: data.reason,
+          trace_id: data.trace_id,
+        })
+        this.emit('pending_confirmation', data)
         break
       case 'pong':
         break

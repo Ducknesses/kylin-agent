@@ -76,6 +76,36 @@
       @cancel="handleRiskCancel"
     />
 
+    <!-- 工具操作确认弹窗 -->
+    <el-dialog
+      v-model="toolPendingVisible"
+      title="工具操作确认"
+      width="480px"
+      :close-on-click-modal="false"
+    >
+      <el-alert
+        :title="toolPending.reason"
+        type="warning"
+        show-icon
+        :closable="false"
+      >
+        <template #default>
+          <div style="margin-top: 8px;">
+            <el-tag size="small" type="info">{{ toolPending.tool }}</el-tag>
+            <div v-if="toolPending.params && Object.keys(toolPending.params).length > 0" style="margin-top: 8px; font-size: 12px; color: #6b7280;">
+              参数: {{ JSON.stringify(toolPending.params) }}
+            </div>
+          </div>
+        </template>
+      </el-alert>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="handleToolReject">拒绝</el-button>
+          <el-button type="primary" @click="handleToolConfirm">确认执行</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <ConnectionSettings v-model="settingsVisible" />
   </div>
 </template>
@@ -99,6 +129,8 @@ const msgListRef = ref(null)
 const riskDialogVisible = ref(false)
 const settingsVisible = ref(false)
 const currentRisk = ref({ level: 'high', reason: '', originalInput: '', confirmId: '' })
+const toolPendingVisible = ref(false)
+const toolPending = ref({ tool: '', toolConfirmId: '', reason: '', params: {}, confirmId: '' })
 
 const canSend = computed(() => {
   return inputText.value.trim().length > 0 && wsStore.isConnected && !isStreaming.value
@@ -143,6 +175,7 @@ onMounted(() => {
   const sessionId = chatStore.createSession()
   wsClient.connect(sessionId)
   wsClient.on('risk_alert', onRiskAlert)
+  wsClient.on('pending_confirmation', onToolPending)
   wsClient.on('done', () => { isStreaming.value = false })
   wsClient.on('error', () => { isStreaming.value = false })
 })
@@ -199,6 +232,29 @@ function handleRiskConfirm({ confirmId }) {
 
 function handleRiskCancel() {
   riskDialogVisible.value = false
+}
+
+function onToolPending(data) {
+  isStreaming.value = false
+  toolPending.value = {
+    tool: data.tool || '',
+    toolConfirmId: data.tool_confirm_id || '',
+    reason: data.reason || '工具操作需要确认',
+    params: data.params || {},
+    confirmId: data.confirm_id || ''
+  }
+  toolPendingVisible.value = true
+}
+
+function handleToolConfirm() {
+  wsClient.sendToolConfirm(toolPending.value.toolConfirmId, true)
+  toolPendingVisible.value = false
+  isStreaming.value = true
+}
+
+function handleToolReject() {
+  wsClient.sendToolConfirm(toolPending.value.toolConfirmId, false)
+  toolPendingVisible.value = false
 }
 
 // 注入测试数据，用于无后端时测试 UI
