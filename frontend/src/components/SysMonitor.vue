@@ -4,7 +4,7 @@
       <span class="title">系统监控大盘</span>
       <div class="header-right">
         <el-tag :type="dataSource === 'sse' ? 'success' : 'warning'" size="small">
-          {{ dataSource === 'sse' ? 'SSE 实时' : '轮询中' }}
+          {{ dataSource === 'sse' ? 'SSE 实时' : dataSource === 'polling' ? '轮询中' : '模拟数据' }}
         </el-tag>
         <el-radio-group v-model="timeRange" size="small" @change="onRangeChange">
           <el-radio-button label="5m">最近5分钟</el-radio-button>
@@ -13,66 +13,98 @@
         </el-radio-group>
       </div>
     </div>
-    <div class="charts-grid">
-      <div ref="cpuChart" class="chart-box" />
-      <div ref="memChart" class="chart-box" />
-      <div ref="diskChart" class="chart-box" />
-      <div ref="netChart" class="chart-box" />
+    <div :class="['charts-grid', { 'has-maximized': maximizedChart }]" :style="gridStyle">
+      <div
+        v-for="chart in chartList"
+        :key="chart.key"
+        :ref="el => setChartRef(el, chart.key)"
+        :class="['chart-box', { maximized: maximizedChart === chart.key }]"
+      >
+        <div class="chart-toolbar">
+          <el-button
+            link
+            size="small"
+            :title="maximizedChart === chart.key ? '还原' : '最大化'"
+            @click="toggleMaximize(chart.key)"
+          >
+            <el-icon><Close v-if="maximizedChart === chart.key" /><FullScreen v-else /></el-icon>
+          </el-button>
+        </div>
+        <div class="chart-content" />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { FullScreen, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
 
 const timeRange = ref('5m')
 const dataSource = ref('mock') // 'sse' | 'polling' | 'mock'
-const cpuChart = ref(null)
-const memChart = ref(null)
-const diskChart = ref(null)
-const netChart = ref(null)
+const maximizedChart = ref(null)
 
-let charts = {}
-let sseSource = null
-let pollTimer = null
+// 每个图表容器的 DOM 引用
+const chartRefs = {}
+// echarts 实例
+const charts = {}
 
-const metrics = {
-  times: [],
-  cpu: [],
-  mem: [],
-  disk: [],
-  netIn: [],
-  netOut: []
-}
+// 原始数据点，保留时间戳对象，最多保留 2 小时
+const rawMetrics = []
+const MAX_RETAIN_MINUTES = 120
+const MAX_RETAIN_POINTS = 2400 // 2h * 60s / 3s 约 2400 个点（SSE 3s 一次）
+
+const chartList = [
+  { key: 'cpu', title: 'CPU 使用率', color: '#3b82f6' },
+  { key: 'mem', title: '内存 使用率', color: '#10b981' },
+  { key: 'disk', title: '磁盘 使用率', color: '#f59e0b' },
+  { key: 'net', title: '网络 IO', color: '#8b5cf6' }
+]
+
+// 当某个卡片最大化时，让 grid 隐藏其他卡片只显示当前卡片
+const gridStyle = computed(() => {
+  if (!maximizedChart.value) return {}
+  return {
+    gridTemplateColumns: '1fr',
+    gridTemplateRows: '1fr'
+  }
+})
 
 // ===== 数据写入 =====
 
 function appendDataPoint(data) {
-  const now = data.timestamp
-    ? new Date(data.timestamp).toLocaleTimeString()
-    : new Date().toLocaleTimeString()
-
-  // 保持最多 60 个数据点
-  const maxLen = 60
-  if (metrics.times.length >= maxLen) {
-    metrics.times.shift()
-    metrics.cpu.shift()
-    metrics.mem.shift()
-    metrics.disk.shift()
-    metrics.netIn.shift()
-    metrics.netOut.shift()
+  const ts = data.timestamp ? new Date(data.timestamp) : new Date()
+  const point = {
+    time: ts.toLocaleTimeString(),
+    timestamp: ts,
+    cpu: data.cpu_percent ?? 0,
+    mem: data.memory_percent ?? 0,
+    disk: data.disk_percent ?? 0,
+    netIn: data.net_in_kbps ?? 0,
+    netOut: data.net_out_kbps ?? 0
   }
 
-  metrics.times.push(now)
-  metrics.cpu.push(data.cpu_percent ?? 0)
-  metrics.mem.push(data.memory_percent ?? 0)
-  metrics.disk.push(data.disk_percent ?? 0)
-  metrics.netIn.push(data.net_in_kbps ?? 0)
-  metrics.netOut.push(data.net_out_kbps ?? 0)
+  rawMetrics.push(point)
+
+  // 按全局保留策略淘汰旧数据，避免内存无限增长
+  const cutoff = new Date(Date.now() - MAX_RETAIN_MINUTES * 60 * 1000)
+  while (rawMetrics.length > MAX_RETAIN_POINTS || rawMetrics[0]?.timestamp < cutoff) {
+    rawMetrics.shift()
+  }
 
   refreshAll()
+}
+
+// 根据时间范围返回要展示的数据子集
+function getDisplayMetrics() {
+  const now = Date.now()
+  let ms = 5 * 60 * 1000
+  if (timeRange.value === '30m') ms = 30 * 60 * 1000
+  if (timeRange.value === '1h') ms = 60 * 60 * 1000
+  const cutoff = new Date(now - ms)
+  return rawMetrics.filter(p => p.timestamp >= cutoff)
 }
 
 // ===== 图表 =====
@@ -105,30 +137,39 @@ function netOption() {
   }
 }
 
-function initCharts() {
-  charts.cpu = echarts.init(cpuChart.value)
-  charts.mem = echarts.init(memChart.value)
-  charts.disk = echarts.init(diskChart.value)
-  charts.net = echarts.init(netChart.value)
+function setChartRef(el, key) {
+  if (el) chartRefs[key] = el
+}
 
-  charts.cpu.setOption(baseOption('CPU 使用率', '#3b82f6'))
-  charts.mem.setOption(baseOption('内存 使用率', '#10b981'))
-  charts.disk.setOption(baseOption('磁盘 使用率', '#f59e0b'))
-  charts.net.setOption(netOption())
+function initCharts() {
+  chartList.forEach(({ key, title, color }) => {
+    const dom = chartRefs[key]?.querySelector('.chart-content')
+    if (!dom) return
+    charts[key] = echarts.init(dom)
+    charts[key].setOption(key === 'net' ? netOption() : baseOption(title, color))
+  })
 }
 
 function refreshAll() {
-  const common = { xAxis: { data: metrics.times } }
-  charts.cpu && charts.cpu.setOption({ ...common, series: [{ data: metrics.cpu }] })
-  charts.mem && charts.mem.setOption({ ...common, series: [{ data: metrics.mem }] })
-  charts.disk && charts.disk.setOption({ ...common, series: [{ data: metrics.disk }] })
+  const data = getDisplayMetrics()
+  const times = data.map(p => p.time)
+
+  charts.cpu && charts.cpu.setOption({ xAxis: { data: times }, series: [{ data: data.map(p => p.cpu) }] })
+  charts.mem && charts.mem.setOption({ xAxis: { data: times }, series: [{ data: data.map(p => p.mem) }] })
+  charts.disk && charts.disk.setOption({ xAxis: { data: times }, series: [{ data: data.map(p => p.disk) }] })
   charts.net && charts.net.setOption({
-    xAxis: { data: metrics.times },
-    series: [{ data: metrics.netIn }, { data: metrics.netOut }]
+    xAxis: { data: times },
+    series: [
+      { data: data.map(p => p.netIn) },
+      { data: data.map(p => p.netOut) }
+    ]
   })
 }
 
 // ===== SSE 连接 =====
+
+let sseSource = null
+let pollTimer = null
 
 function connectSse() {
   try {
@@ -158,12 +199,10 @@ function connectSse() {
     sseSource.onopen = () => {
       console.log('[SSE] 连接已建立')
       dataSource.value = 'sse'
-      // SSE 建立后停止轮询（如果之前有）
       stopPolling()
     }
   } catch (e) {
     console.error('[SSE] 创建连接失败:', e)
-    // SSE 不可用时直接走轮询
     startPolling()
   }
 }
@@ -175,7 +214,6 @@ async function fetchMetrics() {
     const res = await axios.get('/api/monitor/metrics', { timeout: 5000 })
     const data = res.data
     if (data.cpu) {
-      // REST 快照格式（嵌套结构）
       appendDataPoint({
         cpu_percent: data.cpu.percent ?? 0,
         memory_percent: data.memory?.percent ?? 0,
@@ -185,7 +223,9 @@ async function fetchMetrics() {
         timestamp: data.timestamp
       })
     }
-    dataSource.value = 'polling'
+    if (dataSource.value !== 'sse') {
+      dataSource.value = 'polling'
+    }
   } catch (e) {
     console.error('[Poll] 拉取监控指标失败:', e)
   }
@@ -208,26 +248,44 @@ function stopPolling() {
 // ===== 时间范围切换 =====
 
 function onRangeChange() {
-  console.log('切换时间范围', timeRange.value)
+  refreshAll()
+  // 切换范围后确保图表尺寸正确
+  setTimeout(() => Object.values(charts).forEach(c => c && c.resize()), 0)
+}
+
+// ===== 最大化 / 还原 =====
+
+function toggleMaximize(key) {
+  maximizedChart.value = maximizedChart.value === key ? null : key
+  // DOM 变化后 echarts 需要重新计算尺寸
+  setTimeout(() => {
+    Object.values(charts).forEach(c => c && c.resize())
+  }, 50)
 }
 
 // ===== 生命周期 =====
 
-onMounted(() => {
-  initCharts()
-  // 注入初始 mock 数据点（后端就绪前）
-  appendDataPoint({
-    cpu_percent: +(Math.random() * 30 + 20).toFixed(1),
-    memory_percent: +(Math.random() * 20 + 40).toFixed(1),
-    disk_percent: +(Math.random() * 10 + 50).toFixed(1),
-    net_in_kbps: +(Math.random() * 500 + 100).toFixed(0),
-    net_out_kbps: +(Math.random() * 300 + 50).toFixed(0),
-    timestamp: new Date().toISOString()
-  })
-  // 优先尝试 SSE，不可用时自动降级
-  connectSse()
+function handleWindowResize() {
+  Object.values(charts).forEach(c => c && c.resize())
+}
 
-  window.addEventListener('resize', () => Object.values(charts).forEach(c => c && c.resize()))
+onMounted(() => {
+  // 等待 DOM 渲染完成后再初始化 echarts
+  setTimeout(() => {
+    initCharts()
+    // 注入初始 mock 数据点（后端就绪前展示用）
+    appendDataPoint({
+      cpu_percent: +(Math.random() * 30 + 20).toFixed(1),
+      memory_percent: +(Math.random() * 20 + 40).toFixed(1),
+      disk_percent: +(Math.random() * 10 + 50).toFixed(1),
+      net_in_kbps: +(Math.random() * 500 + 100).toFixed(0),
+      net_out_kbps: +(Math.random() * 300 + 50).toFixed(0),
+      timestamp: new Date().toISOString()
+    })
+    connectSse()
+  }, 0)
+
+  window.addEventListener('resize', handleWindowResize)
 })
 
 onUnmounted(() => {
@@ -237,6 +295,7 @@ onUnmounted(() => {
   }
   stopPolling()
   Object.values(charts).forEach(c => c && c.dispose())
+  window.removeEventListener('resize', handleWindowResize)
 })
 </script>
 
@@ -272,10 +331,39 @@ onUnmounted(() => {
   grid-template-columns: repeat(2, 1fr);
   grid-template-rows: repeat(2, 1fr);
   gap: 16px;
+  min-height: 0;
+  position: relative;
 }
 .chart-box {
   min-height: 200px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 支持原生拖拽缩放 */
+  resize: both;
+}
+.chart-box.maximized {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  z-index: 10;
+  resize: none;
+}
+.charts-grid.has-maximized .chart-box:not(.maximized) {
+  display: none;
+}
+.chart-toolbar {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 20;
+}
+.chart-content {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
 }
 </style>
