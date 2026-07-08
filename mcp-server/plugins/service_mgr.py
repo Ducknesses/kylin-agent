@@ -131,7 +131,8 @@ def handle(arguments: dict) -> dict:
 
     # 变更操作需要 pending_confirmation
     MEDIUM_ACTIONS = {"start", "stop", "restart", "reload"}
-    if action in MEDIUM_ACTIONS:
+    skip_pending = arguments.get("_skip_pending", False)
+    if action in MEDIUM_ACTIONS and not skip_pending:
         import uuid
         confirm_id = f"mcp_pending_{uuid.uuid4().hex[:12]}"
         logger.info("[ServiceMgr] 变更操作需确认: action=%s, service=%s, confirm_id=%s", action, service, confirm_id)
@@ -142,7 +143,7 @@ def handle(arguments: dict) -> dict:
             "action": action,
             "service": service,
             "reason": f"服务变更操作需要确认: {action} {service}",
-            "pending_args": {"action": action, "service": service},
+            "pending_args": {"action": action, "service": service, "_skip_pending": True},
         }
 
     # 执行操作（只读：status / is-active / is-enabled）

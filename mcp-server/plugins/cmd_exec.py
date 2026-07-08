@@ -21,7 +21,7 @@ def handle(arguments: dict) -> dict:
 
     参数:
         arguments: {
-            "command": "df -h",       # 要执行的命令（必须在白名单中）
+            "command": "df -h",       # 要执行的命令（白名单直接执行，其余需二次确认）
             "timeout": 30,             # 超时秒数（可选，默认30）
             "user": "agent-read"       # 执行用户（可选，默认agent-read）
             "_skip_pending": false     # 内部标记：跳过pending（确认后重试时使用）
@@ -51,29 +51,33 @@ def handle(arguments: dict) -> dict:
     timeout = int(arguments.get("timeout", 30))
     user = arguments.get("user", "agent-read")
     skip_pending = arguments.get("_skip_pending", False)
-
-    # 先做沙箱安全检查（黑名单拦截）
-    result = sandbox_execute(command=command, timeout=timeout, user=user)
-
-    # 如果被沙箱拦截，直接返回错误
-    if result.get("blocked"):
-        return {
-            "blocked": True,
-            "command": command,
-            "reason": result.get("stderr", "命令被安全策略拦截"),
-        }
-
-    # 只读命令白名单 → 直接执行沙箱结果（不触发 pending）
     normalized = command.strip()
+
+    # 只读命令白名单 → 直接执行（不触发 pending）
     if normalized in READ_ONLY_COMMANDS:
+        result = sandbox_execute(command=command, timeout=timeout, user=user)
+        if result.get("blocked"):
+            return {
+                "blocked": True,
+                "command": command,
+                "reason": result.get("stderr", "命令被安全策略拦截"),
+            }
         logger.info("[CmdExec] 只读命令直接执行: '%s'", command)
         return result
 
-    # 非只读命令 → 需要 pending_confirmation（除 skip_pending 外）
+    # skip_pending → 用户已确认，执行命令
     if skip_pending:
+        result = sandbox_execute(command=command, timeout=timeout, user=user)
+        if result.get("blocked"):
+            return {
+                "blocked": True,
+                "command": command,
+                "reason": result.get("stderr", "命令被安全策略拦截"),
+            }
         logger.info("[CmdExec] 确认后执行: '%s'", command)
         return result
 
+    # 非只读、未确认 → 返回 pending_confirmation，不执行命令
     confirm_id = f"mcp_pending_{uuid.uuid4().hex[:12]}"
     logger.info("[CmdExec] 命令需确认: '%s', confirm_id=%s", command, confirm_id)
     return {

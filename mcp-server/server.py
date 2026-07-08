@@ -9,7 +9,6 @@ import sys
 import threading
 import time
 import traceback
-import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # 确保能找到同目录模块
@@ -315,11 +314,11 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
             if isinstance(result, dict) and result.get("_pending_confirmation"):
                 confirm_id = result.get("confirm_id", "")
                 if confirm_id:
-                    # 存入 PENDING_STORE 等待确认
+                    # 存入 PENDING_STORE 等待确认（使用插件返回的 pending_args，确保携带 _skip_pending 标记）
                     with PENDING_LOCK:
                         PENDING_STORE[confirm_id] = {
                             "tool_name": tool_name,
-                            "arguments": arguments,
+                            "arguments": result.get("pending_args", arguments),
                             "created_at": time.time(),
                         }
                     logger.info("[Pending] 操作需确认: tool=%s, confirm_id=%s, reason=%s",

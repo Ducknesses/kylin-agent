@@ -15,7 +15,7 @@
     </div>
     <div :class="['charts-grid', { 'has-maximized': maximizedChart }]" :style="gridStyle">
       <div
-        v-for="chart in chartList"
+        v-for="chart in CHART_LIST"
         :key="chart.key"
         :ref="el => setChartRef(el, chart.key)"
         :class="['chart-box', { maximized: maximizedChart === chart.key }]"
@@ -42,6 +42,14 @@ import { FullScreen, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
 
+// 图表配置常量（静态数据，大写命名约定表示常量）
+const CHART_LIST = [
+  { key: 'cpu', title: 'CPU 使用率', color: '#3b82f6' },
+  { key: 'mem', title: '内存 使用率', color: '#10b981' },
+  { key: 'disk', title: '磁盘 使用率', color: '#f59e0b' },
+  { key: 'net', title: '网络 IO', color: '#8b5cf6' }
+]
+
 const timeRange = ref('5m')
 const dataSource = ref('mock') // 'sse' | 'polling' | 'mock'
 const maximizedChart = ref(null)
@@ -55,13 +63,6 @@ const charts = {}
 const rawMetrics = []
 const MAX_RETAIN_MINUTES = 120
 const MAX_RETAIN_POINTS = 2400 // 2h * 60s / 3s 约 2400 个点（SSE 3s 一次）
-
-const chartList = [
-  { key: 'cpu', title: 'CPU 使用率', color: '#3b82f6' },
-  { key: 'mem', title: '内存 使用率', color: '#10b981' },
-  { key: 'disk', title: '磁盘 使用率', color: '#f59e0b' },
-  { key: 'net', title: '网络 IO', color: '#8b5cf6' }
-]
 
 // 当某个卡片最大化时，让 grid 隐藏其他卡片只显示当前卡片
 const gridStyle = computed(() => {
@@ -142,7 +143,7 @@ function setChartRef(el, key) {
 }
 
 function initCharts() {
-  chartList.forEach(({ key, title, color }) => {
+  CHART_LIST.forEach(({ key, title, color }) => {
     const dom = chartRefs[key]?.querySelector('.chart-content')
     if (!dom) return
     charts[key] = echarts.init(dom)
