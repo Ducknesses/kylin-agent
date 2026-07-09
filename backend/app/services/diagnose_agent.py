@@ -92,9 +92,8 @@ class DiagnoseAgent:
             plans, reason = self._plan_root_cause(target_service)
         elif intent == "command_execute":
             plans, reason = self._plan_command(entities, original_input)
-        else:  # unknown
-            plans = []
-            reason = "无法识别意图，无法生成工具计划"
+        else:  # unknown / service_status_query without explicit intent
+            plans, reason = self._plan_fallback(target_service, entities, original_input)
 
         # ── 可选：ToolRegistry 参数自检 ──
         validation_errors: list[str] = []
@@ -138,6 +137,32 @@ class DiagnoseAgent:
             [{"tool": "service_mgr", "params": {"action": "status", "service": target_service}}],
             f"查询 {target_service} 服务状态",
         )
+
+    @staticmethod
+    def _plan_fallback(target_service: str | None, entities: dict, original_input: str) -> tuple[list[dict], str]:
+        """兜底计划 —— 检测 restart/start/stop 操作意图"""
+        if not target_service:
+            return [], "无法识别意图，无法生成工具计划"
+
+        lower = (entities.get("command", original_input) or "").lower()
+        action = entities.get("action")
+
+        if action == "restart" or any(kw in lower for kw in ["重启", "restart"]):
+            return (
+                [{"tool": "service_mgr", "params": {"action": "restart", "service": target_service}}],
+                f"重启 {target_service}",
+            )
+        if action == "start" or any(kw in lower for kw in ["启动", "start "]):
+            return (
+                [{"tool": "service_mgr", "params": {"action": "start", "service": target_service}}],
+                f"启动 {target_service}",
+            )
+        if action == "stop" or any(kw in lower for kw in ["停止", "stop "]):
+            return (
+                [{"tool": "service_mgr", "params": {"action": "stop", "service": target_service}}],
+                f"停止 {target_service}",
+            )
+        return [], "无法识别意图，无法生成工具计划"
 
     @staticmethod
     def _plan_log(target_service: str | None, entities: dict) -> tuple[list[dict], str]:

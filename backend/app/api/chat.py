@@ -20,15 +20,20 @@ from app.audit.logger import log_chain
 from app.llm.router import route_request
 from app.mcp.executor import Executor
 from app.services.connection_manager import ConnectionManager
-from app.services.orchestrator import mock_orchestrate
+from app.services.orchestrator import mock_orchestrate, Orchestrator
 from app.services.safety_guard import SafetyGuard
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 连接管理器、安全护栏（模块级单例）
+# 连接管理器、安全护栏、编排器（模块级单例）
 manager = ConnectionManager()
 safety_guard = SafetyGuard()
+_orchestrator = Orchestrator(
+    safety_guard=safety_guard,
+    tool_registry=None,  # 使用 Orchestrator 默认构造
+    mcp_client=None,     # 使用 Orchestrator 默认构造
+)
 
 # ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────
 
@@ -111,14 +116,13 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
 
         if decision == "approve":
             popped = manager.pop_pending(session_id)
-            assert popped is not None  # 前面已经校验 pending is not None
+            assert popped is not None
             user_input = popped.get("user_input", "")
-            trace_id = popped.get("trace_id", str(uuid.uuid4())[:16])
-            risk_level = popped.get("risk_level", "medium")
-            if settings.USE_REAL_LLM:
-                await _real_orchestrate(websocket, session_id, user_input, trace_id, risk_level)
-            else:
-                await _stream_orchestrator(websocket, user_input, trace_id, risk_level)
+            # 确认后走 Day5 Agent 主流程（confirmed=True 跳过重复安全确认）
+            async for frame in _orchestrator.handle_chat(
+                session_id=session_id, user_input=user_input, role="viewer", confirmed=True,
+            ):
+                await websocket.send_json(frame)
             return
 
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
@@ -137,52 +141,29 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
     user_input = content.strip()
     trace_id = str(uuid.uuid4())[:16]
 
-    # 2. 安全检测 —— 统一通过 SafetyGuard
+    # SafetyGuard 检查（高危/中危由 chat 层处理，低危委托 Orchestrator）
     safety = safety_guard.analyze_user_input(user_input)
 
     if not safety["allowed"]:
-        # 高危/拦截：返回 risk_alert，不进入后续流程
-        await _send(
-            websocket,
-            "risk_alert",
-            level=safety["risk_level"],
-            reason=safety["reason"],
-            original_input=user_input,
-            trace_id=trace_id,
-        )
-        await log_chain(
-            trace_id=trace_id,
-            user_input=user_input,
-            risk_level=safety["risk_level"],
-            final_response=safety["reason"],
-        )
+        await _send(websocket, "risk_alert", level=safety["risk_level"], reason=safety["reason"],
+                    original_input=user_input, trace_id=trace_id)
+        await log_chain(trace_id=trace_id, user_input=user_input, risk_level=safety["risk_level"],
+                        final_response=safety["reason"])
         return
 
     if safety["requires_confirm"]:
-        # 中危：返回 risk_alert + confirm_id，挂起等待确认
         confirm_id = f"cfm_{str(uuid.uuid4())[:8]}"
-        manager.set_pending(session_id, {
-            "user_input": user_input,
-            "trace_id": trace_id,
-            "risk_level": safety["risk_level"],
-            "confirm_id": confirm_id,
-        })
-        await _send(
-            websocket,
-            "risk_alert",
-            level=safety["risk_level"],
-            reason=safety["reason"],
-            original_input=user_input,
-            confirm_id=confirm_id,
-            trace_id=trace_id,
-        )
+        manager.set_pending(session_id, {"user_input": user_input, "trace_id": trace_id,
+                                          "risk_level": safety["risk_level"], "confirm_id": confirm_id})
+        await _send(websocket, "risk_alert", level=safety["risk_level"], reason=safety["reason"],
+                    original_input=user_input, confirm_id=confirm_id, trace_id=trace_id)
         return
 
-    # 3. 低危：根据配置选择链路
-    if settings.USE_REAL_LLM:
-        await _real_orchestrate(websocket, session_id, user_input, trace_id, safety["risk_level"])
-    else:
-        await _stream_orchestrator(websocket, user_input, trace_id, safety["risk_level"])
+    # 低危：Day5 Agent 主流程（Orchestrator.handle_chat）
+    async for frame in _orchestrator.handle_chat(
+        session_id=session_id, user_input=user_input, role="viewer",
+    ):
+        await websocket.send_json(frame)
 
 
 async def _stream_orchestrator(
@@ -249,12 +230,20 @@ async def _real_orchestrate(
         return
 
     action = route_result.get("action", "")
+    data = route_result.get("data", {})  # 统一提取，避免分支未定义
 
     if action == "tool_call":
-        data = route_result.get("data", {})
+        if not isinstance(data, dict):
+            await _send(websocket, "error", message="工具调用参数格式错误", trace_id=trace_id)
+            await _send(websocket, "done", trace_id=trace_id)
+            return
+        
         tool = data.get("tool", "")
         args = data.get("args", {})
-
+        
+        if not isinstance(args, dict):
+            args = {}
+        
         await _send(websocket, "status", content=f"正在执行 {tool}...", trace_id=trace_id)
 
         # 2. 执行 MCP 工具调用
@@ -288,8 +277,7 @@ async def _real_orchestrate(
 
     elif action == "root_cause":
         await _send(websocket, "status", content="正在进行根因分析...", trace_id=trace_id)
-        data = route_result.get("data", {})
-        content = data.get("query", user_input)
+        content = data.get("query", user_input) if isinstance(data, dict) else user_input
         await _send(websocket, "chunk", content=f"根因分析结果: {content[:200]}", trace_id=trace_id)
         response_text_parts.append(content[:200])
     else:
