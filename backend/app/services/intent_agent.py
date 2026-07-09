@@ -1,14 +1,30 @@
-"""IntentAgent —— 规则版意图识别
+"""IntentAgent —— 规则版意图识别（含 LLM 增强路径 + fallback）
 
 职责：
-  - 基于关键词/模式匹配识别用户输入意图
+  - 基于关键词/模式匹配识别用户输入意图（规则版 fallback）
+  - 可选接入 LLM 进行意图识别（detect_with_llm）
   - 提取服务名、端口号等实体
-  - 不调用 LLM、不调用 MCPClient、不执行命令
+  - 不调用 MCPClient、不执行命令
   - 不做安全裁决——安全裁决归 SafetyGuard
+  - LLM 输出必须通过 schema 校验，非法时 fallback 规则版
 """
 
+import json
+import logging
 import re
 from typing import Any
+
+from app.services.llm_client import LLMClient
+
+logger = logging.getLogger(__name__)
+
+
+# ── 允许的 intent 范围 ─────────────────────────────────────────────────
+_VALID_INTENTS: set[str] = {
+    "cpu_query", "memory_query", "disk_query", "load_query",
+    "network_query", "service_status_query", "log_query",
+    "root_cause_analysis", "command_execute", "unknown",
+}
 
 
 # ── 服务名白名单 ──────────────────────────────────────────────────────
@@ -129,6 +145,9 @@ class IntentAgent:
         agent = IntentAgent()
         result = agent.detect("查看 CPU 使用率")
         # → {"intent": "cpu_query", "target_service": None, ...}
+
+        # LLM 增强路径（自动 fallback 规则版）：
+        result = await agent.detect_with_llm("查看 CPU 使用率")
     """
 
     def detect(self, content: str) -> dict[str, Any]:
@@ -315,4 +334,130 @@ class IntentAgent:
             "confidence": 0.0,
             "entities": entities,
             "original_input": text,
+        }
+
+    # ── LLM 增强路径 ──────────────────────────────────────────────────
+
+    async def detect_with_llm(self, content: str) -> dict[str, Any]:
+        """使用 LLM 进行意图识别，失败时 fallback 到规则版 detect()
+
+        参数:
+            content: 用户自然语言输入
+
+        返回:
+            与 detect() 相同结构；LLM 失败/非法时自动 fallback
+        """
+        # ── 防御：空输入直接走规则版 ──
+        if not isinstance(content, str) or not content.strip():
+            return self.detect(content)
+
+        # ── 检查 LLM 是否启用 ──
+        from config import settings
+        if not settings.LLM_ENABLED:
+            logger.debug("[IntentAgent] LLM 未启用，使用规则版")
+            return self.detect(content)
+
+        # ── 调用 LLM ──
+        try:
+            client = LLMClient()
+
+            system_prompt = (
+                "你是一个意图分类器。根据用户输入，判断运维意图。\n"
+                "只输出 JSON，不输出任何解释文字。\n"
+                "JSON 字段：intent（意图名）、target_service（目标服务名或 null）、"
+                "confidence（置信度 0.0~1.0）、entities（提取的实体对象，可空）。\n"
+                f"intent 必须在以下范围内：{', '.join(sorted(_VALID_INTENTS))}\n"
+                "target_service 必须是系统服务名（如 nginx、redis、mysql 等），或 null。"
+            )
+            user_prompt = f"用户输入：{content}"
+
+            resp = await client.chat_simple(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+
+            if not resp.ok:
+                logger.info(f"[IntentAgent] LLM 调用失败，fallback 规则版: {resp.error}")
+                return self.detect(content)
+
+            # ── 解析 JSON ──
+            llm_result = self._parse_llm_intent_json(resp.content)
+
+            # ── Schema 校验 ──
+            validated = self._validate_llm_intent(llm_result, content)
+            if validated is not None:
+                logger.info(f"[IntentAgent] LLM 意图识别成功: {validated['intent']}")
+                return validated
+
+            # ── 校验失败，fallback ──
+            logger.warning("[IntentAgent] LLM 输出校验失败，fallback 规则版")
+            return self.detect(content)
+
+        except Exception as e:
+            logger.warning(f"[IntentAgent] LLM 路径异常，fallback 规则版: {e}")
+            return self.detect(content)
+
+    @staticmethod
+    def _parse_llm_intent_json(raw: str) -> dict[str, Any]:
+        """从 LLM 原始输出中提取 JSON 对象"""
+        text = raw.strip()
+        # 去掉 markdown 代码块
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # 尝试提取第一个 JSON 对象
+            m = re.search(r'\{[^{}]*\}', text)
+            if m:
+                try:
+                    return json.loads(m.group())
+                except json.JSONDecodeError:
+                    pass
+            return {}
+
+    @staticmethod
+    def _validate_llm_intent(llm_result: dict, original_input: str) -> dict | None:
+        """校验 LLM 意图识别结果
+
+        返回校验通过后的标准化 dict，失败返回 None。
+        """
+        if not isinstance(llm_result, dict):
+            return None
+
+        intent = llm_result.get("intent", "")
+        if not intent or intent not in _VALID_INTENTS:
+            return None
+
+        # confidence 校验：0.0 ~ 1.0
+        confidence = llm_result.get("confidence", 0.0)
+        try:
+            confidence = float(confidence)
+        except (ValueError, TypeError):
+            return None
+        if not (0.0 <= confidence <= 1.0):
+            return None
+
+        # target_service 校验
+        target_service = llm_result.get("target_service")
+        if target_service is not None:
+            if not isinstance(target_service, str) or not target_service.strip():
+                target_service = None
+            elif target_service.lower() not in _KNOWN_SERVICES:
+                # LLM 返回了不在白名单的服务名，信任但标记
+                logger.debug(f"[IntentAgent] LLM 返回非白名单服务: {target_service}")
+
+        # entities 校验
+        entities = llm_result.get("entities", {})
+        if not isinstance(entities, dict):
+            entities = {}
+
+        return {
+            "intent": intent,
+            "target_service": target_service,
+            "confidence": confidence,
+            "entities": entities,
+            "original_input": original_input,
         }
