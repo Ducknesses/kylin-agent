@@ -1,15 +1,23 @@
-"""ReporterAgent —— 规则版诊断报告生成
+"""ReporterAgent —— 规则版诊断报告生成（含 LLM 增强路径 + fallback）
 
 职责：
   - 将 observations 转成用户可读的 Markdown 诊断报告
+  - 可选接入 LLM 生成自然语言报告（generate_with_llm）
   - 不调用 MCPClient、不调用 AgentHarness、不执行系统命令
   - 工具没有返回的数据不编造
   - MCP 失败时明确说明"无法确认"
   - 输出前做敏感信息过滤
+  - LLM 失败/超时/无 key/输出为空时 fallback 到规则版
 """
 
+import json
+import logging
 import re
 from typing import Any
+
+from app.services.llm_client import LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 # ── 敏感信息过滤 ──────────────────────────────────────────────────────
@@ -724,3 +732,128 @@ class ReporterAgent:
             f"### 判断\n该项无法确认，工具调用失败。\n\n"
             f"### 建议\n1. 检查 MCP Server 是否正常运行\n2. 确认工具参数是否正确\n3. 稍后重试\n"
         )
+
+    # ── LLM 增强路径 ──────────────────────────────────────────────────
+
+    async def generate_with_llm(
+        self,
+        intent_result: dict,
+        observations: list[dict],
+        user_input: str = "",
+    ) -> str:
+        """使用 LLM 生成诊断报告，失败时 fallback 到规则版 generate()
+
+        LLM 只根据已验证的工具结果生成报告：
+          - 不能编造工具没有返回的数据
+          - 不能输出执行命令
+          - 不能输出未经验证的系统状态
+          - 不能输出敏感信息
+          - 输出为空时 fallback
+
+        返回:
+            Markdown 格式诊断报告字符串（已脱敏）
+        """
+        from config import settings
+        if not settings.LLM_ENABLED:
+            logger.debug("[ReporterAgent] LLM 未启用，使用规则版")
+            return self.generate(intent_result, observations, user_input)
+
+        obs_summary = self._summarize_observations(observations)
+        if not obs_summary:
+            logger.debug("[ReporterAgent] 无可用的 observations，使用规则版")
+            return self.generate(intent_result, observations, user_input)
+
+        try:
+            client = LLMClient()
+
+            intent_name = intent_result.get("intent", "unknown") if isinstance(intent_result, dict) else "unknown"
+            target_service = intent_result.get("target_service", "") if isinstance(intent_result, dict) else ""
+
+            system_prompt = (
+                "你是一个系统运维诊断报告生成器。\n"
+                "只基于提供的观测数据生成报告，不得编造任何未在数据中出现的信息。\n"
+                "输出格式固定为 Markdown，包含四级标题：\n"
+                "## 诊断报告\n"
+                "### 现象\n（描述用户问题和观察到的现象）\n"
+                "### 证据\n（列出所有已验证的工具观测结果，只包含数据中实际存在的值）\n"
+                "### 判断\n（基于证据的专业判断，不可编造）\n"
+                "### 建议\n（具体可操作的建议，不含危险命令）\n\n"
+                "重要规则：\n"
+                "- 只基于提供的观测数据，不可编造。\n"
+                "- 不可输出 rm、mkfs、chmod 777、dd、curl pipe 等危险命令。\n"
+                "- 不可输出 API Key、密码、token 等敏感信息。\n"
+                "- 不可输出未在数据中出现过的数值（CPU%、内存% 等）。\n"
+                "- 数据不足时明确说明「无法确认」，不要猜测。"
+            )
+            user_prompt = (
+                f"意图：{intent_name}\n"
+                f"目标服务：{target_service or '无'}\n"
+                f"用户输入：{user_input}\n"
+                f"观测数据：{obs_summary}\n"
+            )
+
+            resp = await client.chat_simple(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+
+            if not resp.ok:
+                logger.info(f"[ReporterAgent] LLM 调用失败，fallback 规则版: {resp.error}")
+                return self.generate(intent_result, observations, user_input)
+
+            content = resp.content.strip()
+            if not content:
+                logger.warning("[ReporterAgent] LLM 返回空内容，fallback 规则版")
+                return self.generate(intent_result, observations, user_input)
+
+            if self._contains_dangerous_content(content):
+                logger.warning("[ReporterAgent] LLM 输出包含危险内容，fallback 规则版")
+                return self.generate(intent_result, observations, user_input)
+
+            return sanitize_text(content)
+
+        except Exception as e:
+            logger.warning(f"[ReporterAgent] LLM 路径异常，fallback 规则版: {e}")
+            return self.generate(intent_result, observations, user_input)
+
+    @staticmethod
+    def _summarize_observations(observations: list[dict]) -> str:
+        """将 observations 列表摘要为 LLM 可读的文本"""
+        if not isinstance(observations, list) or not observations:
+            return ""
+
+        parts: list[str] = []
+        for i, obs in enumerate(observations):
+            if not isinstance(obs, dict):
+                continue
+            tool = obs.get("tool", f"unknown_{i}")
+            ok = obs.get("ok", False)
+            if not ok:
+                parts.append(f"[{tool}] 调用失败: {obs.get('error', '未知错误')}")
+                continue
+            result = obs.get("result", {})
+            if result:
+                result_str = json.dumps(result, ensure_ascii=False, default=str)
+                if len(result_str) > 800:
+                    result_str = result_str[:800] + "..."
+                parts.append(f"[{tool}] {result_str}")
+            else:
+                parts.append(f"[{tool}] 无返回数据")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _contains_dangerous_content(text: str) -> bool:
+        """检查 LLM 输出是否包含危险命令或模式"""
+        dangerous_patterns = [
+            r"\brm\s+-rf\b",
+            r"\bmkfs\.\w+",
+            r"\bchmod\s+777\b",
+            r"\bdd\s+if=.*of=/dev/",
+            r"curl\b.*\|.*\b(bash|sh)\b",
+            r"wget\b.*\|.*\b(bash|sh)\b",
+        ]
+        for pattern in dangerous_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
