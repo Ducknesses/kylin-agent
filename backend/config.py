@@ -6,9 +6,28 @@ from typing import Optional
 class Settings:
     """应用配置，优先从环境变量读取"""
 
-    # DeepSeek API
+    # ── LLM 统一配置 ──────────────────────────────────────────────────
+    # 主开关：false 时所有 Agent 走规则版 fallback
+    LLM_ENABLED: bool = os.getenv("LLM_ENABLED", "false").lower() == "true"
+    # 当前提供商：deepseek | local_openai_compatible
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "deepseek")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-v4-pro")
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+    LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "20"))
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+
+    # DeepSeek API（兼容旧配置字段）
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+
+    # ── 本地模型预留配置 ───────────────────────────────────────────────
+    # 切换方式：LLM_PROVIDER=local_openai_compatible
+    LOCAL_LLM_ENABLED: bool = os.getenv("LOCAL_LLM_ENABLED", "false").lower() == "true"
+    LOCAL_LLM_PROVIDER: str = os.getenv("LOCAL_LLM_PROVIDER", "openai_compatible")
+    LOCAL_LLM_BASE_URL: str = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    LOCAL_LLM_MODEL: str = os.getenv("LOCAL_LLM_MODEL", "local-model")
+    LOCAL_LLM_API_KEY: str = os.getenv("LOCAL_LLM_API_KEY", "")
 
     # MCP Server（VirtualBox 麒麟 V11）
     MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://192.168.56.101:8001")
