@@ -24,7 +24,7 @@ class Settings:
     # ── 本地模型预留配置 ───────────────────────────────────────────────
     # 切换方式：LLM_PROVIDER=local_openai_compatible
     LOCAL_LLM_ENABLED: bool = os.getenv("LOCAL_LLM_ENABLED", "false").lower() == "true"
-    LOCAL_LLM_PROVIDER: str = os.getenv("LOCAL_LLM_PROVIDER", "openai_compatible")
+    LOCAL_LLM_PROVIDER: str = os.getenv("LOCAL_LLM_PROVIDER", "local_openai_compatible")
     LOCAL_LLM_BASE_URL: str = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
     LOCAL_LLM_MODEL: str = os.getenv("LOCAL_LLM_MODEL", "local-model")
     LOCAL_LLM_API_KEY: str = os.getenv("LOCAL_LLM_API_KEY", "")
@@ -54,9 +54,7 @@ class Settings:
     # Token 认证（空字符串表示不启用认证，向后兼容）
     API_TOKEN: str = os.getenv("API_TOKEN", "")
 
-    # Mock/Real 模式切换
-    # true  → 走真实 DeepSeek + MCP 链路
-    # false → 走 Mock 编排器（仅供前端联调）
+# Deprecated: use LLM_ENABLED instead. Kept for backward compatibility only.
     USE_REAL_LLM: bool = os.getenv("USE_REAL_LLM", "false").lower() == "true"
 
     # 日志

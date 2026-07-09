@@ -234,6 +234,15 @@ class DiagnoseAgent:
                 return result["plans"]
             return []
         except json.JSONDecodeError:
+            # 尝试逐个非贪婪候选 JSON 数组
+            for m in re.finditer(r'\[.*?\]', text, re.DOTALL):
+                try:
+                    candidate = json.loads(m.group())
+                    if isinstance(candidate, list):
+                        return candidate
+                except json.JSONDecodeError:
+                    continue
+            # 回退：上一次贪婪匹配
             m = re.search(r'\[.*\]', text, re.DOTALL)
             if m:
                 try:
