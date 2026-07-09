@@ -554,3 +554,69 @@ class TestSafetyGuardException:
         assert result["ok"] is False
         assert result["blocked"] is True
         assert "安全检查服务异常" in result["error"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAJOR #2: observation 脱敏测试
+# ═══════════════════════════════════════════════════════════════════
+
+class FakeMCPClientWithSensitive:
+    """返回含敏感信息的 MCP 结果"""
+
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, tool_name: str, arguments: dict | None = None) -> dict:
+        self.calls.append((tool_name, arguments))
+        return {
+            "ok": True,
+            "result": {
+                "cpu_percent": 50,
+                "auth_header": "Authorization: Bearer sk-secret123",
+                "config": "token=abc123",
+                "creds": {"password": "admin123", "secret_key": "xxx"},
+                "nested": [{"access_token": "yyy"}, "Bearer xyz789"],
+                "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dummy",
+            },
+            "error": None,
+        }
+
+
+class TestObservationSanitization:
+    """observation 脱敏测试"""
+
+    def test_observations_sanitized(self):
+        """敏感值不应出现在 observations 中"""
+        ctx = AgentContext(session_id="s1", user_input="test")
+        mcp = FakeMCPClientWithSensitive()
+        harness = AgentHarness(FakeSafetyGuard(), FakeToolRegistry(), mcp)
+
+        _run(harness.run_tool(ctx, "sys_info", {"metric": "cpu"}))
+
+        obs_str = str(ctx.observations)
+        assert "sk-secret123" not in obs_str
+        assert "abc123" not in obs_str
+        assert "admin123" not in obs_str
+        assert "xxx" not in obs_str or "[REDACTED]" in obs_str
+        assert "yyy" not in obs_str
+
+    def test_observations_contain_redacted(self):
+        """observations 应包含 [REDACTED] 标记"""
+        ctx = AgentContext(session_id="s1", user_input="test")
+        harness = AgentHarness(FakeSafetyGuard(), FakeToolRegistry(), FakeMCPClientWithSensitive())
+
+        _run(harness.run_tool(ctx, "sys_info", {"metric": "cpu"}))
+
+        obs_str = str(ctx.observations)
+        assert "[REDACTED]" in obs_str
+
+    def test_mcp_receives_original_params(self):
+        """MCPClient 收到原始参数，非脱敏参数"""
+        ctx = AgentContext(session_id="s1", user_input="test")
+        mcp = FakeMCPClientWithSensitive()
+        harness = AgentHarness(FakeSafetyGuard(), FakeToolRegistry(), mcp)
+
+        _run(harness.run_tool(ctx, "sys_info", {"metric": "cpu"}))
+
+        call = mcp.calls[0]
+        assert call[1] == {"metric": "cpu"}  # 原始参数，非脱敏

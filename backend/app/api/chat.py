@@ -118,9 +118,10 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
             popped = manager.pop_pending(session_id)
             assert popped is not None
             user_input = popped.get("user_input", "")
-            # 确认后走 Day5 Agent 主流程（confirmed=True 跳过重复安全确认）
+            # 确认后走 Day5 Agent 主流程（confirmed=True，trace_id 保持连续性）
             async for frame in _orchestrator.handle_chat(
                 session_id=session_id, user_input=user_input, role="viewer", confirmed=True,
+                trace_id=popped.get("trace_id"),
             ):
                 await websocket.send_json(frame)
             return
@@ -161,7 +162,7 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
 
     # 低危：Day5 Agent 主流程（Orchestrator.handle_chat）
     async for frame in _orchestrator.handle_chat(
-        session_id=session_id, user_input=user_input, role="viewer",
+        session_id=session_id, user_input=user_input, role="viewer", trace_id=trace_id,
     ):
         await websocket.send_json(frame)
 

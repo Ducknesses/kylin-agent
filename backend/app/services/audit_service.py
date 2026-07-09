@@ -18,6 +18,7 @@ import os
 import re
 from datetime import datetime
 from typing import Any
+
 import aiosqlite
 
 from app.audit.models import _compute_hash, get_last_hash
@@ -37,6 +38,13 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'(?i)api_key[=:]\s*[^\s"\']+'), f"api_key={_SENSITIVE_REPLACE}"),
     (re.compile(r'(?i)password[=:]\s*[^\s"\']+'), f"password={_SENSITIVE_REPLACE}"),
     (re.compile(r'(?i)secret[=:]\s*[^\s"\']+'), f"secret={_SENSITIVE_REPLACE}"),
+    (re.compile(r'(?i)secret_key[=:]\s*[^\s"\']+'), f"secret_key={_SENSITIVE_REPLACE}"),
+    (re.compile(r'(?i)private_key[=:]\s*[^\s"\']+'), f"private_key={_SENSITIVE_REPLACE}"),
+    (re.compile(r'(?i)access_key[=:]\s*[^\s"\']+'), f"access_key={_SENSITIVE_REPLACE}"),
+    (re.compile(r'(?i)access_token[=:]\s*[^\s"\']+'), f"access_token={_SENSITIVE_REPLACE}"),
+    (re.compile(r'(?i)token[=:]\s*[^\s"\']+'), f"token={_SENSITIVE_REPLACE}"),
+    (re.compile(r'(?i)credential[s]?[=:]\s*[^\s"\']+'), f"credential={_SENSITIVE_REPLACE}"),
+    (re.compile(r'eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+'), _SENSITIVE_REPLACE),
 ]
 
 
@@ -62,17 +70,14 @@ def _truncate(value: str | None, max_len: int = 2000) -> str | None:
 
 # ── 字段迁移 SQL ──────────────────────────────────────────────────────
 # 为旧版 audit_chain 表添加缺失字段，幂等执行（列已存在时跳过）
+# 使用列表而非 split("--")，避免注释片段被当成 SQL 执行
 
-_MIGRATION_SQL = """
--- 添加 session_id 字段
-ALTER TABLE audit_chain ADD COLUMN session_id TEXT;
--- 添加 params 字段（工具参数摘要）
-ALTER TABLE audit_chain ADD COLUMN params TEXT;
--- 添加 error 字段（失败原因）
-ALTER TABLE audit_chain ADD COLUMN error TEXT;
--- 添加 event_type 字段
-ALTER TABLE audit_chain ADD COLUMN event_type TEXT DEFAULT 'tool_call';
-"""
+_MIGRATION_STMTS: list[str] = [
+    "ALTER TABLE audit_chain ADD COLUMN session_id TEXT",
+    "ALTER TABLE audit_chain ADD COLUMN params TEXT",
+    "ALTER TABLE audit_chain ADD COLUMN error TEXT",
+    "ALTER TABLE audit_chain ADD COLUMN event_type TEXT",
+]
 
 
 class AuditService:
@@ -99,17 +104,16 @@ class AuditService:
             from app.audit.models import INIT_SQL
             await db.executescript(INIT_SQL)
             await db.commit()
-            # 增量迁移：逐条尝试添加缺失字段
-            for stmt in _MIGRATION_SQL.strip().split("--"):
-                stmt = stmt.strip()
-                if not stmt:
-                    continue
+            # 增量迁移：逐条尝试添加缺失字段，幂等
+            for stmt in _MIGRATION_STMTS:
                 try:
                     await db.execute(stmt)
                     await db.commit()
-                except aiosqlite.OperationalError:
-                    # 字段已存在，忽略
-                    pass
+                except aiosqlite.OperationalError as exc:
+                    if "duplicate column name" in str(exc).lower():
+                        logger.debug(f"[AuditService] 字段已存在，跳过: {stmt[:50]}")
+                    else:
+                        logger.warning(f"[AuditService] 迁移失败: {stmt[:60]} — {exc}")
 
     # ── 写入方法 ──────────────────────────────────────────────────────
 

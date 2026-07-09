@@ -13,12 +13,43 @@
 """
 
 import logging
+import re
 from typing import Any
 
 from app.audit.logger import log_chain
 from app.services.agent_context import AgentContext
 
 logger = logging.getLogger(__name__)
+
+# ── observation 脱敏 ───────────────────────────────────────────────────
+# 对写入 ctx.observations 的值做敏感信息过滤，不改变原始参数传给 MCP
+
+_SENSITIVE_RE = re.compile(
+    r'(?:sk-[a-zA-Z0-9]{20,})'  # API Key
+    r'|(?:Bearer\s+[a-zA-Z0-9\-_\.]+)'  # Bearer token
+    r'|(?:eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+)'  # JWT
+    , re.IGNORECASE,
+)
+
+_SENSITIVE_KEY_RE = re.compile(
+    r'(?i)^(token|access_token|api_key|password|secret|secret_key|'
+    r'private_key|access_key|credential|credentials)$'
+)
+
+
+def _sanitize_observation(value: Any) -> Any:
+    """递归脱敏 observation 中的敏感值，保留 dict/list 结构"""
+    if isinstance(value, str):
+        return _SENSITIVE_RE.sub("[REDACTED]", value)
+    if isinstance(value, dict):
+        return {
+            k: "[REDACTED]" if isinstance(k, str) and _SENSITIVE_KEY_RE.match(k) and isinstance(v, str)
+            else _sanitize_observation(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_observation(item) for item in value]
+    return value
 
 
 class AgentHarness:
@@ -174,17 +205,16 @@ class AgentHarness:
         ctx.tool_calls[-1]["status"] = "done" if mcp_result.get("ok") else "mcp_error"
         ctx.tool_calls[-1]["mcp_error"] = mcp_result.get("error") if not mcp_result.get("ok") else None
 
-        # ── 6. 记录 observation ──
-        # 不记录 token、Authorization、Bearer、请求头、完整配置对象
+        # ── 6. 记录 observation（脱敏后） ──
         obs = {
             "tool": tool_name,
-            "params": params,
+            "params": _sanitize_observation(params),
             "ok": mcp_result.get("ok", False),
         }
         if mcp_result.get("ok"):
-            obs["result"] = mcp_result.get("result")
+            obs["result"] = _sanitize_observation(mcp_result.get("result"))
         else:
-            obs["error"] = mcp_result.get("error")
+            obs["error"] = _sanitize_observation(mcp_result.get("error"))
         ctx.add_observation(obs)
 
         # ── 7. 审计 ──

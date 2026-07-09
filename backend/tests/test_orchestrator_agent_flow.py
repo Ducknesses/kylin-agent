@@ -387,3 +387,48 @@ class TestConfirmedSafety:
         assert "risk_alert" in types
         assert "tool_call" not in types
         assert len(harness.calls) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAJOR #4: trace_id 连续性测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestTraceIdContinuity:
+    """trace_id 连续性测试"""
+
+    def test_explicit_trace_id_propagates(self):
+        """handle_chat(trace_id='t-fixed') → 所有 frame trace_id 一致"""
+        from app.services.orchestrator import Orchestrator
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+        )
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-t1", "查看 CPU 使用率", confirmed=True, trace_id="t-fixed")
+        ))
+        for m in items:
+            if "trace_id" in m:
+                assert m["trace_id"] == "t-fixed"
+
+    def test_confirmed_with_trace_id_has_tool_call(self):
+        """trace_id 传入不影响 tool_call 生成"""
+        from app.services.orchestrator import Orchestrator
+
+        harness = FakeAgentHarness()
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=harness,
+        )
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-t2", "重启 nginx", confirmed=True, trace_id="fixed-123")
+        ))
+        types = [m["type"] for m in items]
+        assert "tool_call" in types
+        for m in items:
+            if "trace_id" in m:
+                assert m["trace_id"] == "fixed-123"

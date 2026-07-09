@@ -212,18 +212,21 @@ class Orchestrator:
     # ── 主入口 ──────────────────────────────────────────────────────
 
     async def handle_chat(
-        self, session_id: str, user_input: str, role: str = "viewer", confirmed: bool = False
+        self, session_id: str, user_input: str, role: str = "viewer", confirmed: bool = False,
+        trace_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """处理一次完整的用户对话 —— async generator
 
         参数:
-            confirmed: True 表示已通过 WebSocket 二次确认，跳过 SafetyGuard 用户输入检查
-                       但高危拦截仍会生效（SafetyGuard 内部逐工具裁决）。
+            confirmed: True 表示已通过 WebSocket 二次确认，仅跳过中危重复确认
+            trace_id: 指定追踪 ID，用于 confirm approve 后保持 trace_id 连续性
         """
         from app.services.agent_context import AgentContext
 
         # ── 1. 创建上下文 ──
         ctx = AgentContext(session_id=session_id, user_input=user_input, role=role)
+        if trace_id:
+            ctx.trace_id = trace_id
         trace_id = ctx.trace_id
 
         try:

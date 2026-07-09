@@ -240,3 +240,86 @@ class TestNoExternalCalls:
         src = inspect.getsource(au)
         assert "call_tool" not in src
         assert "run_tool" not in src
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BLOCKER #1: 迁移测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestMigration:
+    """扩展字段迁移测试"""
+
+    def test_extended_columns_exist_after_init(self, service):
+        """初始化后 PRAGMA table_info 确认扩展字段存在"""
+        import aiosqlite
+        _run(service._ensure_db())
+        cols = _run(_pragma_columns(service.db_path, "audit_chain"))
+        col_names = {c["name"] for c in cols}
+        for ext in ("session_id", "params", "error", "event_type"):
+            assert ext in col_names, f"缺少扩展字段: {ext}"
+
+    def test_extended_columns_written(self, service):
+        """save_event 后扩展字段真实写入"""
+        _run(service.save_event(
+            trace_id="t-ext", user_input="test", risk_level="low",
+            session_id="s1", params={"metric": "cpu"}, error="boom",
+            event_type="tool_call",
+        ))
+        records = _run(service.list_records())
+        r = records[0]
+        assert r.get("session_id") == "s1"
+        assert r.get("params") is not None
+        assert "metric" in (r.get("params") or "")
+        assert r.get("error") == "boom"
+        assert r.get("event_type") == "tool_call"
+
+    def test_migration_idempotent(self, service):
+        """重复 _ensure_db 不报错"""
+        _run(service._ensure_db())
+        _run(service._ensure_db())
+
+
+async def _pragma_columns(db_path, table):
+    import aiosqlite
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(f"PRAGMA table_info({table})") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAJOR #3: 扩展敏感模式测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestExtendedSensitive:
+    """扩展敏感信息过滤测试"""
+
+    def test_token_filtered(self, service):
+        _run(service.save_event(trace_id="t1", user_input="t", risk_level="low",
+                                command="token=abc123"))
+        records = _run(service.list_records())
+        assert "abc123" not in str(records[0].get("command", ""))
+
+    def test_access_token_filtered(self, service):
+        _run(service.save_event(trace_id="t2", user_input="t", risk_level="low",
+                                raw_output="access_token=abc123"))
+        records = _run(service.list_records())
+        assert "abc123" not in str(records[0].get("raw_output", ""))
+
+    def test_secret_key_filtered(self, service):
+        _run(service.save_event(trace_id="t3", user_input="t", risk_level="low",
+                                error="secret_key=abc123"))
+        records = _run(service.list_records())
+        assert "abc123" not in str(records[0].get("error", ""))
+
+    def test_jwt_filtered(self, service):
+        _run(service.save_event(trace_id="t4", user_input="t", risk_level="low",
+                                final_response="eyJabc.def.ghi token leaked"))
+        records = _run(service.list_records())
+        assert "eyJabc.def.ghi" not in str(records[0].get("final_response", ""))
+
+    def test_llm_reasoning_still_none(self, service):
+        _run(service.save_event(trace_id="t5", user_input="t", risk_level="low",
+                                llm_reasoning="secret_key=abc123"))
+        records = _run(service.list_records())
+        assert records[0].get("llm_reasoning") is None
