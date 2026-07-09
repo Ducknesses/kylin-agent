@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 # 对写入 ctx.observations 的值做敏感信息过滤，不改变原始参数传给 MCP
 
 _SENSITIVE_RE = re.compile(
-    r'(?:sk-[a-zA-Z0-9]{20,})'  # API Key
+    r'(?:sk-[a-zA-Z0-9]{8,})'  # API Key
     r'|(?:Bearer\s+[a-zA-Z0-9\-_\.]+)'  # Bearer token
     r'|(?:eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+)'  # JWT
+    r'|(?:(?:token|access_token|api_key|secret_key|secret|password|'
+    r'authorization|jwt|private_key|access_key|credential)\s*[:=]\s*[^\s,;&\]]+)'  # key=value 字符串
     , re.IGNORECASE,
 )
 
@@ -102,78 +104,52 @@ class AgentHarness:
         # ── 1. 工具存在性检查 ──
         if not self.tool_registry.exists(tool_name):
             return self._record_and_return(
-                ctx,
-                tool_name,
-                params,
-                ok=False,
-                error=f"未知工具: {tool_name}",
-                risk_level="high",
-                blocked=True,
-                status="unknown_tool",
+                ctx, tool_name, params,
+                ok=False, error=f"未知工具: {tool_name}",
+                risk_level="high", blocked=True, status="unknown_tool",
             )
 
         # ── 2. 参数结构校验 ──
         validation = self.tool_registry.validate_params(tool_name, params)
         if not validation["valid"]:
             return self._record_and_return(
-                ctx,
-                tool_name,
-                params,
-                ok=False,
-                error=f"参数校验失败: {'; '.join(validation['errors'])}",
-                risk_level="medium",
-                blocked=True,
-                status="invalid_params",
+                ctx, tool_name, params,
+                ok=False, error=f"参数校验失败: {'; '.join(validation['errors'])}",
+                risk_level="medium", blocked=True, status="invalid_params",
             )
 
         # ── 3. SafetyGuard 安全裁决 ──
         try:
             safety = self.safety_guard.analyze_tool_call(
-                tool=tool_name,
-                params=params,
-                role=ctx.role,
+                tool=tool_name, params=params, role=ctx.role,
             )
         except Exception as e:
             logger.exception(f"[AgentHarness] SafetyGuard 异常: {e}")
             return self._record_and_return(
-                ctx,
-                tool_name,
-                params,
-                ok=False,
-                error="安全检查服务异常",
-                risk_level="high",
-                blocked=True,
-                status="safety_error",
+                ctx, tool_name, params,
+                ok=False, error="安全检查服务异常",
+                risk_level="high", blocked=True, status="safety_error",
             )
 
         # ── 高危 / 拒绝：不调用 MCPClient ──
         if not safety.get("allowed", False):
             return self._record_and_return(
-                ctx,
-                tool_name,
-                params,
-                ok=False,
-                error=safety.get("reason", "安全策略拒绝"),
+                ctx, tool_name, params,
+                ok=False, error=safety.get("reason", "安全策略拒绝"),
                 risk_level=safety.get("risk_level", "high"),
-                blocked=True,
-                status="blocked",
-                safety=safety,
+                blocked=True, status="blocked", safety=safety,
             )
 
         # ── 中危需确认：不调用 MCPClient ──
         if safety.get("requires_confirm", False):
             result = {
-                "ok": False,
-                "requires_confirm": True,
-                "tool": tool_name,
-                "params": params,
+                "ok": False, "requires_confirm": True,
+                "tool": tool_name, "params": params,
                 "reason": safety.get("reason", "需要二次确认"),
                 "risk_level": safety.get("risk_level", "medium"),
             }
-            # 如果 SafetyGuard 返回了 confirm_id 则带上
             if "confirm_id" in safety:
                 result["confirm_id"] = safety["confirm_id"]
-            # 记录到 ctx
             ctx.add_tool_call(tool_name, params, None)
             ctx.tool_calls[-1]["status"] = "requires_confirm"
             ctx.tool_calls[-1]["safety"] = {
@@ -191,16 +167,12 @@ class AgentHarness:
         }
 
         # ── 5. 调用 MCPClient ──
-        # MCPClient.call_tool 的参数名为 arguments（不是 params）
         try:
-            mcp_result = await self.mcp_client.call_tool(
-                tool_name, arguments=params
-            )
+            mcp_result = await self.mcp_client.call_tool(tool_name, arguments=params)
         except Exception as e:
             logger.exception(f"[AgentHarness] MCPClient 异常: {e}")
             mcp_result = {"ok": False, "result": None, "error": "MCP 工具调用异常"}
 
-        # ── 更新 ctx.tool_calls 中本条记录 ──
         ctx.tool_calls[-1]["result"] = mcp_result.get("result") if mcp_result.get("ok") else None
         ctx.tool_calls[-1]["status"] = "done" if mcp_result.get("ok") else "mcp_error"
         ctx.tool_calls[-1]["mcp_error"] = mcp_result.get("error") if not mcp_result.get("ok") else None
@@ -220,41 +192,25 @@ class AgentHarness:
         # ── 7. 审计 ──
         await self._audit(ctx, tool_name, params, safety, mcp_result)
 
-        # ── 构造返回 ──
         if mcp_result.get("ok"):
             return {
-                "ok": True,
-                "tool": tool_name,
-                "params": params,
+                "ok": True, "tool": tool_name, "params": params,
                 "result": mcp_result.get("result"),
                 "risk_level": safety.get("risk_level", "low"),
             }
         else:
             return {
-                "ok": False,
-                "tool": tool_name,
-                "params": params,
+                "ok": False, "tool": tool_name, "params": params,
                 "error": mcp_result.get("error", "MCP 调用失败"),
                 "risk_level": safety.get("risk_level", "low"),
                 "mcp_error": True,
             }
 
-    # ── 内部辅助方法 ─────────────────────────────────────────────────
-
     def _record_and_return(
-        self,
-        ctx: AgentContext,
-        tool_name: str,
-        params: dict,
-        *,
-        ok: bool,
-        error: str,
-        risk_level: str,
-        blocked: bool = False,
-        status: str = "blocked",
-        safety: dict | None = None,
+        self, ctx: AgentContext, tool_name: str, params: dict, *,
+        ok: bool, error: str, risk_level: str, blocked: bool = False,
+        status: str = "blocked", safety: dict | None = None,
     ) -> dict[str, Any]:
-        """统一记录 tool_call 到 ctx 并返回错误结构"""
         ctx.add_tool_call(tool_name, params, None)
         ctx.tool_calls[-1]["status"] = status
         ctx.tool_calls[-1]["blocked"] = blocked
@@ -263,44 +219,27 @@ class AgentHarness:
                 "risk_level": safety.get("risk_level"),
                 "reason": safety.get("reason"),
             }
-        return {
-            "ok": ok,
-            "error": error,
-            "risk_level": risk_level,
-            "blocked": blocked,
-        }
+        return {"ok": ok, "error": error, "risk_level": risk_level, "blocked": blocked}
 
     async def _audit(
-        self,
-        ctx: AgentContext,
-        tool_name: str,
-        params: dict,
-        safety: dict,
-        mcp_result: dict,
+        self, ctx: AgentContext, tool_name: str,
+        params: dict, safety: dict, mcp_result: dict,
     ) -> None:
-        """写审计日志 —— 失败不抛异常，不影响主流程"""
         try:
-            # 如果传入了 audit_service 且有 log_chain 方法，优先使用
             if self.audit_service is not None and hasattr(self.audit_service, "log_chain"):
                 await self.audit_service.log_chain(
-                    trace_id=ctx.trace_id,
-                    user_input=ctx.user_input,
+                    trace_id=ctx.trace_id, user_input=ctx.user_input,
                     risk_level=safety.get("risk_level", "low"),
-                    mcp_tool=tool_name,
-                    command=params.get("command"),
+                    mcp_tool=tool_name, command=params.get("command"),
                     raw_output=str(mcp_result.get("result", ""))[:500] if mcp_result.get("ok") else None,
                     final_response=None,
                 )
             else:
-                # 回退到模块级 log_chain 函数
                 await log_chain(
-                    trace_id=ctx.trace_id,
-                    user_input=ctx.user_input,
+                    trace_id=ctx.trace_id, user_input=ctx.user_input,
                     risk_level=safety.get("risk_level", "low"),
-                    mcp_tool=tool_name,
-                    command=params.get("command"),
+                    mcp_tool=tool_name, command=params.get("command"),
                     raw_output=str(mcp_result.get("result", ""))[:500] if mcp_result.get("ok") else None,
                 )
         except Exception:
-            # 审计失败不能导致 run_tool 崩溃
             logger.warning("[AgentHarness] 审计日志写入失败（已忽略）", exc_info=True)
