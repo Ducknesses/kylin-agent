@@ -41,3 +41,7 @@ backend/data/audit.db
 ws_test.py
 tmp/
 .clinerules
+
+# Reasonix
+.reasonix/
+reasonix.toml

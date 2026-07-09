@@ -38,6 +38,12 @@ def _match_any(text: str, keywords: list[str]) -> bool:
     return any(k in text for k in keywords)
 
 
+def _create_default_mcp_client() -> Any:
+    """创建默认 MCP 客户端实例（模块级函数，避免 Orchestrator 类体内出现导入字符串）"""
+    from app.mcp.client import MCPClient
+    return MCPClient()
+
+
 async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
     """Mock 业务编排，根据用户输入返回流式消息序列
 
@@ -142,3 +148,233 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "done", "trace_id": trace_id}
 
 
+# ── Day5 Orchestrator（Agent 主流程闭环） ────────────────────────────
+
+class Orchestrator:
+    """Agent 主流程编排器 —— 串起 IntentAgent → DiagnoseAgent → AgentHarness → ReporterAgent → AuditService
+
+    handle_chat 是一个 async generator，按 WebSocket v1.1 规范产出事件帧 dict。
+    所有工具调用必须通过 AgentHarness.run_tool，不直接调用执行器客户端。
+    """
+
+    def __init__(
+        self,
+        safety_guard: Any,
+        tool_registry: Any,
+        mcp_client: Any,
+        intent_agent: Any = None,
+        diagnose_agent: Any = None,
+        agent_harness: Any = None,
+        reporter_agent: Any = None,
+        audit_service: Any = None,
+    ) -> None:
+        self.safety_guard = safety_guard
+        self.tool_registry = tool_registry
+        self.mcp_client = mcp_client
+
+        # 延迟导入，避免循环依赖
+        if intent_agent is None:
+            from app.services.intent_agent import IntentAgent
+            intent_agent = IntentAgent()
+        self.intent_agent = intent_agent
+
+        if diagnose_agent is None:
+            from app.services.diagnose_agent import DiagnoseAgent
+            diagnose_agent = DiagnoseAgent(tool_registry=tool_registry)
+        self.diagnose_agent = diagnose_agent
+
+        if agent_harness is None:
+            from app.services.agent_harness import AgentHarness
+            from app.services.tool_registry import ToolRegistry
+            # 默认依赖：如果外部未传入则构造默认实例（WebSocket 路径需要）
+            _tr = tool_registry if tool_registry is not None else ToolRegistry()
+            _mc = mcp_client
+            if _mc is None:
+                _mc = _create_default_mcp_client()
+            agent_harness = AgentHarness(
+                safety_guard=safety_guard,
+                tool_registry=_tr,
+                mcp_client=_mc,
+                audit_service=audit_service,
+            )
+        self.agent_harness = agent_harness
+
+        if reporter_agent is None:
+            from app.services.reporter_agent import ReporterAgent
+            reporter_agent = ReporterAgent()
+        self.reporter_agent = reporter_agent
+
+        if audit_service is None:
+            from app.services.audit_service import AuditService
+            audit_service = AuditService()
+        self.audit_service = audit_service
+
+    # ── 主入口 ──────────────────────────────────────────────────────
+
+    async def handle_chat(
+        self, session_id: str, user_input: str, role: str = "viewer", confirmed: bool = False,
+        trace_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """处理一次完整的用户对话 —— async generator
+
+        参数:
+            confirmed: True 表示已通过 WebSocket 二次确认，仅跳过中危重复确认
+            trace_id: 指定追踪 ID，用于 confirm approve 后保持 trace_id 连续性
+        """
+        from app.services.agent_context import AgentContext
+
+        # ── 1. 创建上下文 ──
+        ctx = AgentContext(session_id=session_id, user_input=user_input, role=role)
+        if trace_id:
+            ctx.trace_id = trace_id
+        trace_id = ctx.trace_id
+
+        try:
+            # ── 2. 用户输入安全检查 ──
+            # confirmed=True 仅跳过中危二次确认，高危始终拦截
+            safety = self.safety_guard.analyze_user_input(user_input)
+            ctx.risk_level = safety.get("risk_level", "low")  # 始终写入，避免 AuditService NOT NULL
+
+            # 高危：无论 confirmed 与否，始终拒绝
+            if not safety.get("allowed", False):
+                ctx.risk_level = safety.get("risk_level", "high")
+                ctx.final_response = safety.get("reason", "安全策略拒绝")
+
+                yield {
+                    "type": "risk_alert",
+                    "trace_id": trace_id,
+                    "level": ctx.risk_level,
+                    "message": safety.get("reason", ""),
+                }
+                yield {
+                    "type": "done",
+                    "trace_id": trace_id,
+                    "session_id": session_id,
+                    "final_response": ctx.final_response,
+                }
+                await self._safe_audit(ctx, "blocked")
+                return
+
+            # 中危 + 未确认：要求二次确认
+            if safety.get("requires_confirm") and not confirmed:
+                ctx.risk_level = safety.get("risk_level", "medium")
+                ctx.final_response = "等待用户确认"
+                yield {
+                    "type": "risk_alert",
+                    "trace_id": trace_id,
+                    "level": "medium",
+                    "message": safety.get("reason", ""),
+                }
+                yield {
+                    "type": "done",
+                    "trace_id": trace_id,
+                    "session_id": session_id,
+                    "final_response": ctx.final_response,
+                }
+                await self._safe_audit(ctx, "confirm_required")
+                return
+
+            # ── 3. IntentAgent 识别意图 ──
+            yield {
+                "type": "status",
+                "trace_id": trace_id,
+                "message": "正在分析您的请求...",
+            }
+
+            intent_result = self.intent_agent.detect(user_input)
+            ctx.intent = intent_result.get("intent")
+
+            # ── 4. DiagnoseAgent 生成工具计划 ──
+            plan_result = self.diagnose_agent.plan(intent_result)
+            plans = plan_result.get("plans", [])
+
+            if not plans:
+                # 无工具计划：直接生成报告
+                report = self.reporter_agent.generate(
+                    intent_result, ctx.observations, user_input
+                )
+                ctx.final_response = report
+
+                # 分块输出报告（每 500 字符一块）
+                for i in range(0, len(report), 500):
+                    yield {
+                        "type": "chunk",
+                        "trace_id": trace_id,
+                        "content": report[i:i + 500],
+                    }
+                yield {
+                    "type": "done",
+                    "trace_id": trace_id,
+                    "session_id": session_id,
+                    "final_response": ctx.final_response,
+                }
+                await self._safe_audit(ctx, "chat_done")
+                return
+
+            # ── 5. 逐个执行工具计划 ──
+            yield {
+                "type": "status",
+                "trace_id": trace_id,
+                "message": f"正在执行 {len(plans)} 个诊断步骤...",
+            }
+
+            for plan_item in plans:
+                tool_name = plan_item["tool"]
+                params = plan_item["params"]
+
+                # 通过 AgentHarness 统一入口执行
+                result = await self.agent_harness.run_tool(ctx, tool_name, params)
+
+                yield {
+                    "type": "tool_call",
+                    "trace_id": trace_id,
+                    "tool": tool_name,
+                    "params": params,
+                    "ok": result.get("ok", False),
+                }
+
+            # ── 6. ReporterAgent 生成最终报告 ──
+            report = self.reporter_agent.generate(
+                intent_result, ctx.observations, user_input
+            )
+            ctx.final_response = report
+
+            for i in range(0, len(report), 500):
+                yield {
+                    "type": "chunk",
+                    "trace_id": trace_id,
+                    "content": report[i:i + 500],
+                }
+
+            yield {
+                "type": "done",
+                "trace_id": trace_id,
+                "session_id": session_id,
+                "final_response": ctx.final_response,
+            }
+            await self._safe_audit(ctx, "chat_done")
+
+        except Exception as e:
+            logger.exception(f"[Orchestrator] 处理异常: {e}")
+            ctx.final_response = "系统处理异常，请稍后重试"
+            yield {
+                "type": "error",
+                "trace_id": trace_id,
+                "message": "系统处理异常，请稍后重试",
+            }
+            yield {
+                "type": "done",
+                "trace_id": trace_id,
+                "session_id": session_id,
+                "final_response": ctx.final_response,
+            }
+            await self._safe_audit(ctx, "error")
+
+    # ── 内部辅助 ──────────────────────────────────────────────────────
+
+    async def _safe_audit(self, ctx: Any, event_type: str) -> None:
+        """安全记审计 —— 失败不抛异常，不影响主流程"""
+        try:
+            await self.audit_service.save_context(ctx, event_type=event_type)
+        except Exception:
+            logger.warning("[Orchestrator] 审计写入失败（已忽略）", exc_info=True)

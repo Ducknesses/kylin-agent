@@ -10,7 +10,7 @@ TOOL_DEFINITIONS: Dict[str, Dict] = {
             "properties": {
                 "metric": {
                     "type": "string",
-                    "enum": ["cpu", "memory", "disk", "load", "all"],
+                    "enum": ["cpu", "memory", "disk", "load", "uptime", "all", "network"],
                     "description": "要查询的指标类型",
                 }
             },
@@ -24,7 +24,7 @@ TOOL_DEFINITIONS: Dict[str, Dict] = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["start", "stop", "restart", "status", "enable", "disable"],
+                    "enum": ["status", "start", "stop", "restart", "is-active", "is-enabled"],
                     "description": "操作类型",
                 },
                 "service": {
@@ -58,10 +58,15 @@ TOOL_DEFINITIONS: Dict[str, Dict] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "iface": {
+                "metric": {
                     "type": "string",
                     "default": "all",
-                    "description": "网卡接口名",
+                    "description": "监控指标类型",
+                    "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
+                },
+                "port": {
+                    "type": "integer",
+                    "description": "要过滤的端口号（仅 metric=listen 时有效）",
                 },
             },
         },
