@@ -3,6 +3,7 @@
 本模块仅创建需要跨模块共享的服务实例，不导入 API 路由。
 后续 Action API 可通过本模块获取 FixOptionStore，无需从 chat.py 导入。
 """
+from app.services.action_service import ActionService
 from app.services.fix_option_store import FixOptionStore
 from app.services.fix_planner_agent import FixPlannerAgent
 from app.services.llm_client import LLMClient
@@ -14,6 +15,9 @@ llm_client = LLMClient()
 
 # FixOptionStore 共享实例
 fix_option_store = FixOptionStore()
+
+# ActionService —— Action API 预检层
+action_service = ActionService(fix_option_store=fix_option_store)
 
 # FixPlannerAgent —— 注入共享 ToolRegistry + LLMClient
 fix_planner = FixPlannerAgent(
