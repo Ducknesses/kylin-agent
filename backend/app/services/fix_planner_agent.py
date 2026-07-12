@@ -1,4 +1,4 @@
-"""FixPlannerAgent —— 规则版一键修复方案规划器
+"""FixPlannerAgent —— 规则版 + LLM 版一键修复方案规划器
 
 职责：
   - 根据诊断结果（intent + observations + report）生成结构化 FixOption 列表
@@ -6,11 +6,15 @@
   - 不生成 risk_level="high" 的 FixOption
   - medium 选项必须 requires_confirm=True
   - rollback 仅作为人工说明文本，不自动执行
+  - plan_with_llm 调用真实 LLMClient，失败自动回退规则版
 """
 
+import json
 import logging
 import uuid
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.schemas.action import FixOption
 
@@ -142,6 +146,28 @@ def _contains_status(
     return False
 
 
+# ── LLM 候选中间模型 ────────────────────────────────────────────────
+# LLM 不生成 option_id/risk_level/requires_confirm，后端统一补全。
+
+class LLMFixCandidate(BaseModel):
+    """LLM 返回的单个修复候选（未经后端校验）"""
+    title: str
+    description: str
+    tool: str
+    params: dict[str, object]
+    rollback: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("title", "description", "tool")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("不能为空或仅包含空白字符")
+        return stripped
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # FixPlannerAgent
 # ═══════════════════════════════════════════════════════════════════════
@@ -160,11 +186,13 @@ class FixPlannerAgent:
         # → [FixOption(...), ...]
     """
 
-    def __init__(self, tool_registry: Any = None) -> None:
+    def __init__(self, tool_registry: Any = None, llm_client: Any = None) -> None:
         """参数:
             tool_registry: 可选 ToolRegistry，提供后会对每项 FixOption 做参数校验
+            llm_client: 可选 LLMClient，为 None 时 plan_with_llm 回退规则版
         """
         self.tool_registry = tool_registry
+        self.llm_client = llm_client
 
     # ── 主入口 ──────────────────────────────────────────────────────
 
@@ -349,3 +377,151 @@ class FixPlannerAgent:
             ))
 
         return options
+
+    # ── LLM 增强路径 ──────────────────────────────────────────────────
+
+    async def plan_with_llm(
+        self,
+        intent: str,
+        observations: list[dict[str, object]],
+        report: str,
+        target_service: str | None = None,
+    ) -> list[FixOption]:
+        """LLM 生成修复候选，经校验后转为 FixOption。失败回退规则版。"""
+        if self.llm_client is None:
+            logger.info("[FixPlanner] llm_client=None，回退规则版")
+            return self.plan(intent, observations, report, target_service)
+        if intent == "command_execute":
+            return self.plan(intent, observations, report, target_service)
+
+        try:
+            prompt = self._build_llm_prompt(intent, observations, report, target_service)
+            resp = await self.llm_client.chat_simple(
+                system_prompt=prompt["system"], user_prompt=prompt["user"],
+            )
+            if not resp.ok:
+                logger.info("[FixPlanner] LLM 调用失败: %s", resp.error)
+                return self.plan(intent, observations, report, target_service)
+
+            candidates = self._parse_llm_candidates(resp.content)
+            if not candidates:
+                logger.info("[FixPlanner] LLM 未生成有效候选，回退规则版")
+                return self.plan(intent, observations, report, target_service)
+
+            options = self._build_fix_options(candidates)
+            if not options:
+                logger.info("[FixPlanner] 所有 LLM 候选被过滤，回退规则版")
+                return self.plan(intent, observations, report, target_service)
+
+            logger.info("[FixPlanner] LLM 生成 %d 个 FixOption", len(options))
+            return options
+        except Exception:
+            logger.exception("[FixPlanner] LLM 路径异常，回退规则版")
+            return self.plan(intent, observations, report, target_service)
+
+    def _build_llm_prompt(
+        self, intent: str, observations: list[dict[str, object]],
+        report: str, target_service: str | None,
+    ) -> dict[str, str]:
+        tool_descs = self._describe_allowed_tools()
+        system = (
+            "你是运维修复方案规划器。根据诊断结果生成修复候选。\n"
+            "只输出 JSON 对象，不输出解释/Markdown/思维过程。\n"
+            '格式: {"options": [{"title":"...","description":"...","tool":"...","params":{...},"rollback":"..."}]}\n'
+            "规则: 1.只用给定工具 2.不生成高风险操作(rm -rf/mkfs/dd/shutdown/curl|sh等) 3.最多3个候选 4.rollback仅作说明文本\n"
+            f"可用工具: {tool_descs}\n"
+            "禁止生成 option_id/risk_level/requires_confirm\n"
+        )
+        obs_summary = []
+        for obs in observations:
+            if isinstance(obs, dict):
+                obs_summary.append({"tool": obs.get("tool"), "ok": obs.get("ok"),
+                                    "has_result": obs.get("result") is not None})
+        user = json.dumps({
+            "intent": intent, "target_service": target_service,
+            "observations_summary": obs_summary,
+            "report": report[:2000],
+        }, ensure_ascii=False, default=str)
+        return {"system": system, "user": user}
+
+    def _describe_allowed_tools(self) -> str:
+        if self.tool_registry is not None:
+            return ", ".join(self.tool_registry.get_tool_names())
+        return "sys_info, service_mgr, log_reader, net_monitor, cmd_exec"
+
+    @staticmethod
+    def _parse_llm_candidates(raw: str) -> list[dict]:
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(data, dict) and "options" in data:
+            opts = data["options"]
+            if isinstance(opts, list):
+                return [o for o in opts if isinstance(o, dict)]
+        return []
+
+    def _build_fix_options(self, candidates: list[dict]) -> list[FixOption]:
+        seen: set[tuple[str, str]] = set()
+        results: list[FixOption] = []
+        _MAX = 3
+        for item in candidates:
+            if len(results) >= _MAX:
+                break
+            try:
+                candidate = LLMFixCandidate(**item)
+            except Exception:
+                continue
+            if self.tool_registry is None:
+                return []
+            if not self.tool_registry.exists(candidate.tool):
+                continue
+            validation = self.tool_registry.validate_params(candidate.tool, candidate.params)
+            if not validation["valid"]:
+                continue
+            if candidate.tool == "cmd_exec":
+                cmd = str(candidate.params.get("command", ""))
+                if _is_dangerous_cmd(cmd):
+                    continue
+            action = candidate.params.get("action")
+            risk = self.tool_registry.get_risk_for_action(candidate.tool, action) if action else None
+            if risk is None:
+                risk = self.tool_registry.get_default_risk(candidate.tool)
+            if risk is None or risk == "high":
+                continue
+            params_key = json.dumps(candidate.params, sort_keys=True, default=str)
+            if (candidate.tool, params_key) in seen:
+                continue
+            seen.add((candidate.tool, params_key))
+            results.append(FixOption(
+                option_id=f"fix_{uuid.uuid4().hex[:8]}",
+                title=candidate.title, description=candidate.description,
+                risk_level=risk,  # type: ignore[arg-type]
+                tool=candidate.tool, params=candidate.params,
+                requires_confirm=(risk == "medium"),
+                rollback=candidate.rollback,
+            ))
+        return results
+
+
+# ── 高危命令检测 ─────────────────────────────────────────────────────
+
+_HIGH_RISK_CMD_PATTERNS = [
+    "rm -rf", "rm -r", "mkfs.", "shutdown", "reboot", "halt",
+    "passwd", "userdel", "groupdel",
+    "iptables -F", "iptables --flush",
+    "auditctl -D", "auditctl -e 0",
+    "dd if=", "curl ", "| sh", "| bash",
+    "bash -c", "sh -c", "python -c",
+    "chmod 777", "> /etc/",
+]
+
+
+def _is_dangerous_cmd(command: str) -> bool:
+    cmd_lower = command.lower()
+    return any(p.lower() in cmd_lower for p in _HIGH_RISK_CMD_PATTERNS)

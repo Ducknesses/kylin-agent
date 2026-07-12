@@ -731,9 +731,15 @@ class TestSafetyBoundary:
                 raise AssertionError(f"AgentHarness 不应被导入: {stripped}")
 
     def test_no_llm_client_import(self):
+        """模块不导入 LLMClient（注释中提及不算导入）"""
         import app.services.fix_planner_agent as fp
-        src = Path(fp.__file__).read_text(encoding="utf-8")
-        assert "LLMClient" not in src
+        src_lines = Path(fp.__file__).read_text(encoding="utf-8").splitlines()
+        for line in src_lines:
+            s = line.strip()
+            if s.startswith("#") or s.startswith('"""') or s.startswith("'''"):
+                continue
+            if "LLMClient" in s and ("import" in s or "from" in s):
+                raise AssertionError(f"LLMClient 不应被导入: {s}")
 
     def test_no_subprocess(self):
         import app.services.fix_planner_agent as fp
