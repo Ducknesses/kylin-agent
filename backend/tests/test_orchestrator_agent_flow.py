@@ -432,3 +432,380 @@ class TestTraceIdContinuity:
         for m in items:
             if "trace_id" in m:
                 assert m["trace_id"] == "fixed-123"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Day 6-4: FixOption 集成测试
+# ═══════════════════════════════════════════════════════════════════
+
+
+class FakeFixOptionStore:
+    """记录保存调用的假 Store"""
+    def __init__(self):
+        self.saved = []  # (session_id, trace_id, options)
+
+    def save_options(self, session_id, trace_id, options):
+        self.saved.append((session_id, trace_id, options))
+        return [o.option_id for o in options]
+
+    def get_option(self, session_id, option_id):
+        return None
+
+
+class FakeFixPlanner:
+    """返回预设 FixOption 列表的假 Planner"""
+    def __init__(self, options=None):
+        self.options = options or []
+        self.plan_calls = []
+
+    def plan(self, intent, observations, report, target_service=None):
+        self.plan_calls.append((intent, observations, report, target_service))
+        return list(self.options)
+
+
+class TestFixOptionFlow:
+    """FixPlanner → Store → fix_options 帧 完整链路"""
+
+    def test_service_issue_generates_fix_options_frame(self):
+        """服务异常 observation 生成 restart FixOption 并出现在帧中"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fix_test01",
+            title="重启 nginx",
+            description="测试",
+            risk_level="medium",
+            tool="service_mgr",
+            params={"action": "restart", "service": "nginx"},
+            requires_confirm=True,
+        )
+        fix_planner = FakeFixPlanner(options=[opt])
+        store = FakeFixOptionStore()
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=fix_planner,
+            fix_option_store=store,
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f1", "查看 CPU 使用率")))
+
+        # fix_options 帧
+        fix_frames = [m for m in items if m["type"] == "fix_options"]
+        assert len(fix_frames) == 1
+        assert len(fix_frames[0]["options"]) == 1
+        assert fix_frames[0]["options"][0]["option_id"] == "fix_test01"
+
+    def test_fix_options_after_all_chunks_before_done(self):
+        """fix_options 在所有 chunk 之后，done 之前"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fix_f2", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "memory"}, requires_confirm=False,
+        )
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f2", "查看 CPU")))
+        types = [m["type"] for m in items]
+        # 全部 chunk 索引 < fix_options 索引 < done 索引
+        chunk_indices = [i for i, t in enumerate(types) if t == "chunk"]
+        fix_idx = types.index("fix_options")
+        done_idx = types.index("done")
+        assert len(chunk_indices) >= 1
+        for ci in chunk_indices:
+            assert ci < fix_idx < done_idx
+
+    def test_fix_options_only_once(self):
+        """fix_options 帧只出现一次"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fix_f3", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f3", "查看 CPU")))
+        fix_frames = [m for m in items if m["type"] == "fix_options"]
+        assert len(fix_frames) == 1
+
+    def test_no_options_no_fix_options_frame(self):
+        """FixPlanner 返回空列表时不发送 fix_options"""
+        from app.services.orchestrator import Orchestrator
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[]),
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f4", "查看 CPU")))
+        fix_frames = [m for m in items if m["type"] == "fix_options"]
+        assert len(fix_frames) == 0
+
+    def test_high_risk_blocked_no_fix_options(self):
+        """高危输入被阻断时不生成 fix_options"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fix_blocked", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f5", "rm -rf /")))
+        types = [m["type"] for m in items]
+        assert "fix_options" not in types
+
+    def test_save_options_called_with_correct_ids(self):
+        """Store 保存时 session_id 和 trace_id 正确"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fx_save", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        store = FakeFixOptionStore()
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=store,
+        )
+
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-f6", "查看 CPU", trace_id="trace-xyz")
+        ))
+        assert len(store.saved) == 1
+        sid, tid, opts = store.saved[0]
+        assert sid == "s-f6"
+        assert tid == "trace-xyz"
+        assert opts[0].option_id == "fx_save"
+
+    def test_fix_options_not_return_store_internals(self):
+        """fix_options 帧不暴露 Store 内部字段"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fx_int", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f7", "查看 CPU")))
+        fix_frames = [m for m in items if m["type"] == "fix_options"]
+        opt_data = fix_frames[0]["options"][0]
+        forbidden = {"status", "created_at", "expires_at", "executed_at"}
+        assert forbidden.isdisjoint(opt_data.keys())
+
+    def test_fix_planner_receives_intent_and_observations(self):
+        """FixPlanner.plan() 收到正确的 intent 和 observations"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fx_args", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        fix_planner = FakeFixPlanner(options=[opt])
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=fix_planner,
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        asyncio.run(_collect(orch.handle_chat("s-f8", "查看 CPU 使用率")))
+        assert len(fix_planner.plan_calls) == 1
+        intent, obs, report, target = fix_planner.plan_calls[0]
+        assert intent in ("cpu_query", "unknown")  # 真实 IntentAgent 输出
+        assert isinstance(obs, list)
+
+    def test_store_save_failure_yields_error_then_done(self):
+        """Store 保存失败 → error + done，不发送 fix_options"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fx_fail", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+
+        audit = FakeAuditService()
+
+        class FailingStore:
+            def save_options(self, session_id, trace_id, options):
+                raise RuntimeError("DB down")
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=FailingStore(),
+            audit_service=audit,
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f9", "查看 CPU")))
+        types = [m["type"] for m in items]
+        assert "fix_options" not in types
+        assert "error" in types
+        assert types[-1] == "done"
+        error_idx = types.index("error")
+        done_idx = types.index("done")
+        assert error_idx < done_idx
+        # 审计应记录 error
+        assert any(c[1] == "error" for c in audit.calls)
+
+    def test_existing_flow_no_regression(self):
+        """原有 status/chunk/tool_call/done 帧不受影响"""
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fx_reg", title="t", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=FakeFixOptionStore(),
+        )
+
+        items = asyncio.run(_collect(orch.handle_chat("s-f10", "查看 CPU 使用率")))
+        types = [m["type"] for m in items]
+        for t in ("status", "tool_call", "chunk", "done"):
+            assert t in types
+        assert types[-1] == "done"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Day 6-4a: 真实 FixOptionStore 集成测试
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestRealStoreIntegration:
+    """使用真实 FixOptionStore 的端到端测试"""
+
+    def test_real_store_can_query_option_after_handle_chat(self):
+        from app.services.fix_option_store import FixOptionStore
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        opt = FixOption(
+            option_id="fx_real1", title="真实Store", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        store = FixOptionStore()
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt]),
+            fix_option_store=store,
+        )
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-real1", "查看 CPU", trace_id="trace-real1")
+        ))
+        fix_frames = [m for m in items if m["type"] == "fix_options"]
+        frame_opt_id = fix_frames[0]["options"][0]["option_id"]
+
+        stored = store.get_option("s-real1", frame_opt_id)
+        assert stored is not None
+        assert stored.option.option_id == "fx_real1"
+        assert stored.session_id == "s-real1"
+        assert stored.trace_id == "trace-real1"
+
+    def test_same_store_reused_across_two_sessions(self):
+        from app.services.fix_option_store import FixOptionStore
+        from app.services.orchestrator import Orchestrator
+        from app.schemas.action import FixOption
+
+        store = FixOptionStore()
+        opt1 = FixOption(
+            option_id="s1_opt", title="s1", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "cpu"}, requires_confirm=False,
+        )
+        opt2 = FixOption(
+            option_id="s2_opt", title="s2", description="d",
+            risk_level="low", tool="sys_info",
+            params={"metric": "memory"}, requires_confirm=False,
+        )
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+            fix_planner=FakeFixPlanner(options=[opt1]),
+            fix_option_store=store,
+        )
+        asyncio.run(_collect(orch.handle_chat("s-A", "查看 CPU")))
+        orch.fix_planner = FakeFixPlanner(options=[opt2])
+        asyncio.run(_collect(orch.handle_chat("s-B", "查看 CPU")))
+
+        assert store.get_option("s-A", "s1_opt") is not None
+        assert store.get_option("s-B", "s2_opt") is not None
+        assert store.get_option("s-A", "s2_opt") is None
+        assert store.get_option("s-B", "s1_opt") is None

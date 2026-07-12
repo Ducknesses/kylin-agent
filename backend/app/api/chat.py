@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
+from app.dependencies import fix_option_store, fix_planner
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
 from app.services.safety_guard import SafetyGuard
@@ -23,13 +24,16 @@ from app.services.safety_guard import SafetyGuard
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 连接管理器、安全护栏、编排器（模块级单例）
+# 连接管理器、安全护栏（模块级单例）
 manager = ConnectionManager()
 safety_guard = SafetyGuard()
+# 编排器（注入来自 dependencies.py 的共享 FixPlanner / FixOptionStore）
 _orchestrator = Orchestrator(
     safety_guard=safety_guard,
     tool_registry=None,  # 使用 Orchestrator 默认构造
     mcp_client=None,     # 使用 Orchestrator 默认构造
+    fix_planner=fix_planner,
+    fix_option_store=fix_option_store,
 )
 
 # ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────
