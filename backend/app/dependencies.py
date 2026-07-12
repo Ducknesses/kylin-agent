@@ -34,12 +34,18 @@ audit_service = AuditService()
 # FixOptionStore 共享实例
 fix_option_store = FixOptionStore()
 
+from app.services.confirmation_store import ConfirmationStore
+
+# ConfirmationStore —— medium 确认存储
+confirmation_store = ConfirmationStore()
+
 # ActionService —— 注入真实执行依赖
 action_service = ActionService(
     fix_option_store=fix_option_store,
     safety_guard=safety_guard,
     agent_harness=agent_harness,
     audit_service=audit_service,
+    confirmation_store=confirmation_store,
 )
 
 # FixPlannerAgent —— 注入共享 ToolRegistry + LLMClient

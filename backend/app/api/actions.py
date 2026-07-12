@@ -44,4 +44,5 @@ async def execute_action(req: ActionExecuteRequest):
         message=result.message,
         requires_confirm=result.requires_confirm,
         result_summary=result.result_summary,
+        confirm_id=result.confirm_id,
     )

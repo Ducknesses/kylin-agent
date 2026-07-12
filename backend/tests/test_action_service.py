@@ -57,12 +57,14 @@ class FakeAuditService:
 @pytest.fixture
 def svc():
     from app.services.action_service import ActionService
+    from app.services.confirmation_store import ConfirmationStore
     store = FixOptionStore()
     return ActionService(
         fix_option_store=store,
         safety_guard=FakeSafetyGuard(),
         agent_harness=FakeAgentHarness(),
         audit_service=FakeAuditService(),
+        confirmation_store=ConfirmationStore(),
     ), store
 
 
@@ -257,12 +259,48 @@ async def test_cmd_exec_sanitized(svc):
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_medium_not_executed(svc):
+async def test_medium_confirm_id_and_created_audit(svc):
     s, store = svc
     store.save_options("s1", "t1", [_opt("fix_m1", "medium")])
     r = await s.execute("s1", "fix_m1")
     assert r.result == "confirm_required"
+    assert r.confirm_id is not None
+    assert r.confirm_id.startswith("cfm_")
     assert len(s._harness.calls) == 0
+    assert store.get_option("s1", "fix_m1").status == "confirm_required"
+    assert any(c["event_type"] == "action_confirm_created" for c in s._audit.calls)
+
+@pytest.mark.asyncio
+async def test_medium_repeat_no_duplicate_audit(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_m2", "medium")])
+    r1 = await s.execute("s1", "fix_m2")
+    r2 = await s.execute("s1", "fix_m2")
+    assert r1.confirm_id == r2.confirm_id
+    created_count = sum(1 for c in s._audit.calls if c["event_type"] == "action_confirm_created")
+    assert created_count == 1
+
+@pytest.mark.asyncio
+async def test_medium_audit_has_confirm_id(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_m3", "medium")])
+    r = await s.execute("s1", "fix_m3")
+    aud = [c for c in s._audit.calls if c["event_type"] == "action_confirm_created"][0]
+    p = aud["tool_calls"][0]["params"]
+    assert p["option_id"] == "fix_m3"
+    assert p["confirm_id"] == r.confirm_id
+
+@pytest.mark.asyncio
+async def test_medium_concurrent_same_confirm_id(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_mc1", "medium")])
+    r1, r2 = await asyncio.gather(s.execute("s1", "fix_mc1"), s.execute("s1", "fix_mc1"))
+    assert r1.result == "confirm_required"
+    assert r2.result == "confirm_required"
+    assert r1.confirm_id == r2.confirm_id
+    assert len(s._harness.calls) == 0
+    created_count = sum(1 for c in s._audit.calls if c["event_type"] == "action_confirm_created")
+    assert created_count <= 1
 
 @pytest.mark.asyncio
 async def test_concurrent_one_harness(svc):

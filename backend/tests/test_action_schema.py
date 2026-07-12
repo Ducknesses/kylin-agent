@@ -191,10 +191,48 @@ class TestActionExecuteResponse:
         resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="ready", risk_level="low", message="就绪", requires_confirm=False)
         assert resp.status == "ready"
     def test_confirm_required_response(self):
-        resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="confirm_required", risk_level="medium", message="需确认", requires_confirm=True)
+        resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="confirm_required", risk_level="medium", message="需确认", requires_confirm=True, confirm_id="cfm_a1b2c3d4")
         assert resp.requires_confirm is True
     def test_blocked_response(self):
         resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="blocked", risk_level="high", message="已阻断", requires_confirm=False)
         assert resp.status == "blocked"
     def test_invalid_status_rejected(self):
         with pytest.raises(ValidationError): ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="executing", risk_level="low", message="x", requires_confirm=False)
+
+
+class TestResponseCrossValidation:
+    def test_confirm_required_without_confirm_id_rejected(self):
+        with pytest.raises(ValidationError):
+            ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
+                                  status="confirm_required", risk_level="medium",
+                                  message="x", requires_confirm=True, confirm_id=None)
+
+    def test_confirm_id_malformed_rejected(self):
+        with pytest.raises(ValidationError):
+            ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
+                                  status="confirm_required", risk_level="medium",
+                                  message="x", requires_confirm=True, confirm_id="bad")
+
+    def test_executed_with_confirm_id_rejected(self):
+        with pytest.raises(ValidationError):
+            ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
+                                  status="executed", risk_level="low",
+                                  message="x", requires_confirm=False, confirm_id="cfm_11111111")
+
+    def test_blocked_with_confirm_id_rejected(self):
+        with pytest.raises(ValidationError):
+            ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
+                                  status="blocked", risk_level="high",
+                                  message="x", requires_confirm=False, confirm_id="cfm_11111111")
+
+    def test_confirm_required_with_confirm_id_ok(self):
+        resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
+                                     status="confirm_required", risk_level="medium",
+                                     message="x", requires_confirm=True, confirm_id="cfm_a1b2c3d4")
+        assert resp.confirm_id == "cfm_a1b2c3d4"
+
+    def test_executed_without_confirm_id_ok(self):
+        resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
+                                     status="executed", risk_level="low",
+                                     message="x", requires_confirm=False, confirm_id=None)
+        assert resp.confirm_id is None

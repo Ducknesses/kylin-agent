@@ -34,6 +34,7 @@ class ActionPrecheck:
     requires_confirm: bool = False
     message: str = ""
     result_summary: str | None = None
+    confirm_id: str | None = None
 
 
 # ── 安全参数摘要 ──────────────────────────────────────────────────────
@@ -77,11 +78,13 @@ class ActionService:
         safety_guard: Any = None,
         agent_harness: Any = None,
         audit_service: Any = None,
+        confirmation_store: Any = None,
     ) -> None:
         self._store = fix_option_store
         self._safety_guard = safety_guard
         self._harness = agent_harness
         self._audit = audit_service
+        self._confirmation = confirmation_store
 
     # ── 预检 ──────────────────────────────────────────────────────
 
@@ -124,12 +127,11 @@ class ActionService:
     # ── 执行 ──────────────────────────────────────────────────────
 
     async def execute(self, session_id: str, option_id: str) -> ActionPrecheck:
-        """low 风险 option 真实安全执行"""
+        """执行入口：low → 真实执行，medium → 创建确认"""
         stored = self._store.get_option(session_id, option_id)
         if stored is None:
             return ActionPrecheck(result="not_found", message="修复选项不存在或不属于当前会话")
 
-        # stored high/blocked → action_blocked
         if stored.option.risk_level == "high" or stored.status == "blocked":
             await self._audit_blocked(session_id, stored.trace_id, stored.option.option_id,
                                       stored.option.tool, stored.option.params, "high")
@@ -138,8 +140,71 @@ class ActionService:
                                   risk_level=stored.option.risk_level, message="高风险操作已被系统阻断")
 
         pre = self.precheck(session_id, option_id)
+
+        # medium → 创建确认
+        if pre.result == "confirm_required" or stored.option.risk_level == "medium":
+            return await self._execute_medium(session_id, option_id, stored)
+
         if pre.result != "ready":
             return pre
+
+        return await self._execute_low(session_id, option_id, stored)
+
+    async def _execute_medium(self, session_id: str, option_id: str, stored) -> ActionPrecheck:
+        tool = stored.option.tool
+        params = stored.option.params
+        ctx = AgentContext(session_id=session_id, user_input="action_execute", role="viewer")
+        ctx.trace_id = stored.trace_id
+        ctx.intent = "action_execute"
+        ctx.risk_level = "medium"
+        meta = _safe_metadata(tool, params)
+        meta["option_id"] = stored.option.option_id
+        ctx.add_tool_call(tool, dict(meta), None)
+
+        if self._safety_guard is not None:
+            safety = self._safety_guard.analyze_tool_call(tool=tool, params=params, role="viewer")
+            if not safety.get("allowed", False):
+                await self._safe_audit(ctx, "action_blocked")
+                return ActionPrecheck(result="blocked", option_id=stored.option.option_id,
+                                      session_id=session_id, trace_id=stored.trace_id,
+                                      risk_level=safety.get("risk_level", "high"),
+                                      message=f"安全检查未通过: {safety.get('reason', '')}")
+
+        if self._confirmation is not None:
+            conf, created = self._confirmation.create_or_get(session_id, stored.option.option_id, stored.trace_id)
+            # confirm_id 写入审计元数据
+            ctx.tool_calls[-1]["params"]["confirm_id"] = conf.confirm_id
+
+            # 尝试状态迁移（幂等：已 confirm_required 也视为成功）
+            ok = self._store.mark_confirm_required(session_id, stored.option.option_id)
+            if not ok:
+                # 检查是否已经是 confirm_required（并发场景）
+                recheck = self._store.get_option(session_id, stored.option.option_id)
+                if recheck is None or recheck.status != "confirm_required":
+                    # 状态迁移失败且非幂等场景 → 补偿
+                    if created:
+                        self._confirmation.remove_if_pending(session_id, stored.option.option_id, conf.confirm_id)
+                    return ActionPrecheck(result="error", option_id=stored.option.option_id,
+                                          session_id=session_id, trace_id=stored.trace_id,
+                                          message="确认创建失败，请稍后重试")
+
+            # 仅新建时写 created 审计
+            if created:
+                await self._safe_audit(ctx, "action_confirm_created")
+            return ActionPrecheck(result="confirm_required",
+                                  option_id=stored.option.option_id,
+                                  session_id=session_id, trace_id=stored.trace_id,
+                                  risk_level="medium", requires_confirm=True,
+                                  message="该操作需要二次确认后才可执行",
+                                  confirm_id=conf.confirm_id)
+
+        await self._safe_audit(ctx, "action_confirm_required")
+        return ActionPrecheck(result="confirm_required", option_id=stored.option.option_id,
+                              session_id=session_id, trace_id=stored.trace_id,
+                              risk_level="medium", requires_confirm=True,
+                              message="该操作需要二次确认后才可执行")
+
+    async def _execute_low(self, session_id: str, option_id: str, stored) -> ActionPrecheck:
 
         tool = stored.option.tool
         params = stored.option.params
