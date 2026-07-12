@@ -452,10 +452,19 @@ class FixPlannerAgent:
     @staticmethod
     def _parse_llm_candidates(raw: str) -> list[dict]:
         text = raw.strip()
+        # 严格成对 Markdown fenced code block 解析
         if text.startswith("```"):
-            text = text.strip("`").strip()
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
+            if not text.endswith("```"):
+                return []                   # 未闭合 fence，直接拒绝
+            inner = text[3:-3].strip()      # 去掉开头和结尾 ```
+            if "\n" in inner:
+                first_line, _, body = inner.partition("\n")
+                if first_line.strip().lower() == "json":
+                    text = body.strip()     # 有语言标记 → 使用 body
+                else:
+                    text = inner            # 无语言标记 → 使用全部
+            else:
+                text = inner                # 单行 fence 内容
         try:
             data = json.loads(text)
         except json.JSONDecodeError:

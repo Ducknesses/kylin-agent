@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
-from app.dependencies import fix_option_store, fix_planner
+from app.dependencies import fix_option_store, fix_planner, tool_registry
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
 from app.services.safety_guard import SafetyGuard
@@ -30,7 +30,7 @@ safety_guard = SafetyGuard()
 # 编排器（注入来自 dependencies.py 的共享 FixPlanner / FixOptionStore）
 _orchestrator = Orchestrator(
     safety_guard=safety_guard,
-    tool_registry=None,  # 使用 Orchestrator 默认构造
+    tool_registry=tool_registry,
     mcp_client=None,     # 使用 Orchestrator 默认构造
     fix_planner=fix_planner,
     fix_option_store=fix_option_store,

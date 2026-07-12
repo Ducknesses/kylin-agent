@@ -5,9 +5,18 @@
 """
 from app.services.fix_option_store import FixOptionStore
 from app.services.fix_planner_agent import FixPlannerAgent
+from app.services.llm_client import LLMClient
+from app.services.tool_registry import ToolRegistry
 
-# FixOptionStore 共享实例 —— 后续 Action API 复用同一实例
+# 共享 ToolRegistry + LLMClient —— FixPlanner 与 Orchestrator 共用
+tool_registry = ToolRegistry()
+llm_client = LLMClient()
+
+# FixOptionStore 共享实例
 fix_option_store = FixOptionStore()
 
-# FixPlannerAgent 规则版
-fix_planner = FixPlannerAgent()
+# FixPlannerAgent —— 注入共享 ToolRegistry + LLMClient
+fix_planner = FixPlannerAgent(
+    tool_registry=tool_registry,
+    llm_client=llm_client,
+)

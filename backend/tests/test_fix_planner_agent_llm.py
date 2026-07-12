@@ -347,6 +347,60 @@ class TestJSONErrors:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# D2: fenced JSON 精确解析
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFencedJSON:
+    """严格成对 fence + 大小写兼容"""
+
+    def test_fenced_json_lowercase(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```json\n{"options":[]}\n```')
+        assert r == []
+
+    def test_fenced_json_uppercase(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```JSON\n{"options":[{"title":"t","description":"d","tool":"sys_info","params":{},"rollback":null}]}\n```')
+        assert len(r) == 1
+
+    def test_fenced_json_mixed_case(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```Json\n{"options":[{"title":"t","description":"d","tool":"sys_info","params":{},"rollback":null}]}\n```')
+        assert len(r) == 1
+
+    def test_fenced_no_lang_tag(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```\n{"options":[{"title":"t","description":"d","tool":"sys_info","params":{},"rollback":null}]}\n```')
+        assert len(r) == 1
+
+    def test_fenced_unclosed_rejected(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```json\n{"options":[]}')
+        assert r == []
+
+    def test_fenced_only_open_rejected(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```\n{"options":[]}')
+        assert r == []
+
+    def test_backticks_in_json_value_preserved(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('{"options":[{"title":"use `code`","description":"d","tool":"sys_info","params":{},"rollback":null}]}')
+        assert len(r) == 1
+        assert "`code`" in r[0]["title"]
+
+    def test_plain_json_unaffected(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('{"options":[{"title":"t","description":"d","tool":"sys_info","params":{},"rollback":null}]}')
+        assert len(r) == 1
+
+    def test_empty_fence_rejected(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        r = FixPlannerAgent._parse_llm_candidates('```json\n```')
+        assert r == []
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # E: 异常回退
 # ═══════════════════════════════════════════════════════════════════════
 

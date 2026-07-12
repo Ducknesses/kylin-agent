@@ -218,12 +218,20 @@ class Orchestrator:
             ctx.final_response = report
 
             # ── 7. FixPlannerAgent → FixOptionStore → fix_options 帧 ──
-            fix_options = self.fix_planner.plan(
-                intent=intent,
-                observations=ctx.observations,
-                report=report,
-                target_service=target_service,
-            )
+            if settings.LLM_ENABLED:
+                fix_options = await self.fix_planner.plan_with_llm(
+                    intent=intent,
+                    observations=ctx.observations,
+                    report=report,
+                    target_service=target_service,
+                )
+            else:
+                fix_options = self.fix_planner.plan(
+                    intent=intent,
+                    observations=ctx.observations,
+                    report=report,
+                    target_service=target_service,
+                )
             if fix_options:
                 # 保存失败会进入外层 except，产生 error + done
                 self.fix_option_store.save_options(
