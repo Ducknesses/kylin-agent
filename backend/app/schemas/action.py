@@ -89,3 +89,42 @@ class ActionExecuteResponse(BaseModel):
         elif self.confirm_id is not None:
             raise ValueError(f"{self.status} 状态不得包含 confirm_id")
         return self
+
+
+# ── Confirm API 模型 ──────────────────────────────────────────────────
+
+
+class ActionConfirmRequest(BaseModel):
+    session_id: str
+    confirm_id: str
+    decision: Literal["approve", "reject"]
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("session_id")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("不能为空或仅包含空白字符")
+        return stripped
+
+    @field_validator("confirm_id")
+    @classmethod
+    def _valid_confirm_id(cls, v: str) -> str:
+        if not re.fullmatch(r"cfm_[0-9a-f]{8}", v):
+            raise ValueError("confirm_id 格式无效")
+        return v
+
+
+ActionConfirmStatus = Literal["executed", "failed", "rejected", "blocked", "expired", "conflict"]
+
+
+class ActionConfirmResponse(BaseModel):
+    confirm_id: str
+    option_id: str
+    session_id: str
+    trace_id: str
+    decision: Literal["approve", "reject"]
+    status: ActionConfirmStatus
+    message: str
+    result_summary: str | None = None

@@ -13,7 +13,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal
 
-ConfirmationStatus = Literal["pending", "approved", "rejected", "expired", "consumed"]
+ConfirmationStatus = Literal["pending", "approving", "approved", "rejected", "expired", "consumed", "blocked", "failed"]
+
+DecisionResult = Literal["claimed", "rejected", "not_found", "expired", "conflict"]
+
+
+@dataclass(frozen=True)
+class ConfirmationDecisionResult:
+    result: DecisionResult
+    confirmation: "PendingConfirmation | None" = None
 
 
 @dataclass
@@ -27,8 +35,15 @@ class PendingConfirmation:
     expires_at: datetime
 
     def __post_init__(self) -> None:
-        if self.status not in {"pending", "approved", "rejected", "expired", "consumed"}:
+        if self.status not in {"pending", "approving", "approved", "rejected", "expired", "consumed", "blocked", "failed"}:
             raise ValueError(f"非法 ConfirmationStatus: {self.status}")
+
+
+def _copy_conf(c: PendingConfirmation) -> PendingConfirmation:
+    return PendingConfirmation(
+        confirm_id=c.confirm_id, session_id=c.session_id, option_id=c.option_id,
+        trace_id=c.trace_id, status=c.status, created_at=c.created_at, expires_at=c.expires_at,
+    )
 
 
 class ConfirmationStore:
@@ -105,7 +120,66 @@ class ConfirmationStore:
             if now >= conf.expires_at:
                 conf.status = "expired"
                 self._store[key] = conf
-            return conf
+            return _copy_conf(conf)
+
+    # ── Decision ──────────────────────────────────────────────────
+
+    def claim_approve(self, session_id: str, confirm_id: str) -> ConfirmationDecisionResult:
+        """原子 pending→approving"""
+        now = self._clock()
+        with self._lock:
+            for key, conf in self._store.items():
+                if conf.session_id == session_id and conf.confirm_id == confirm_id:
+                    if now >= conf.expires_at:
+                        conf.status = "expired"
+                        self._store[key] = conf
+                        return ConfirmationDecisionResult(result="expired")
+                    if conf.status != "pending":
+                        return ConfirmationDecisionResult(result="conflict")
+                    conf.status = "approving"
+                    self._store[key] = conf
+                    return ConfirmationDecisionResult(result="claimed", confirmation=_copy_conf(conf))
+            return ConfirmationDecisionResult(result="not_found")
+
+    def reject(self, session_id: str, confirm_id: str) -> ConfirmationDecisionResult:
+        """原子 pending→rejected"""
+        now = self._clock()
+        with self._lock:
+            for key, conf in self._store.items():
+                if conf.session_id == session_id and conf.confirm_id == confirm_id:
+                    if now >= conf.expires_at:
+                        conf.status = "expired"
+                        self._store[key] = conf
+                        return ConfirmationDecisionResult(result="expired")
+                    if conf.status != "pending":
+                        return ConfirmationDecisionResult(result="conflict")
+                    conf.status = "rejected"
+                    self._store[key] = conf
+                    return ConfirmationDecisionResult(result="rejected", confirmation=_copy_conf(conf))
+            return ConfirmationDecisionResult(result="not_found")
+
+    def mark_consumed(self, session_id: str, confirm_id: str) -> bool:
+        """approving → consumed"""
+        return self._transition(session_id, confirm_id, "consumed", {"approving"})
+
+    def mark_blocked(self, session_id: str, confirm_id: str) -> bool:
+        """approving → blocked"""
+        return self._transition(session_id, confirm_id, "blocked", {"approving"})
+
+    def mark_failed(self, session_id: str, confirm_id: str) -> bool:
+        """approving → failed"""
+        return self._transition(session_id, confirm_id, "failed", {"approving"})
+
+    def _transition(self, session_id: str, confirm_id: str, target: ConfirmationStatus, allowed: set[str]) -> bool:
+        with self._lock:
+            for key, conf in self._store.items():
+                if conf.session_id == session_id and conf.confirm_id == confirm_id:
+                    if conf.status not in allowed:
+                        return False
+                    conf.status = target
+                    self._store[key] = conf
+                    return True
+            return False
 
     def cleanup_expired(self) -> int:
         now = self._clock()

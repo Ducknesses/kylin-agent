@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 ActionResult = Literal[
     "ready", "confirm_required", "blocked",
     "not_found", "expired", "conflict",
-    "executed", "failed", "error",
+    "executed", "failed", "error", "rejected",
 ]
 
 
@@ -269,6 +269,120 @@ class ActionService:
             return ActionPrecheck(result="failed", option_id=stored.option.option_id,
                                   session_id=session_id, trace_id=stored.trace_id,
                                   message="修复操作执行失败")
+
+    # ── Confirm decision ───────────────────────────────────────────
+
+    async def decide_confirmation(self, session_id: str, confirm_id: str, decision: str) -> ActionPrecheck:
+        """approve/reject 消费 confirmation"""
+        if self._confirmation is None:
+            return ActionPrecheck(result="error", message="确认服务不可用")
+
+        if decision == "reject":
+            return await self._decide_reject(session_id, confirm_id)
+        if decision == "approve":
+            return await self._decide_approve(session_id, confirm_id)
+        return ActionPrecheck(result="error", message="无效的 decision")
+
+    async def _decide_reject(self, session_id: str, confirm_id: str) -> ActionPrecheck:
+        res = self._confirmation.reject(session_id, confirm_id)
+        if res.result == "not_found":
+            return ActionPrecheck(result="not_found", message="确认不存在或不属于当前会话")
+        if res.result == "expired":
+            return ActionPrecheck(result="expired", message="确认已过期")
+        if res.result == "conflict":
+            return ActionPrecheck(result="conflict", message="确认已失效或无法操作")
+        conf = res.confirmation
+        self._store.mark_blocked(session_id, conf.option_id)
+        stored_rej = self._store.get_option(session_id, conf.option_id)
+        tool_name = stored_rej.option.tool if stored_rej else conf.option_id
+        ctx = self._make_ctx(session_id, conf.trace_id, conf.option_id, "medium",
+                             "action_execute", tool_name, confirm_id=confirm_id, decision="reject")
+        await self._safe_audit(ctx, "action_confirm_rejected")
+        return ActionPrecheck(result="rejected", option_id=conf.option_id,
+                              session_id=session_id, trace_id=conf.trace_id,
+                              message="操作已拒绝")
+
+    async def _decide_approve(self, session_id: str, confirm_id: str) -> ActionPrecheck:
+        res = self._confirmation.claim_approve(session_id, confirm_id)
+        if res.result == "not_found":
+            return ActionPrecheck(result="not_found", message="确认不存在或不属于当前会话")
+        if res.result == "expired":
+            return ActionPrecheck(result="expired", message="确认已过期")
+        if res.result == "conflict":
+            return ActionPrecheck(result="conflict", message="确认已失效或无法操作")
+        conf = res.confirmation
+
+        option_id = conf.option_id
+        stored = self._store.get_option(session_id, option_id)
+        if stored is None:
+            self._confirmation.mark_failed(session_id, confirm_id)
+            return ActionPrecheck(result="conflict", session_id=session_id, trace_id=conf.trace_id,
+                                  message="修复选项不存在")
+        if stored.status != "confirm_required":
+            self._confirmation.mark_failed(session_id, confirm_id)
+            return ActionPrecheck(result="conflict", session_id=session_id, trace_id=conf.trace_id,
+                                  message="修复选项状态冲突")
+
+        tool = stored.option.tool
+        params = stored.option.params
+        ctx = self._make_ctx(session_id, stored.trace_id, option_id, "medium",
+                             "action_execute", stored.option.tool, confirm_id=confirm_id, decision="approve")
+
+        # 再次 SafetyGuard
+        if self._safety_guard is not None:
+            safety = self._safety_guard.analyze_tool_call(tool=tool, params=params, role="viewer")
+            if not safety.get("allowed", False) or safety.get("risk_level") == "high":
+                self._confirmation.mark_blocked(session_id, confirm_id)
+                await self._safe_audit(ctx, "action_confirm_blocked")
+                return ActionPrecheck(result="blocked", option_id=option_id,
+                                      session_id=session_id, trace_id=conf.trace_id,
+                                      message="安全检查未通过")
+
+        # claim + execute
+        claimed = self._store.claim_for_execution(session_id, option_id)
+        if claimed is None:
+            self._confirmation.mark_failed(session_id, confirm_id)
+            return ActionPrecheck(result="conflict", option_id=option_id,
+                                  session_id=session_id, trace_id=conf.trace_id,
+                                  message="执行冲突")
+        try:
+            result = await self._harness.run_tool(ctx, tool, dict(params))
+        except Exception:
+            self._store.mark_failed(session_id, option_id)
+            self._confirmation.mark_failed(session_id, confirm_id)
+            await self._safe_audit(ctx, "action_confirm_failed")
+            return ActionPrecheck(result="failed", option_id=option_id,
+                                  session_id=session_id, trace_id=conf.trace_id,
+                                  message="执行异常")
+
+        if result.get("ok"):
+            self._store.mark_executed(session_id, option_id)
+            self._confirmation.mark_consumed(session_id, confirm_id)
+            await self._safe_audit(ctx, "action_confirm_executed")
+            return ActionPrecheck(result="executed", option_id=option_id,
+                                  session_id=session_id, trace_id=conf.trace_id,
+                                  message="执行成功")
+        else:
+            self._store.mark_failed(session_id, option_id)
+            self._confirmation.mark_failed(session_id, confirm_id)
+            await self._safe_audit(ctx, "action_confirm_failed")
+            return ActionPrecheck(result="failed", option_id=option_id,
+                                  session_id=session_id, trace_id=conf.trace_id,
+                                  message="执行失败")
+
+    def _make_ctx(self, session_id: str, trace_id: str, option_id: str, risk: str, intent: str, tool_name: str,
+                  confirm_id: str | None = None, decision: str | None = None) -> AgentContext:
+        ctx = AgentContext(session_id=session_id, user_input=intent, role="viewer")
+        ctx.trace_id = trace_id
+        ctx.intent = intent
+        ctx.risk_level = risk
+        meta = {"option_id": option_id}
+        if confirm_id:
+            meta["confirm_id"] = confirm_id
+        if decision:
+            meta["decision"] = decision
+        ctx.add_tool_call(tool_name, meta, None)
+        return ctx
 
     async def _audit_blocked(self, session_id: str, trace_id: str, option_id: str,
                               tool: str, params: dict[str, object], risk: str) -> None:

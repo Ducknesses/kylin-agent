@@ -311,9 +311,161 @@ async def test_concurrent_one_harness(svc):
     assert "conflict" in [r.result for r in results]
     assert len(s._harness.calls) == 1
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# Day 6-10: approve/reject
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_reject_returns_rejected(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_r1", "medium")])
+    r = await s.execute("s1", "fix_r1")
+    rr = await s.decide_confirmation("s1", r.confirm_id, "reject")
+    assert rr.result == "rejected"
+    assert store.get_option("s1", "fix_r1").status == "blocked"
+    assert len(s._harness.calls) == 0
+
+@pytest.mark.asyncio
+async def test_reject_then_approve_conflict(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_r2", "medium")])
+    r = await s.execute("s1", "fix_r2")
+    await s.decide_confirmation("s1", r.confirm_id, "reject")
+    rr2 = await s.decide_confirmation("s1", r.confirm_id, "approve")
+    assert rr2.result == "conflict"
+
+@pytest.mark.asyncio
+async def test_approve_executes(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_a1", "medium")])
+    r = await s.execute("s1", "fix_a1")
+    ar = await s.decide_confirmation("s1", r.confirm_id, "approve")
+    assert ar.result == "executed"
+    assert len(s._harness.calls) == 1
+    assert store.get_option("s1", "fix_a1").status == "executed"
+
+@pytest.mark.asyncio
+async def test_approve_concurrent_single_harness(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_ac1", "medium")])
+    r = await s.execute("s1", "fix_ac1")
+    cid = r.confirm_id
+    r1, r2 = await asyncio.gather(
+        s.decide_confirmation("s1", cid, "approve"),
+        s.decide_confirmation("s1", cid, "approve"),
+    )
+    assert "executed" in [rr.result for rr in (r1, r2)]
+    assert "conflict" in [rr.result for rr in (r1, r2)]
+    assert len(s._harness.calls) == 1
+
+@pytest.mark.asyncio
+async def test_approve_reject_cross_concurrent(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_arc1", "medium")])
+    r = await s.execute("s1", "fix_arc1")
+    cid = r.confirm_id
+    r1, r2 = await asyncio.gather(
+        s.decide_confirmation("s1", cid, "approve"),
+        s.decide_confirmation("s1", cid, "reject"),
+    )
+    results = {r1.result, r2.result}
+    assert "conflict" in results
+    assert results & {"executed", "rejected"}
+    assert len(s._harness.calls) <= 1
+
+@pytest.mark.asyncio
+async def test_wrong_session_returns_not_found(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_ws1", "medium")])
+    r = await s.execute("s1", "fix_ws1")
+    rr = await s.decide_confirmation("s2", r.confirm_id, "approve")
+    assert rr.result == "not_found"
+
+@pytest.mark.asyncio
+async def test_reject_audit_has_confirm_id(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_aud1", "medium")])
+    r = await s.execute("s1", "fix_aud1")
+    await s.decide_confirmation("s1", r.confirm_id, "reject")
+    aud = [c for c in s._audit.calls if c["event_type"] == "action_confirm_rejected"][0]
+    p = aud["tool_calls"][0]["params"]
+    assert p["confirm_id"] == r.confirm_id
+    assert p["decision"] == "reject"
+
 @pytest.mark.asyncio
 async def test_trace_id_from_store(svc):
     s, store = svc
     store.save_options("s1", "trace-xyz", [_opt("fix_tid", "low")])
     r = await s.execute("s1", "fix_tid")
     assert r.trace_id == "trace-xyz"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Day 6-10b: expired + approve audit
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_expired_confirm_returns_expired(svc):
+    from datetime import datetime, timedelta, timezone
+    s, store = svc
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    s._confirmation._clock = lambda: t0
+    store.save_options("s1", "t1", [_opt("fix_ex1", "medium")])
+    r = await s.execute("s1", "fix_ex1")
+    s._confirmation._clock = lambda: t0 + timedelta(seconds=600)
+    rr = await s.decide_confirmation("s1", r.confirm_id, "approve")
+    assert rr.result == "expired"
+
+@pytest.mark.asyncio
+async def test_expired_reject_returns_expired(svc):
+    from datetime import datetime, timedelta, timezone
+    s, store = svc
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    s._confirmation._clock = lambda: t0
+    store.save_options("s1", "t1", [_opt("fix_ex2", "medium")])
+    r = await s.execute("s1", "fix_ex2")
+    s._confirmation._clock = lambda: t0 + timedelta(seconds=600)
+    rr = await s.decide_confirmation("s1", r.confirm_id, "reject")
+    assert rr.result == "expired"
+
+@pytest.mark.asyncio
+async def test_approve_executed_audit_has_confirm_id(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_ae1", "medium")])
+    r = await s.execute("s1", "fix_ae1")
+    await s.decide_confirmation("s1", r.confirm_id, "approve")
+    aud = [c for c in s._audit.calls if c["event_type"] == "action_confirm_executed"][0]
+    p = aud["tool_calls"][0]["params"]
+    assert p["confirm_id"] == r.confirm_id
+    assert p["decision"] == "approve"
+    assert aud["tool_calls"][0]["tool"] == "sys_info"
+
+@pytest.mark.asyncio
+async def test_approve_blocked_audit_has_confirm_id(svc):
+    s, store = svc
+    store.save_options("s1", "t1", [_opt("fix_ab1", "medium")])
+    r = await s.execute("s1", "fix_ab1")
+    s._safety_guard = FakeSafetyGuard(blocked_tools=["sys_info"])
+    rr = await s.decide_confirmation("s1", r.confirm_id, "approve")
+    assert rr.result == "blocked"
+    blocked = [c for c in s._audit.calls if c["event_type"] == "action_confirm_blocked"]
+    assert len(blocked) >= 1
+    p = blocked[0]["tool_calls"][0]["params"]
+    assert p["confirm_id"] == r.confirm_id
+    assert p["decision"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_confirm_failed_audit(svc):
+    s, store = svc
+    s._harness = FakeAgentHarness(should_fail=True)
+    store.save_options("s1", "t1", [_opt("fix_cf1", "medium")])
+    r = await s.execute("s1", "fix_cf1")
+    await s.decide_confirmation("s1", r.confirm_id, "approve")
+    aud = [c for c in s._audit.calls if c["event_type"] == "action_confirm_failed"]
+    assert len(aud) == 1
+    assert store.get_option("s1", "fix_cf1").status == "failed"
+    p = aud[0]["tool_calls"][0]["params"]
+    assert p["confirm_id"] == r.confirm_id
+    assert p["decision"] == "approve"

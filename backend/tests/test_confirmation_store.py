@@ -94,3 +94,39 @@ class TestConfirmationStore:
         assert results[0][0].confirm_id == results[1][0].confirm_id
         # 只有一个 created=True
         assert sum(1 for _, cr in results if cr) == 1
+
+    # ── Day 6-10b: expired + decision results ──
+
+    def test_claim_approve_expired(self):
+        from datetime import datetime, timedelta, timezone
+        t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        store = ConfirmationStore(ttl_seconds=60)
+        store._clock = lambda: t0
+        store.create_or_get("s1", "fix_a1b2c3d4", "t1")
+        store._clock = lambda: t0 + timedelta(seconds=120)
+        r = store.claim_approve("s1", store.get("s1", store.get_by_option("s1", "fix_a1b2c3d4").confirm_id).confirm_id)
+        assert r.result == "expired"
+
+    def test_reject_expired(self):
+        from datetime import datetime, timedelta, timezone
+        t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        store = ConfirmationStore(ttl_seconds=60)
+        store._clock = lambda: t0
+        c, _ = store.create_or_get("s1", "fix_a1b2c3d4", "t1")
+        store._clock = lambda: t0 + timedelta(seconds=120)
+        r = store.reject("s1", c.confirm_id)
+        assert r.result == "expired"
+
+    def test_claim_approve_wrong_session_not_found(self):
+        store = ConfirmationStore()
+        c, _ = store.create_or_get("s1", "fix_a1b2c3d4", "t1")
+        r = store.claim_approve("s2", c.confirm_id)
+        assert r.result == "not_found"
+
+    def test_claim_approve_conflict_after_consumed(self):
+        store = ConfirmationStore()
+        c, _ = store.create_or_get("s1", "fix_a1b2c3d4", "t1")
+        store.claim_approve("s1", c.confirm_id)
+        store.mark_consumed("s1", c.confirm_id)
+        r = store.claim_approve("s1", c.confirm_id)
+        assert r.result == "conflict"

@@ -36,7 +36,7 @@ FixOptionStatus = Literal[
 ]
 
 # 允许转移到 executing 的状态（claim_for_execution）
-_EXECUTABLE_FROM: set[FixOptionStatus] = {"pending"}
+_EXECUTABLE_FROM: set[FixOptionStatus] = {"pending", "confirm_required"}
 
 # mark_executed 只允许从 executing
 _EXECUTED_FROM: set[FixOptionStatus] = {"executing"}

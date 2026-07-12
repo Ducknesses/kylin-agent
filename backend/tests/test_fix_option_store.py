@@ -288,11 +288,12 @@ class TestStateMachine:
         store.mark_failed("s1", "opt1")
         assert store.claim_for_execution("s1", "opt1") is None
 
-    def test_confirm_required_cannot_directly_claim(self):
+    def test_confirm_required_can_claim(self):
+        """confirm_required 可通过 claim 进入 executing（medium approve 需要）"""
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("opt1")])
         store.mark_confirm_required("s1", "opt1")
-        assert store.claim_for_execution("s1", "opt1") is None
+        assert store.claim_for_execution("s1", "opt1") is not None
 
     # ── mark_executed ──
 

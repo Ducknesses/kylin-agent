@@ -102,3 +102,35 @@ class TestActionAPIExecute:
         store.save_options("s1", "t1", [_opt("fix_66666666", "low")])
         client.post("/api/actions/execute", json={"session_id": "s1", "option_id": "fix_66666666"})
         assert store.get_option("s1", "fix_66666666").status == "executed"
+
+
+class TestConfirmAPI:
+    def test_expired_approve_returns_410(self, client, _clean_store):
+        from datetime import datetime, timedelta, timezone
+        from app.dependencies import action_service
+        store, _ = _clean_store
+        store.save_options("s1", "t1", [_opt("fix_ex1", "medium")])
+        action_service._store = store
+        t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        conf_store = action_service._confirmation
+        conf_store._clock = lambda: t0
+        conf, _ = conf_store.create_or_get("s1", "fix_ex1", "t1")
+        cid = conf.confirm_id
+        conf_store._clock = lambda: t0 + timedelta(seconds=600)
+        r = client.post("/api/actions/confirm", json={"session_id": "s1", "confirm_id": cid, "decision": "approve"})
+        assert r.status_code == 410
+
+    def test_expired_reject_returns_410(self, client, _clean_store):
+        from datetime import datetime, timedelta, timezone
+        from app.dependencies import action_service
+        store, _ = _clean_store
+        store.save_options("s1", "t1", [_opt("fix_ex2", "medium")])
+        action_service._store = store
+        t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        conf_store = action_service._confirmation
+        conf_store._clock = lambda: t0
+        conf, _ = conf_store.create_or_get("s1", "fix_ex2", "t1")
+        cid = conf.confirm_id
+        conf_store._clock = lambda: t0 + timedelta(seconds=600)
+        r = client.post("/api/actions/confirm", json={"session_id": "s1", "confirm_id": cid, "decision": "reject"})
+        assert r.status_code == 410
