@@ -1,8 +1,8 @@
 """Action API —— 修复操作执行接口
 
 POST /api/actions/execute
-接收 session_id + option_id，后端回查 FixOptionStore 做安全预检。
-本轮只做预检，不执行 FixOption。
+接收 session_id + option_id，后端回查并安全执行。
+仅 low 风险 option 可执行。
 """
 import logging
 
@@ -17,12 +17,12 @@ router = APIRouter()
 
 @router.post("/actions/execute", response_model=ActionExecuteResponse)
 async def execute_action(req: ActionExecuteRequest):
-    """执行修复操作预检
+    """执行修复操作
 
-    前端只需提交 session_id + option_id，
-    tool/params/risk_level 由后端从 FixOptionStore 回查。
+    low 风险 → 真实执行；medium → confirm_required；high → blocked。
     """
-    result = action_service.precheck(req.session_id, req.option_id)
+    # ready 的 low option 走真实执行路径
+    result = await action_service.execute(req.session_id, req.option_id)
 
     if result.result == "not_found":
         raise HTTPException(status_code=404, detail=result.message)
@@ -32,8 +32,9 @@ async def execute_action(req: ActionExecuteRequest):
         raise HTTPException(status_code=403, detail=result.message)
     if result.result == "conflict":
         raise HTTPException(status_code=409, detail=result.message)
+    if result.result in ("failed", "error"):
+        raise HTTPException(status_code=502, detail=result.message)
 
-    # ready / confirm_required
     return ActionExecuteResponse(
         option_id=result.option_id,
         session_id=result.session_id,
@@ -42,4 +43,5 @@ async def execute_action(req: ActionExecuteRequest):
         risk_level=result.risk_level,  # type: ignore[arg-type]
         message=result.message,
         requires_confirm=result.requires_confirm,
+        result_summary=result.result_summary,
     )

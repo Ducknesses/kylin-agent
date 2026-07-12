@@ -16,22 +16,22 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
-from app.dependencies import fix_option_store, fix_planner, tool_registry
+from app.dependencies import fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
-from app.services.safety_guard import SafetyGuard
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 连接管理器、安全护栏（模块级单例）
+# 连接管理器
 manager = ConnectionManager()
-safety_guard = SafetyGuard()
-# 编排器（注入来自 dependencies.py 的共享 FixPlanner / FixOptionStore）
+# 编排器（注入来自 dependencies.py 的共享依赖）
 _orchestrator = Orchestrator(
     safety_guard=safety_guard,
     tool_registry=tool_registry,
-    mcp_client=None,     # 使用 Orchestrator 默认构造
+    mcp_client=mcp_client,
+    agent_harness=agent_harness,
+    audit_service=audit_service,
     fix_planner=fix_planner,
     fix_option_store=fix_option_store,
 )

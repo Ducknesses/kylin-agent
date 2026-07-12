@@ -77,7 +77,7 @@ class ActionExecuteRequest(BaseModel):
         return v
 
 
-ActionExecuteStatus = Literal["ready", "confirm_required", "blocked"]
+ActionExecuteStatus = Literal["ready", "confirm_required", "blocked", "executed", "failed"]
 
 
 class ActionExecuteResponse(BaseModel):
@@ -89,3 +89,4 @@ class ActionExecuteResponse(BaseModel):
     risk_level: RiskLevel
     message: str
     requires_confirm: bool
+    result_summary: str | None = None

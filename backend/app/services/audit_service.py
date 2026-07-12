@@ -30,6 +30,35 @@ logger = logging.getLogger(__name__)
 
 _SENSITIVE_REPLACE = "[REDACTED]"
 
+_SENSITIVE_KEYS: set[str] = {
+    "password", "passwd", "api_key", "secret", "secret_key",
+    "token", "access_token", "refresh_token", "authorization",
+    "mcp_auth_token", "deepseek_api_key",
+}
+
+
+def sanitize_sensitive_data(value: object) -> object:
+    """公共递归脱敏 —— 可供 ActionService 等模块复用
+
+    处理规则：
+      - str：正则匹配过滤（sk-... / Bearer / key=value 等）
+      - dict：敏感键值替换为 "[REDACTED]"，递归处理值
+      - list/tuple：递归处理元素
+      - 其他类型：原样返回
+    不修改原始输入。
+    """
+    if isinstance(value, str):
+        return _sanitize(value)
+    if isinstance(value, dict):
+        return {
+            k: "[REDACTED]" if isinstance(k, str) and k.lower() in _SENSITIVE_KEYS
+            else sanitize_sensitive_data(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return type(value)(sanitize_sensitive_data(item) for item in value)
+    return value
+
 _SENSITIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"sk-[a-zA-Z0-9]{20,}", re.IGNORECASE), _SENSITIVE_REPLACE),
     (re.compile(r"Bearer\s+[a-zA-Z0-9\-_\.]+", re.IGNORECASE), f"Bearer {_SENSITIVE_REPLACE}"),
