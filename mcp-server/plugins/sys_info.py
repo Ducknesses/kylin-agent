@@ -16,41 +16,54 @@ def _read_file(path: str) -> str:
         return ""
 
 
+def _parse_proc_stat_cpu() -> tuple:
+    """解析 /proc/stat 第一行 cpu 的 (total, idle) jiffies 值"""
+    content = _read_file("/proc/stat")
+    lines = content.strip().split("\n")
+    for line in lines:
+        if line.startswith("cpu "):
+            values = line.split()[1:]
+            values = [int(v) for v in values]
+            # idle = idle + iowait（iowait 也算空闲）
+            idle = values[3] + (values[4] if len(values) > 4 else 0)
+            total = sum(values)
+            return total, idle
+    return None, None
+
+
 def _get_cpu_info() -> dict:
-    """从 /proc/stat 读取CPU使用率"""
+    """通过两次采样 /proc/stat 计算瞬时 CPU 使用率"""
     try:
-        content = _read_file("/proc/stat")
-        # 第一行格式：cpu  user nice system idle iowait irq softirq steal guest guest_nice
-        lines = content.strip().split("\n")
-        cpu_line = None
-        for line in lines:
-            if line.startswith("cpu "):
-                cpu_line = line
-                break
-
-        if not cpu_line:
-            return {"error": "无法解析 /proc/stat"}
-
-        values = cpu_line.split()[1:]  # 去掉 "cpu" 前缀
-        values = [int(v) for v in values]
-
-        # 计算CPU时间
-        idle = values[3] + (values[4] if len(values) > 4 else 0)  # idle + iowait
-        total = sum(values)
-        used = total - idle
-
-        # 需要两次采样才能得到准确使用率，这里简化返回静态值
         cpu_count = os.cpu_count() or 1
 
-        # 读取负载
+        # 第一次采样
+        total1, idle1 = _parse_proc_stat_cpu()
+        if total1 is None:
+            return {"error": "无法解析 /proc/stat"}
+
+        # 等待一小段时间后第二次采样
+        time.sleep(0.5)
+
+        total2, idle2 = _parse_proc_stat_cpu()
+        if total2 is None:
+            return {"error": "无法解析 /proc/stat（第二次采样）"}
+
+        # 计算 delta 得到瞬时使用率
+        delta_total = total2 - total1
+        delta_idle = idle2 - idle1
+        if delta_total > 0:
+            cpu_percent = round(((delta_total - delta_idle) / delta_total) * 100, 1)
+        else:
+            cpu_percent = 0.0
+
         load_avg = _get_load_avg()
 
         return {
             "cpu_count": cpu_count,
-            "cpu_total_jiffies": total,
-            "cpu_idle_jiffies": idle,
-            "cpu_used_jiffies": used,
-            "cpu_percent_snapshot": round((used / total * 100) if total > 0 else 0, 1),
+            "cpu_total_jiffies": total2,
+            "cpu_idle_jiffies": idle2,
+            "cpu_used_jiffies": total2 - idle2,
+            "cpu_percent_snapshot": cpu_percent,
             "load_avg": load_avg,
         }
 
@@ -152,6 +165,30 @@ def _get_disk_info() -> list:
         return [{"error": str(e)}]
 
 
+def _get_network_info() -> dict:
+    """从 /proc/net/dev 读取网络接口收发字节数（所有接口汇总）"""
+    try:
+        content = _read_file("/proc/net/dev")
+        if not content:
+            return {"bytes_recv": 0, "bytes_sent": 0, "error": "无法读取 /proc/net/dev"}
+
+        bytes_recv = 0
+        bytes_sent = 0
+        for line in content.strip().split("\n")[2:]:  # 跳过前两行标题
+            parts = line.split()
+            if len(parts) >= 10:
+                try:
+                    bytes_recv += int(parts[1])   # Receive bytes
+                    bytes_sent += int(parts[9])   # Transmit bytes
+                except (ValueError, IndexError):
+                    continue
+
+        return {"bytes_recv": bytes_recv, "bytes_sent": bytes_sent}
+    except Exception as e:
+        logger.exception("获取网络信息失败: %s", e)
+        return {"bytes_recv": 0, "bytes_sent": 0, "error": str(e)}
+
+
 def _get_uptime() -> dict:
     """读取系统运行时间"""
     try:
@@ -203,8 +240,11 @@ def handle(arguments: dict) -> dict:
     if metric in ("uptime", "all"):
         result["uptime"] = _get_uptime()
 
+    if metric in ("network", "all"):
+        result["network"] = _get_network_info()
+
     if not result:
-        return {"error": f"未知的metric: {metric}", "available": ["cpu", "memory", "disk", "load", "uptime", "all"]}
+        return {"error": f"未知的metric: {metric}", "available": ["cpu", "memory", "disk", "load", "uptime", "network", "all"]}
 
     result["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
     return result
