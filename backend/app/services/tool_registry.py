@@ -1,271 +1,319 @@
-"""ToolRegistry —— MCP 工具注册表
+"""ToolRegistry —— MCP 工具注册表（单一事实来源）
 
 职责：
-  - 统一登记允许调用的 MCP 工具及其元信息
-  - 判断工具是否存在
-  - 返回工具元信息（描述、参数 schema、默认风险等级）
-  - 校验工具参数的枚举范围
+  - 统一登记允许调用的 MCP 工具及其全部静态元信息
+  - 工具名称、参数 Schema、默认风险、action 风险覆盖
+  - 审计安全字段和特殊摘要策略
+  - 参数枚举校验和 required 检查
   - 不负责安全裁决（安全裁决归 SafetyGuard）
   - 不直接调用 MCPClient
 
 与 mcp/tools.py 的关系：
   mcp/tools.py 的 TOOL_DEFINITIONS 是面向 LLM function calling 的 JSON Schema；
-  ToolRegistry 是面向 Agent 编排的运行时注册表，额外包含风险等级和参数校验逻辑。
-  两者暂时独立维护，后续可统一。
+  ToolRegistry 是面向 Agent 编排的运行时注册表。
 """
-
 import logging
-from typing import Any
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Mapping
+
+from app.schemas.action import RiskLevel
 
 logger = logging.getLogger(__name__)
 
+# ── 结构化工具模型 ────────────────────────────────────────────────────
 
-# ── 工具注册数据 ──────────────────────────────────────────────────────
-# 每个工具条目包含：
-#   description: 工具描述
-#   risk_level: 默认风险等级（low / medium / high）
-#   params: 参数定义 {参数名: {"type": ..., "required": bool, "enum": [...] | None, "constraints": dict | None}}
+'''辅助函数'''
+def _readonly_constraints(
+    value: dict[str, int] | None,
+) -> Mapping[str, int] | None:
+    if value is None:
+        return None
 
-_TOOLS: dict[str, dict[str, Any]] = {
-    # ── sys_info：系统信息查询 ──
-    "sys_info": {
-        "description": "获取系统信息（CPU、内存、磁盘、负载等）",
-        "risk_level": "low",
-        "params": {
-            "metric": {
-                "type": "string",
-                "required": True,
-                # 枚举允许值：比 mcp/tools.py 多了 network 和 uptime（mcp-server 已有）
-                "enum": ["cpu", "memory", "disk", "load", "uptime", "all", "network"],
-            },
-        },
-    },
+    return MappingProxyType(dict(value))
 
-    # ── service_mgr：服务管理 ──
-    "service_mgr": {
-        "description": "管理系统服务（systemctl 操作）",
-        "risk_level": "low",  # 默认 low，具体按 action 动态判定
-        "params": {
-            "action": {
-                "type": "string",
-                "required": True,
-                # 注意：不包含 enable/disable，与 mcp/tools.py 的 TOOL_DEFINITIONS 不同
-                # enable/disable 由 SafetyGuard 在安全层统一拒绝
-                "enum": ["status", "start", "stop", "restart", "is-active", "is-enabled"],
-            },
-            "service": {
-                "type": "string",
-                "required": True,
-                # 服务名只做基本字符串校验，真正安全规则交给 SafetyGuard
-            },
-        },
-        # 按 action 的风险映射
-        "_action_risk": {
-            "status": "low",
-            "is-active": "low",
-            "is-enabled": "low",
-            "start": "medium",
-            "stop": "medium",
-            "restart": "medium",
-        },
-    },
+@dataclass(frozen=True)
+class ToolParamSpec:
+    """单个工具参数定义"""
+    type: str                        # "string" | "integer" | "boolean"
+    required: bool = False
+    enum: tuple[str, ...] = ()
+    description: str = ""
+    constraints: Mapping[str, int] | None = None  # {"min": 1, "max": 500}
 
-    # ── log_reader：日志读取 ──
-    "log_reader": {
-        "description": "读取系统日志",
-        "risk_level": "low",
-        "params": {
-            "type": {
-                "type": "string",
-                "required": False,
-            },
-            "source": {
-                "type": "string",
-                "required": False,
-            },
-            "service": {
-                "type": "string",
-                "required": False,
-            },
-            "lines": {
-                "type": "integer",
-                "required": False,
-                # 行数限制 1-500，与 SafetyGuard._check_log_reader 保持一致
-                "constraints": {"min": 1, "max": 500},
-            },
-            "since": {
-                "type": "string",
-                "required": False,
-            },
-            "keyword": {
-                "type": "string",
-                "required": False,
-            },
-        },
-    },
 
-    # ── net_monitor：网络监控 ──
-    "net_monitor": {
-        "description": "网络监控信息",
-        "risk_level": "low",
-        "params": {
-            "metric": {
-                "type": "string",
-                "required": False,
-                "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
-            },
-            "port": {
-                "type": "integer",
-                "required": False,
-            },
-        },
-    },
+@dataclass(frozen=True)
+class AuditPolicy:
+    """审计字段白名单 + 可选摘要构造器"""
+    safe_fields: tuple[str, ...] = ()
+    summary_builder: str | None = None  # "cmd_exec_summary" 等
 
-    # ── cmd_exec：命令执行 ──
-    "cmd_exec": {
-        "description": "执行安全范围内的系统命令",
-        "risk_level": "medium",
-        "params": {
-            "command": {
-                "type": "string",
-                "required": True,
-                # ToolRegistry 只做存在性检查，不做命令黑名单裁决
-            },
-            "timeout": {
-                "type": "integer",
-                "required": False,
-            },
-            "user": {
-                "type": "string",
-                "required": False,
-            },
-        },
-    },
 
-    # ── file_guard：文件操作 ──
-    "file_guard": {
-        "description": "安全地操作文件（检查、读取、写入）",
-        "risk_level": "medium",
-        "params": {
-            "action": {
-                "type": "string",
-                "required": True,
-                "enum": ["check", "read", "write"],
-            },
-            "path": {
-                "type": "string",
-                "required": True,
-                # ToolRegistry 只做参数结构校验，不做敏感路径裁决
-            },
-            "content": {
-                "type": "string",
-                "required": False,
-            },
-            "max_size": {
-                "type": "integer",
-                "required": False,
-            },
-        },
-    },
+@dataclass(frozen=True)
+class ToolSpec:
+    """一个工具的完整静态定义（深度不可变）"""
+    name: str
+    description: str
+    params: Mapping[str, ToolParamSpec]
+    default_risk: RiskLevel
+    action_field: str | None = None
+    action_risk_overrides: Mapping[str, RiskLevel] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    audit_policy: AuditPolicy = field(default_factory=AuditPolicy)
+
+
+# ── 工具定义 ──────────────────────────────────────────────────────────
+
+_REGISTRY: dict[str, ToolSpec] = {}
+
+def _register(spec: ToolSpec) -> None:
+    if spec.name in _REGISTRY:
+        raise ValueError(f"工具名重复: {spec.name}")
+    _REGISTRY[spec.name] = spec
+
+
+# sys_info
+_register(ToolSpec(
+    name="sys_info",
+    description="获取系统信息（CPU、内存、磁盘、负载等）",
+    params=MappingProxyType({
+        "metric": ToolParamSpec(type="string", required=True,
+                                 enum=("cpu", "memory", "disk", "load", "uptime", "all", "network")),
+    }),
+    default_risk="low",
+    audit_policy=AuditPolicy(safe_fields=("metric",)),
+))
+
+# service_mgr
+_register(ToolSpec(
+    name="service_mgr",
+    description="管理系统服务（systemctl 操作）",
+    params=MappingProxyType({
+        "action": ToolParamSpec(type="string", required=True,
+                                 enum=("status", "start", "stop", "restart", "is-active", "is-enabled")),
+        "service": ToolParamSpec(type="string", required=True),
+    }),
+    default_risk="low",
+    action_field="action",
+    action_risk_overrides=MappingProxyType({
+        "status": "low", "is-active": "low", "is-enabled": "low",
+        "start": "medium", "stop": "medium", "restart": "medium",
+    }),
+    audit_policy=AuditPolicy(safe_fields=("action", "service")),
+))
+
+# log_reader
+_register(ToolSpec(
+    name="log_reader",
+    description="读取系统日志",
+    params=MappingProxyType({
+        "type": ToolParamSpec(type="string"),
+        "source": ToolParamSpec(type="string"),
+        "service": ToolParamSpec(type="string"),
+        "lines": ToolParamSpec(type="integer", constraints=_readonly_constraints({"min": 1,"max": 500,})),
+        "since": ToolParamSpec(type="string"),
+        "keyword": ToolParamSpec(type="string"),
+    }),
+    default_risk="low",
+    audit_policy=AuditPolicy(safe_fields=("service", "lines")),
+))
+
+# net_monitor
+_register(ToolSpec(
+    name="net_monitor",
+    description="网络监控信息",
+    params=MappingProxyType({
+        "metric": ToolParamSpec(type="string",
+                                 enum=("connections", "traffic", "interfaces", "routes", "dns", "listen", "all")),
+        "port": ToolParamSpec(type="integer"),
+    }),
+    default_risk="low",
+    audit_policy=AuditPolicy(safe_fields=("metric",)),
+))
+
+# cmd_exec
+_register(ToolSpec(
+    name="cmd_exec",
+    description="执行安全范围内的系统命令",
+    params=MappingProxyType({
+        "command": ToolParamSpec(type="string", required=True),
+        "timeout": ToolParamSpec(type="integer"),
+        "user": ToolParamSpec(type="string"),
+    }),
+    default_risk="medium",
+    audit_policy=AuditPolicy(safe_fields=(), summary_builder="cmd_exec_summary"),
+))
+
+# file_guard
+_register(ToolSpec(
+    name="file_guard",
+    description="安全地操作文件（检查、读取、写入）",
+    params=MappingProxyType({
+        "action": ToolParamSpec(type="string", required=True,
+                                 enum=("check", "read", "write")),
+        "path": ToolParamSpec(type="string", required=True),
+        "content": ToolParamSpec(type="string"),
+        "max_size": ToolParamSpec(type="integer"),
+    }),
+    default_risk="medium",
+    action_field="action",
+    action_risk_overrides=MappingProxyType({"check": "low", "read": "low", "write": "medium"}),
+    audit_policy=AuditPolicy(safe_fields=("action", "path")),
+))
+
+
+# ── 启动时完整性校验 ──────────────────────────────────────────────────
+
+def _cmd_exec_summary(params: Mapping[str, object]) -> dict[str, object]:
+    """cmd_exec 安全摘要——不记录完整命令"""
+    from app.services.audit_service import sanitize_sensitive_data
+    cmd = str(params.get("command", ""))
+    if not cmd:
+        return {"command": "[empty]"}
+    parts = cmd.split()
+    return sanitize_sensitive_data({  # type: ignore[return-value]
+        "command_name": parts[0][:50] if parts else "",
+        "argument_count": len(parts) - 1 if len(parts) > 1 else 0,
+        "contains_pipe": "|" in cmd,
+        "contains_redirect": ">" in cmd,
+        "contains_shell_chain": any(s in cmd for s in ("&&", "||", ";")),
+    })
+
+
+_SUMMARY_BUILDERS = {
+    "cmd_exec_summary": _cmd_exec_summary,
 }
+_KNOWN_KEYS = set(_REGISTRY.keys())
+try:
+    for name, spec in _REGISTRY.items():
+        # audit_policy
+        if not spec.audit_policy.safe_fields and spec.audit_policy.summary_builder is None:
+            raise ValueError(f"工具 '{name}' 缺少 AuditPolicy")
+        for sf in spec.audit_policy.safe_fields:
+            if sf not in spec.params:
+                raise ValueError(f"工具 '{name}' audit safe_field '{sf}' 不在 params 中")
+        if spec.audit_policy.summary_builder and spec.audit_policy.summary_builder not in _SUMMARY_BUILDERS:
+            raise ValueError(f"工具 '{name}' summary_builder '{spec.audit_policy.summary_builder}' 未注册")
+        # action_field
+        if spec.action_field and spec.action_field not in spec.params:
+            raise ValueError(f"工具 '{name}' action_field '{spec.action_field}' 不在 params 中")
+        # action_risk_overrides
+        if spec.action_field:
+            action_param = spec.params[spec.action_field]
+            for av in spec.action_risk_overrides:
+                if av not in action_param.enum:
+                    raise ValueError(f"工具 '{name}' action override '{av}' 不在 action enum 中")
+        if spec.default_risk not in ("low", "medium", "high"):
+            raise ValueError(f"工具 '{name}' default_risk 非法: {spec.default_risk}")
+except ValueError as e:
+    logger.critical("ToolRegistry 完整性校验失败: %s", e)
+    raise
 
+
+# ── 特殊摘要构造器 ────────────────────────────────────────────────────
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ToolRegistry
+# ═══════════════════════════════════════════════════════════════════════
 
 class ToolRegistry:
-    """MCP 工具注册表 —— 运行时查询工具元信息与参数校验
-
-    使用方式：
-        registry = ToolRegistry()
-        if registry.exists("sys_info"):
-            info = registry.get_tool_info("sys_info")
-    """
+    """MCP 工具注册表 —— 运行时查询工具元信息与参数校验"""
 
     def exists(self, tool_name: str) -> bool:
-        """判断工具是否已注册"""
-        return tool_name in _TOOLS
+        return tool_name in _REGISTRY
 
     def get_tool_names(self) -> list[str]:
-        """返回所有已注册工具名称"""
-        return list(_TOOLS.keys())
+        return list(_REGISTRY.keys())
 
-    def get_tool_info(self, tool_name: str) -> dict[str, Any] | None:
-        """返回工具的完整元信息，不存在时返回 None"""
-        return _TOOLS.get(tool_name)
+    def get_tool_spec(self, tool_name: str) -> ToolSpec | None:
+        """返回工具规格（不可变副本）"""
+        return _REGISTRY.get(tool_name)
+
+    def get_tool_info(self, tool_name: str) -> dict[str, object] | None:
+        """返回工具元信息（兼容旧版 dict 接口）"""
+        spec = _REGISTRY.get(tool_name)
+        if spec is None:
+            return None
+        return {
+            "name": spec.name,
+            "description": spec.description,
+            "risk_level": spec.default_risk,
+            "params": {k: {"type": v.type, "required": v.required, "enum": list(v.enum) or None, "constraints": dict(v.constraints) if v.constraints else None}
+                       for k, v in spec.params.items()},
+        }
 
     def get_default_risk(self, tool_name: str) -> str | None:
-        """返回工具的默认风险等级
+        spec = _REGISTRY.get(tool_name)
+        return spec.default_risk if spec else None
 
-        对于 service_mgr，会根据 action 参数动态返回风险等级。
-        """
-        tool = _TOOLS.get(tool_name)
-        if tool is None:
+    def get_risk_for_action(self, tool_name: str, action: Any) -> str | None:
+        """对带 action 参数的工具，按 action 返回具体风险"""
+        spec = _REGISTRY.get(tool_name)
+        if spec is None:
             return None
-        return tool.get("risk_level", "low")
-
-    def get_risk_for_action(self, tool_name: str, action: str) -> str | None:
-        """对于有 action 参数的工具，按 action 返回具体风险等级
-
-        目前仅 service_mgr 支持 action 级别的风险映射。
-        """
-        tool = _TOOLS.get(tool_name)
-        if tool is None:
-            return None
-        action_risk_map = tool.get("_action_risk", {})
-        return action_risk_map.get(action, tool.get("risk_level", "low"))
+        if isinstance(action, str) and spec.action_field:
+            return spec.action_risk_overrides.get(action, spec.default_risk)
+        return spec.default_risk
 
     def get_param_info(self, tool_name: str, param_name: str) -> dict[str, Any] | None:
-        """返回工具某个参数的元信息"""
-        tool = _TOOLS.get(tool_name)
-        if tool is None:
+        spec = _REGISTRY.get(tool_name)
+        if spec is None:
             return None
-        return tool.get("params", {}).get(param_name)
+        p = spec.params.get(param_name)
+        if p is None:
+            return None
+        return {"type": p.type, "required": p.required, "enum": list(p.enum) or None, "constraints": dict(p.constraints) if p.constraints else None}
 
     def validate_params(self, tool_name: str, params: dict) -> dict[str, Any]:
-        """校验工具参数的枚举范围和基本约束
-
-        返回:
-            {"valid": bool, "errors": list[str]}
-
-        注意：此方法只做结构/枚举校验，不做安全裁决。
-        安全裁决（命令黑名单、敏感路径等）仍由 SafetyGuard 负责。
-        """
-        tool = _TOOLS.get(tool_name)
-        if tool is None:
+        """校验参数枚举和约束，返回 {"valid": bool, "errors": list[str]}"""
+        spec = _REGISTRY.get(tool_name)
+        if spec is None:
             return {"valid": False, "errors": [f"未知工具: {tool_name}"]}
 
         errors: list[str] = []
-        param_defs: dict = tool.get("params", {})
-
-        for pname, pdef in param_defs.items():
-            required = pdef.get("required", False)
+        for pname, pdef in spec.params.items():
             has_value = pname in params and params[pname] is not None
-
-            # 必填参数检查
-            if required and not has_value:
+            if pdef.required and not has_value:
                 errors.append(f"缺少必填参数: {pname}")
                 continue
-
             if not has_value:
                 continue
-
             value = params[pname]
-
-            # 枚举值校验
-            allowed = pdef.get("enum")
-            if allowed is not None and value not in allowed:
-                errors.append(
-                    f"参数 {pname} 值 '{value}' 不在允许范围内: {allowed}"
-                )
-
-            # 数值约束校验
-            constraints = pdef.get("constraints")
-            if constraints and isinstance(value, (int, float)):
-                if "min" in constraints and value < constraints["min"]:
-                    errors.append(
-                        f"参数 {pname} 值 {value} 小于最小值 {constraints['min']}"
-                    )
-                if "max" in constraints and value > constraints["max"]:
-                    errors.append(
-                        f"参数 {pname} 值 {value} 大于最大值 {constraints['max']}"
-                    )
-
+            if pdef.enum and value not in pdef.enum:
+                errors.append(f"参数 {pname} 值 '{value}' 不在允许范围内: {list(pdef.enum)}")
+            if pdef.constraints and isinstance(value, (int, float)):
+                c = pdef.constraints
+                if "min" in c and value < c["min"]:
+                    errors.append(f"参数 {pname} 值 {value} 小于最小值 {c['min']}")
+                if "max" in c and value > c["max"]:
+                    errors.append(f"参数 {pname} 值 {value} 大于最大值 {c['max']}")
         return {"valid": len(errors) == 0, "errors": errors}
+
+    def get_audit_policy(self, tool_name: str) -> AuditPolicy | None:
+        spec = _REGISTRY.get(tool_name)
+        return spec.audit_policy if spec else None
+
+    def build_audit_metadata(self, tool_name: str, params: Mapping[str, object]) -> dict[str, object]:
+        """构建审计安全元数据——不记录完整 params"""
+        from app.services.audit_service import sanitize_sensitive_data
+
+        spec = _REGISTRY.get(tool_name)
+        if spec is None:
+            logger.warning("工具 %s 未注册，审计元数据为空", tool_name)
+            return {}
+
+        meta: dict[str, object] = {}
+        # 安全字段
+        for sf in spec.audit_policy.safe_fields:
+            if sf in params:
+                meta[sf] = params[sf]
+        # 特殊摘要
+        if spec.audit_policy.summary_builder:
+            builder = _SUMMARY_BUILDERS.get(spec.audit_policy.summary_builder)
+            if builder:
+                meta.update(builder(params))
+
+        return sanitize_sensitive_data(meta)  # type: ignore[return-value]

@@ -3,7 +3,7 @@
 职责：
   - precheck: session_id + option_id 回查预检
   - execute: low 风险 option 真实安全执行
-  - 不直接调用 MCPClient，全部通过 AgentHarness
+  - 不直接调用 MCP客户端，全部通过 智能体执行器执行，保证审计上下文完整
 """
 
 import json
@@ -39,31 +39,6 @@ class ActionPrecheck:
 
 # ── 安全参数摘要 ──────────────────────────────────────────────────────
 
-def _safe_metadata(tool: str, params: dict[str, object]) -> dict[str, object]:
-    """提取有限安全元数据，经公共脱敏"""
-    meta: dict[str, object] = {}
-    if tool == "service_mgr":
-        for k in ("action", "service"):
-            if k in params:
-                meta[k] = params[k]
-    elif tool == "sys_info":
-        if "metric" in params:
-            meta["metric"] = params["metric"]
-    elif tool == "log_reader":
-        for k in ("service", "lines"):
-            if k in params:
-                meta[k] = params[k]
-    elif tool == "cmd_exec":
-        cmd = params.get("command")
-        if cmd:
-            meta["command"] = sanitize_sensitive_data(str(cmd))
-    elif tool == "file_guard":
-        for k in ("action", "path"):
-            if k in params:
-                meta[k] = params[k]
-    else:
-        logger.warning("工具 %s 未配置安全审计字段，已忽略全部参数", tool)
-    return sanitize_sensitive_data(meta)  # type: ignore[return-value]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -80,12 +55,14 @@ class ActionService:
         agent_harness: Any = None,
         audit_service: Any = None,
         confirmation_store: Any = None,
+        tool_registry: Any = None,
     ) -> None:
         self._store = fix_option_store
         self._safety_guard = safety_guard
         self._harness = agent_harness
         self._audit = audit_service
         self._confirmation = confirmation_store
+        self._tool_registry = tool_registry
 
     # ── 预检 ──────────────────────────────────────────────────────
 
@@ -175,7 +152,7 @@ class ActionService:
         ctx.trace_id = stored.trace_id
         ctx.intent = "action_execute"
         ctx.risk_level = "medium"
-        meta = _safe_metadata(tool, params)
+        meta = self._tool_registry.build_audit_metadata(tool, dict(params))
         meta["option_id"] = stored.option.option_id
         ctx.add_tool_call(tool, dict(meta), None)
 
@@ -227,7 +204,7 @@ class ActionService:
         ctx.trace_id = stored.trace_id
         ctx.intent = "action_execute"
         ctx.risk_level = "low"
-        meta = _safe_metadata(tool, params)
+        meta = self._tool_registry.build_audit_metadata(tool, dict(params))
         meta["option_id"] = stored.option.option_id
         ctx.add_tool_call(tool, dict(meta), None)
 
@@ -398,7 +375,7 @@ class ActionService:
         ctx.trace_id = trace_id
         ctx.intent = "action_execute"
         ctx.risk_level = risk
-        meta = _safe_metadata(tool, params)
+        meta = self._tool_registry.build_audit_metadata(tool, dict(params))
         meta["option_id"] = option_id
         ctx.add_tool_call(tool, dict(meta), None)
         await self._safe_audit(ctx, "action_blocked")

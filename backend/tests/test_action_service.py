@@ -3,17 +3,30 @@ import asyncio
 
 import pytest
 
-from app.schemas.action import FixOption
+from typing import Any, cast
+from app.schemas.action import FixOption, RiskLevel
 from app.services.fix_option_store import FixOptionStore
 
 
-def _opt(option_id="fix_a1b2c3d4", risk_level="low", tool="sys_info", params=None):
+def _opt(
+    option_id: str = "fix_a1b2c3d4",
+    risk_level: RiskLevel = "low",
+    tool: str = "sys_info",
+    params: dict[str, object] | None = None,
+) -> FixOption:
     return FixOption(
-        option_id=option_id, title="t", description="d",
-        risk_level=risk_level, tool=tool,
-        params=params or {"metric": "cpu"}, requires_confirm=(risk_level == "medium"),
+        option_id=option_id,
+        title="t",
+        description="d",
+        risk_level=risk_level,
+        tool=tool,
+        params=(
+            params
+            if params is not None
+            else {"metric": "cpu"}
+        ),
+        requires_confirm=risk_level == "medium",
     )
-
 
 class FakeSafetyGuard:
     def __init__(self, blocked_tools=None, medium_tools=None):
@@ -58,6 +71,7 @@ class FakeAuditService:
 def svc():
     from app.services.action_service import ActionService
     from app.services.confirmation_store import ConfirmationStore
+    from app.services.tool_registry import ToolRegistry
     store = FixOptionStore()
     return ActionService(
         fix_option_store=store,
@@ -65,6 +79,7 @@ def svc():
         agent_harness=FakeAgentHarness(),
         audit_service=FakeAuditService(),
         confirmation_store=ConfirmationStore(),
+        tool_registry=ToolRegistry(),
     ), store
 
 
@@ -83,14 +98,34 @@ class TestPublicSanitizer:
 
     def test_nested_dict_password_redacted(self):
         from app.services.audit_service import sanitize_sensitive_data
-        r = sanitize_sensitive_data({"result": {"password": "secret123", "ok": True}})
-        assert r["result"]["password"] == "[REDACTED]"
-        assert r["result"]["ok"] is True
+
+        sanitized = cast(
+            dict[str, Any],
+            sanitize_sensitive_data({
+                "result": {
+                    "password": "secret123",
+                    "ok": True,
+                }
+            }),
+        )
+
+        result = cast(dict[str, Any], sanitized["result"])
+
+        assert result["password"] == "[REDACTED]"
+        assert result["ok"] is True
 
     def test_list_token_redacted(self):
         from app.services.audit_service import sanitize_sensitive_data
-        r = sanitize_sensitive_data([{"token": "abc"}, {"ok": True}])
-        assert r[0]["token"] == "[REDACTED]"
+
+        sanitized = cast(
+            list[dict[str, Any]],
+            sanitize_sensitive_data([
+                {"token": "abc"},
+                {"ok": True},
+            ]),
+        )
+
+        assert sanitized[0]["token"] == "[REDACTED]"
 
     def test_string_bearer_redacted(self):
         from app.services.audit_service import sanitize_sensitive_data
@@ -486,18 +521,3 @@ async def test_no_confirmation_store_returns_error(svc):
     assert r.requires_confirm is False
     assert len(s._harness.calls) == 0
     assert store.get_option("s1", "fix_0000a001").status == "pending"
-
-@pytest.mark.asyncio
-async def test_unknown_tool_returns_empty_metadata(svc):
-    from app.services.action_service import _safe_metadata
-    meta = _safe_metadata("unknown_tool", {"password": "secret"})
-    assert meta == {}
-
-@pytest.mark.asyncio
-async def test_unknown_tool_logs_warning(svc, caplog):
-    import logging
-    from app.services.action_service import _safe_metadata
-    _safe_metadata.__wrapped__ = _safe_metadata  # no-op, just use directly
-    with caplog.at_level(logging.WARNING, logger="app.services.action_service"):
-        _safe_metadata("unknown_tool", {"cmd": "ls"})
-    assert "未配置安全审计字段" in caplog.text

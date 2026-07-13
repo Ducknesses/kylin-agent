@@ -46,6 +46,7 @@ action_service = ActionService(
     agent_harness=agent_harness,
     audit_service=audit_service,
     confirmation_store=confirmation_store,
+    tool_registry=tool_registry,
 )
 
 # FixPlannerAgent —— 注入共享 ToolRegistry + LLMClient

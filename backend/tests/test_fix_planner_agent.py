@@ -28,7 +28,8 @@ from app.schemas.action import FixOption
 @pytest.fixture
 def agent():
     from app.services.fix_planner_agent import FixPlannerAgent
-    return FixPlannerAgent()
+    from app.services.tool_registry import ToolRegistry
+    return FixPlannerAgent(tool_registry=ToolRegistry())
 
 
 # ── 真实 observation 工厂函数 ─────────────────────────────────────────
@@ -782,3 +783,182 @@ class TestToolRegistryValidation:
         )
         assert len(options) == 1
         mock_registry.validate_params.assert_called()
+    def test_registry_risk_replaces_lower_candidate_risk(self):
+        from app.schemas.action import FixOption
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+
+        planner = FixPlannerAgent(tool_registry=ToolRegistry())
+
+        option = FixOption(
+            option_id="fix_deadbeef",
+            title="重启服务",
+            description="重启 nginx",
+            tool="service_mgr",
+            params={
+                "action": "restart",
+                "service": "nginx",
+            },
+            risk_level="low",
+            requires_confirm=False,
+        )
+
+        result = planner._validate_options_with_registry([option])
+
+        assert len(result) == 1
+        assert result[0].risk_level == "medium"
+        assert result[0].requires_confirm is True
+
+        # 不应原地修改输入对象
+        assert option.risk_level == "low"
+        assert option.requires_confirm is False
+    def test_registry_low_risk_remains_low(self):
+        from app.schemas.action import FixOption
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+
+        planner = FixPlannerAgent(tool_registry=ToolRegistry())
+
+        option = FixOption(
+            option_id="fix_feedface",
+            title="查看服务状态",
+            description="读取 nginx 状态",
+            tool="service_mgr",
+            params={
+                "action": "status",
+                "service": "nginx",
+            },
+            risk_level="medium",
+            requires_confirm=True,
+        )
+
+        result = planner._validate_options_with_registry([option])
+
+        assert len(result) == 1
+        assert result[0].risk_level == "low"
+        assert result[0].requires_confirm is False
+    
+
+# ── S4: 规则版 Planner fail-closed 测试 ──────────────────────────────
+
+
+class TestPlannerFailClosed:
+    """规则路径和 LLM 路径 ToolRegistry=None 时 fail-closed"""
+
+    def test_rule_path_no_registry_returns_empty(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        agent = FixPlannerAgent(tool_registry=None)
+        obs = [{"tool": "service_mgr", "params": {"action": "status", "service": "nginx"},
+                "ok": True, "result": {"service": "nginx", "status": "inactive"}}]
+        options = agent.plan(
+            intent="service_status_query", observations=obs,
+            report="test", target_service="nginx",
+        )
+        assert options == []
+
+    def test_rule_path_no_registry_warns(self, caplog):
+        import logging
+        from app.services.fix_planner_agent import FixPlannerAgent
+        caplog.set_level(logging.WARNING)
+        agent = FixPlannerAgent(tool_registry=None)
+        obs = [{"tool": "service_mgr", "params": {"action": "status", "service": "nginx"},
+                "ok": True, "result": {"service": "nginx", "status": "inactive"}}]
+        agent.plan(intent="service_status_query", observations=obs,
+                   report="test", target_service="nginx")
+        warnings = [r.message for r in caplog.records if "ToolRegistry" in str(r.message)]
+        assert len(warnings) >= 1
+
+    def test_rule_path_warning_contains_no_params(self, caplog):
+        import logging
+        from app.services.fix_planner_agent import FixPlannerAgent
+        caplog.set_level(logging.WARNING)
+        agent = FixPlannerAgent(tool_registry=None)
+        obs = [{"tool": "service_mgr", "params": {"action": "status", "service": "nginx"},
+                "ok": True, "result": {"service": "nginx", "status": "inactive"}}]
+        agent.plan(intent="service_status_query", observations=obs,
+                   report="test", target_service="nginx")
+        for r in caplog.records:
+            msg = str(r.message)
+            assert "nginx" not in msg or "ToolRegistry" in msg
+
+    def test_llm_path_no_registry_returns_empty(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        agent = FixPlannerAgent(tool_registry=None)
+        result = agent._build_fix_options([
+            {"title": "t", "description": "d", "tool": "sys_info", "params": {"metric": "cpu"}},
+        ])
+        assert result == []
+
+    def test_llm_path_no_registry_warns(self, caplog):
+        import logging
+        from app.services.fix_planner_agent import FixPlannerAgent
+        caplog.set_level(logging.WARNING)
+        agent = FixPlannerAgent(tool_registry=None)
+        agent._build_fix_options([
+            {"title": "t", "description": "d", "tool": "sys_info", "params": {"metric": "cpu"}},
+        ])
+        warnings = [r.message for r in caplog.records if "ToolRegistry" in str(r.message)]
+        assert len(warnings) >= 1
+
+    def test_rule_unknown_tool_filtered(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+        agent = FixPlannerAgent(tool_registry=ToolRegistry())
+        # 手动构造一个已知 tool=None 的场景 —— 直接调用 _validate_options_with_registry
+        from app.schemas.action import FixOption
+        opt = FixOption(option_id="fix_00000001", title="t", description="d",
+                        risk_level="low", tool="nonexistent_tool", params={},
+                        requires_confirm=False)
+        validated = agent._validate_options_with_registry([opt])
+        assert validated == []
+
+    def test_rule_invalid_params_filtered(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+        from app.schemas.action import FixOption
+        agent = FixPlannerAgent(tool_registry=ToolRegistry())
+        # sys_info 缺少 required metric
+        opt = FixOption(option_id="fix_00000002", title="t", description="d",
+                        risk_level="low", tool="sys_info", params={},
+                        requires_confirm=False)
+        validated = agent._validate_options_with_registry([opt])
+        assert validated == []
+
+    def test_rule_enum_invalid_filtered(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+        from app.schemas.action import FixOption
+        agent = FixPlannerAgent(tool_registry=ToolRegistry())
+        # sys_info with invalid metric
+        opt = FixOption(option_id="fix_00000003", title="t", description="d",
+                        risk_level="low", tool="sys_info",
+                        params={"metric": "invalid_metric"},
+                        requires_confirm=False)
+        validated = agent._validate_options_with_registry([opt])
+        assert validated == []
+
+    def test_valid_option_passes_validation(self):
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+        agent = FixPlannerAgent(tool_registry=ToolRegistry())
+        obs = [{"tool": "service_mgr", "params": {"action": "status", "service": "nginx"},
+                "ok": True, "result": {"service": "nginx", "status": "inactive"}}]
+        options = agent.plan(
+            intent="service_status_query", observations=obs,
+            report="test", target_service="nginx",
+        )
+        assert len(options) == 1
+
+    def test_normal_registry_path_no_warning(self, caplog):
+        import logging
+        from app.services.fix_planner_agent import FixPlannerAgent
+        from app.services.tool_registry import ToolRegistry
+        caplog.set_level(logging.WARNING)
+        agent = FixPlannerAgent(tool_registry=ToolRegistry())
+        obs = [{"tool": "service_mgr", "params": {"action": "status", "service": "nginx"},
+                "ok": True, "result": {"service": "nginx", "status": "inactive"}}]
+        agent.plan(intent="service_status_query", observations=obs,
+                   report="test", target_service="nginx")
+        warnings = [r.message for r in caplog.records
+                    if "ToolRegistry" in str(r.message) and "未注入" in str(r.message)]
+        assert len(warnings) == 0

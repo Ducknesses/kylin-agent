@@ -236,21 +236,92 @@ class FixPlannerAgent:
         options.extend(disk_opts)
 
         # ── 校验通过 ToolRegistry ──
-        if self.tool_registry is not None and options:
-            validated: list[FixOption] = []
-            for opt in options:
-                validation = self.tool_registry.validate_params(opt.tool, opt.params)
-                if validation["valid"]:
-                    validated.append(opt)
-                else:
+        if self.tool_registry is None:
+            if options:
+                logger.warning(
+                    "FixPlannerAgent 未注入 ToolRegistry，已拒绝生成规则修复选项"
+                )
+            return []
+
+        return self._validate_options_with_registry(options)
+
+    def _validate_options_with_registry(
+        self,
+        options: list[FixOption],
+    ) -> list[FixOption]:
+        """通过 ToolRegistry 校验并校正 FixOption。
+
+        ToolRegistry 负责工具存在性、参数合法性和 action 静态风险。
+        没有 action 字段的候选保留 Planner 已确定的风险等级。
+        """
+
+        if self.tool_registry is None:
+            logger.warning(
+                "FixPlannerAgent 未注入 ToolRegistry，"
+                "已拒绝生成修复选项"
+            )
+            return []
+
+        validated: list[FixOption] = []
+
+        for opt in options:
+            if not self.tool_registry.exists(opt.tool):
+                logger.warning(
+                    "修复候选使用未知工具: tool=%s",
+                    opt.tool,
+                )
+                continue
+
+            validation = self.tool_registry.validate_params(
+                opt.tool,
+                opt.params,
+            )
+            if not validation["valid"]:
+                logger.warning(
+                    "修复候选未通过 ToolRegistry 校验: "
+                    "tool=%s, errors=%s",
+                    opt.tool,
+                    validation["errors"],
+                )
+                continue
+
+            final_risk = opt.risk_level
+
+            # 只有具备 action 参数的工具，才使用 Registry 的 action 风险覆盖。
+            action = opt.params.get("action")
+            if isinstance(action, str):
+                registry_risk = self.tool_registry.get_risk_for_action(
+                    opt.tool,
+                    action,
+                )
+
+                if registry_risk is None:
                     logger.warning(
-                        "[FixPlanner] FixOption 参数校验失败: %s — %s",
-                        opt.option_id, "; ".join(validation["errors"]),
+                        "修复候选无法确定 action 风险: tool=%s",
+                        opt.tool,
                     )
-            return validated
+                    continue
 
-        return options
+                final_risk = registry_risk
 
+            # Planner 不生成高风险自动修复候选。
+            if final_risk == "high":
+                logger.warning(
+                    "修复候选风险过高，已拒绝生成: tool=%s",
+                    opt.tool,
+                )
+                continue
+
+            validated.append(
+                opt.model_copy(
+                    update={
+                        "risk_level": final_risk,
+                        "requires_confirm": final_risk == "medium",
+                    }
+                )
+            )
+
+        return validated
     # ── 服务异常 ────────────────────────────────────────────────────
 
     def _plan_service_issue(
