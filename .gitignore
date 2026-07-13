@@ -18,6 +18,8 @@ __pycache__/
 frontend/.env.development.local
 frontend/.env.production
 backend/.env
+mcp-server/.env
+!mcp-server/.env.example
 
 # Python virtual environment
 .venv/
