@@ -85,6 +85,8 @@ class Orchestrator:
         intent_agent: Any = None, diagnose_agent: Any = None,
         agent_harness: Any = None, reporter_agent: Any = None,
         audit_service: Any = None,
+        fix_planner: Any = None,
+        fix_option_store: Any = None,
     ) -> None:
         self.safety_guard = safety_guard
         self.tool_registry = tool_registry
@@ -122,6 +124,17 @@ class Orchestrator:
             from app.services.audit_service import AuditService
             audit_service = AuditService()
         self.audit_service = audit_service
+
+        # FixPlannerAgent 和 FixOptionStore（可选，默认创建新实例）
+        if fix_planner is None:
+            from app.services.fix_planner_agent import FixPlannerAgent
+            fix_planner = FixPlannerAgent(tool_registry=tool_registry)
+        self.fix_planner = fix_planner
+
+        if fix_option_store is None:
+            from app.services.fix_option_store import FixOptionStore
+            fix_option_store = FixOptionStore()
+        self.fix_option_store = fix_option_store
 
     # ── 主入口 ──────────────────────────────────────────────────────
 
@@ -164,6 +177,9 @@ class Orchestrator:
             else:
                 intent_result = self.intent_agent.detect(user_input)
             ctx.intent = intent_result.get("intent")
+            # 保存 intent_result 供后续 FixPlanner 使用
+            intent = ctx.intent or "unknown"
+            target_service = intent_result.get("target_service")
 
             # ── 4. DiagnoseAgent ──
             if settings.LLM_ENABLED:
@@ -200,8 +216,41 @@ class Orchestrator:
             # ── 6. ReporterAgent ──
             report = await self._generate_report(intent_result, ctx.observations, user_input)
             ctx.final_response = report
+
+            # ── 7. FixPlannerAgent → FixOptionStore → fix_options 帧 ──
+            if settings.LLM_ENABLED:
+                fix_options = await self.fix_planner.plan_with_llm(
+                    intent=intent,
+                    observations=ctx.observations,
+                    report=report,
+                    target_service=target_service,
+                )
+            else:
+                fix_options = self.fix_planner.plan(
+                    intent=intent,
+                    observations=ctx.observations,
+                    report=report,
+                    target_service=target_service,
+                )
+            if fix_options:
+                # 保存失败会进入外层 except，产生 error + done
+                self.fix_option_store.save_options(
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    options=fix_options,
+                )
+
             for i in range(0, len(report), 500):
                 yield {"type": "chunk", "trace_id": trace_id, "content": report[i:i + 500]}
+
+            if fix_options:
+                yield {
+                    "type": "fix_options",
+                    "trace_id": trace_id,
+                    "options": [
+                        opt.model_dump(mode="json") for opt in fix_options
+                    ],
+                }
             yield {"type": "done", "trace_id": trace_id, "session_id": session_id, "final_response": ctx.final_response}
             await self._safe_audit(ctx, "chat_done")
 

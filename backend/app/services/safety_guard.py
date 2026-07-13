@@ -239,6 +239,8 @@ class SafetyGuard:
             result = self._check_cmd_exec(params)
         elif tool == "file_guard":
             result = self._check_file_guard(params, role)
+        elif tool == "net_monitor":
+            result = self._check_net_monitor(params)
         else:
             return self._deny("medium", "未知工具")
 
@@ -419,6 +421,29 @@ class SafetyGuard:
 
         return self._deny("medium", f"非法的 file_guard action: {action}")
 
+    def _check_net_monitor(
+        self,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        """检查网络监控调用的动态安全边界。
+
+        metric 的枚举合法性由 ToolRegistry 负责；
+        这里只保留防御性类型检查和安全语义判断。
+        """
+
+        metric = params.get("metric", "all")
+
+        if not isinstance(metric, str):
+            return self._deny(
+                "medium",
+                "net_monitor metric 类型非法",
+            )
+
+        # 当前 Registry 中允许的 net_monitor 操作均为只读监控。
+        return self._allow(
+            "low",
+            "net_monitor 只读网络监控",
+        )
     # ── 辅助方法 ────────────────────────────────────────────────────
 
     @staticmethod
