@@ -82,7 +82,6 @@ function renderMarkdown(text) {
 .msg-row.user {
   flex-direction: row-reverse;
 }
-.msg-row.tool,
 .msg-row.risk {
   justify-content: center;
 }

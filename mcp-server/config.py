@@ -1,5 +1,15 @@
 """MCP Server 配置"""
 import os
+from pathlib import Path
+
+# 优先从项目目录下的 .env 文件加载环境变量
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
 
 
 class Config:
@@ -23,8 +33,8 @@ class Config:
             return True
         return False
 
-    # Bearer Token 认证
-    API_TOKEN: str = os.getenv("API_TOKEN", "change-me-in-production")
+    # Bearer Token 认证（生产环境必须通过环境变量或 .env 文件配置）
+    API_TOKEN: str = os.getenv("API_TOKEN", "")
 
     # 沙箱配置
     COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "30"))

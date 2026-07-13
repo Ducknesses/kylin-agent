@@ -19,9 +19,10 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/mcp-server
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8001
-Environment=API_TOKEN=change-me-in-production
+# API_TOKEN 通过项目目录下的 .env 文件配置，不在此处硬编码
+# 请确保 /opt/mcp-server/.env 中设置了正确的 API_TOKEN
 
-# 安全加固（兼容 systemd v249+）
+# 安全加固
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

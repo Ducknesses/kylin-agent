@@ -125,6 +125,8 @@ class TestAgentContextMutators:
         assert call["tool"] == "sys_info"
         assert call["params"] == {"metric": "cpu"}
         assert call["result"] == {"cpu_percent": 23.5}
+        assert call.get("tool_call_id"), "tool_call_id 不应为空"
+        assert call["tool_call_id"].startswith("tc_")
 
     def test_add_tool_call_result_none(self):
         """add_tool_call 的 result 可以为 None"""

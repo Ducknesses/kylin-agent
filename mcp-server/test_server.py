@@ -10,7 +10,18 @@ import signal
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
+# 加载 .env 文件（如果存在）
+try:
+    from pathlib import Path
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
+
 BASE_URL = "http://localhost:8001"
+API_TOKEN = os.getenv("API_TOKEN", "")
 
 # ---------- 工具函数 ----------
 
@@ -20,7 +31,7 @@ def http_post(path: str, data: dict) -> tuple:
     body = json.dumps(data).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
-        "Authorization": "Bearer change-me-in-production",
+        "Authorization": f"Bearer {API_TOKEN}",
     }
     req = Request(url, data=body, headers=headers)
     try:

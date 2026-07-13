@@ -52,14 +52,21 @@ class AgentContext:
         """刷新 updated_at 时间戳"""
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
-    def add_tool_call(self, tool: str, params: dict, result: dict | None = None) -> None:
-        """追加一条工具调用记录"""
-        self.tool_calls.append({
+    def add_tool_call(self, tool: str, params: dict, result: dict | None = None) -> dict:
+        """追加一条工具调用记录
+
+        自动生成 tool_call_id（前端用于稳定更新同一条工具调用消息），
+        返回新增的记录字典，方便调用方继续填充 result / status 等字段。
+        """
+        record = {
+            "tool_call_id": f"tc_{str(uuid.uuid4())[:8]}",
             "tool": tool,
             "params": params,
             "result": result,
-        })
+        }
+        self.tool_calls.append(record)
         self.mark_updated()
+        return record
 
     def add_observation(self, observation: dict) -> None:
         """追加一条观察结果"""
