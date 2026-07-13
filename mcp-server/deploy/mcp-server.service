@@ -17,9 +17,9 @@ StandardError=journal
 SyslogIdentifier=mcp-server
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/mcp-server
-Environment=MCP_HOST=127.0.0.1
+Environment=MCP_HOST=0.0.0.0
 Environment=MCP_PORT=8001
-Environment=API_TOKEN=change-me-in-production
+Environment=API_TOKEN=123456789
 
 # 安全加固（兼容 systemd v249+）
 NoNewPrivileges=yes
