@@ -469,3 +469,35 @@ async def test_confirm_failed_audit(svc):
     p = aud[0]["tool_calls"][0]["params"]
     assert p["confirm_id"] == r.confirm_id
     assert p["decision"] == "approve"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR #11: robustness
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_no_confirmation_store_returns_error(svc):
+    s, store = svc
+    s._confirmation = None
+    store.save_options("s1", "t1", [_opt("fix_0000a001", "medium")])
+    r = await s.execute("s1", "fix_0000a001")
+    assert r.result == "error"
+    assert r.confirm_id is None
+    assert r.requires_confirm is False
+    assert len(s._harness.calls) == 0
+    assert store.get_option("s1", "fix_0000a001").status == "pending"
+
+@pytest.mark.asyncio
+async def test_unknown_tool_returns_empty_metadata(svc):
+    from app.services.action_service import _safe_metadata
+    meta = _safe_metadata("unknown_tool", {"password": "secret"})
+    assert meta == {}
+
+@pytest.mark.asyncio
+async def test_unknown_tool_logs_warning(svc, caplog):
+    import logging
+    from app.services.action_service import _safe_metadata
+    _safe_metadata.__wrapped__ = _safe_metadata  # no-op, just use directly
+    with caplog.at_level(logging.WARNING, logger="app.services.action_service"):
+        _safe_metadata("unknown_tool", {"cmd": "ls"})
+    assert "未配置安全审计字段" in caplog.text

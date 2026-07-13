@@ -61,6 +61,8 @@ def _safe_metadata(tool: str, params: dict[str, object]) -> dict[str, object]:
         for k in ("action", "path"):
             if k in params:
                 meta[k] = params[k]
+    else:
+        logger.warning("工具 %s 未配置安全审计字段，已忽略全部参数", tool)
     return sanitize_sensitive_data(meta)  # type: ignore[return-value]
 
 
@@ -209,11 +211,12 @@ class ActionService:
                                   message="该操作需要二次确认后才可执行",
                                   confirm_id=conf.confirm_id)
 
-        await self._safe_audit(ctx, "action_confirm_required")
-        return ActionPrecheck(result="confirm_required", option_id=stored.option.option_id,
+        # No confirmation store — internal error
+        await self._safe_audit(ctx, "action_confirm_error")
+        return ActionPrecheck(result="error", option_id=stored.option.option_id,
                               session_id=session_id, trace_id=stored.trace_id,
-                              risk_level="medium", requires_confirm=True,
-                              message="该操作需要二次确认后才可执行")
+                              risk_level="medium", requires_confirm=False,
+                              message="确认服务暂时不可用")
 
     async def _execute_low(self, session_id: str, option_id: str, stored) -> ActionPrecheck:
 

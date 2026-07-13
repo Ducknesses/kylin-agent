@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/actions/execute", response_model=ActionExecuteResponse)
-async def execute_action(req: ActionExecuteRequest):
-    result = await action_service.execute(req.session_id, req.option_id)
+def _raise_for_result(result) -> None:
+    """统一 ActionResult → HTTP 映射: error→500, failed→502"""
     if result.result == "not_found":
         raise HTTPException(status_code=404, detail=result.message)
     if result.result == "expired":
@@ -30,8 +29,16 @@ async def execute_action(req: ActionExecuteRequest):
         raise HTTPException(status_code=403, detail=result.message)
     if result.result == "conflict":
         raise HTTPException(status_code=409, detail=result.message)
-    if result.result in ("failed", "error"):
+    if result.result == "failed":
         raise HTTPException(status_code=502, detail=result.message)
+    if result.result == "error":
+        raise HTTPException(status_code=500, detail=result.message)
+
+
+@router.post("/actions/execute", response_model=ActionExecuteResponse)
+async def execute_action(req: ActionExecuteRequest):
+    result = await action_service.execute(req.session_id, req.option_id)
+    _raise_for_result(result)
 
     return ActionExecuteResponse(
         option_id=result.option_id, session_id=result.session_id,
@@ -44,18 +51,8 @@ async def execute_action(req: ActionExecuteRequest):
 @router.post("/actions/confirm", response_model=ActionConfirmResponse)
 async def confirm_action(req: ActionConfirmRequest):
     result = await action_service.decide_confirmation(req.session_id, req.confirm_id, req.decision)
-    if result.result == "not_found":
-        raise HTTPException(status_code=404, detail=result.message)
-    if result.result == "expired":
-        raise HTTPException(status_code=410, detail=result.message)
-    if result.result == "blocked":
-        raise HTTPException(status_code=403, detail=result.message)
-    if result.result == "conflict":
-        raise HTTPException(status_code=409, detail=result.message)
-    if result.result in ("failed", "error"):
-        raise HTTPException(status_code=502, detail=result.message)
+    _raise_for_result(result)
 
-    # rejected/executed → 200
     return ActionConfirmResponse(
         confirm_id=req.confirm_id, option_id=result.option_id or "",
         session_id=req.session_id, trace_id=result.trace_id or "",

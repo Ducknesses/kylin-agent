@@ -487,6 +487,7 @@ class FixPlannerAgent:
             except Exception:
                 continue
             if self.tool_registry is None:
+                logger.warning("FixPlannerAgent 未注入 ToolRegistry，已拒绝生成可执行修复选项")
                 return []
             if not self.tool_registry.exists(candidate.tool):
                 continue
