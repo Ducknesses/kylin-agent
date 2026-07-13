@@ -3,8 +3,6 @@
 本模块仅创建需要跨模块共享的服务实例，不导入 API 路由。
 后续 Action API 可通过本模块获取 FixOptionStore，无需从 chat.py 导入。
 """
-from app.mcp.client import MCPClient
-from app.services.action_service import ActionService
 from app.services.agent_harness import AgentHarness
 from app.services.audit_service import AuditService
 from app.services.fix_option_store import FixOptionStore
@@ -19,6 +17,9 @@ llm_client = LLMClient()
 
 # 共享 SafetyGuard + MCPClient —— ActionService 与 Orchestrator 共用
 safety_guard = SafetyGuard()
+
+from app.mcp.client import MCPClient
+
 mcp_client = MCPClient()
 
 # AgentHarness —— 注入共享依赖
@@ -38,6 +39,8 @@ from app.services.confirmation_store import ConfirmationStore
 
 # ConfirmationStore —— medium 确认存储
 confirmation_store = ConfirmationStore()
+
+from app.services.action_service import ActionService
 
 # ActionService —— 注入真实执行依赖
 action_service = ActionService(
