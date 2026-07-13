@@ -458,3 +458,82 @@ class TestToolCallEdgeCases:
         result = guard.analyze_tool_call("cmd_exec", {"command": "rm -rf /"}, "admin")
         assert result["allowed"] is False
         assert result["risk_level"] == "high"
+
+
+# ── S3: net_monitor SafetyGuard 测试 ──────────────────────────────────
+
+
+class TestNetMonitor:
+    """net_monitor 工具安全测试"""
+
+    @pytest.fixture
+    def guard(self) -> SafetyGuard:
+        return SafetyGuard()
+
+    def test_connections_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "connections"})
+        assert result["allowed"] is True
+        assert result["risk_level"] == "low"
+
+    def test_traffic_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "traffic"})
+        assert result["allowed"] is True
+
+    def test_interfaces_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "interfaces"})
+        assert result["allowed"] is True
+
+    def test_routes_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "routes"})
+        assert result["allowed"] is True
+
+    def test_dns_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "dns"})
+        assert result["allowed"] is True
+
+    def test_listen_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "listen"})
+        assert result["allowed"] is True
+
+    def test_all_allowed(self, guard):
+        result = guard.analyze_tool_call("net_monitor", {"metric": "all"})
+        assert result["allowed"] is True
+
+    def test_no_metric_defaults_allowed(self, guard):
+        """无 metric 参数默认读取全部"""
+        result = guard.analyze_tool_call("net_monitor", {})
+        assert result["allowed"] is True
+        assert result["risk_level"] == "low"
+
+    def test_non_string_metric_blocked(self, guard):
+        """直接绕过 Registry 调用时，非字符串 metric 应被防御性拒绝。"""
+        result = guard.analyze_tool_call(
+            "net_monitor",
+            {"metric": 123},
+        )
+        assert result["allowed"] is False
+        assert result["risk_level"] == "medium"
+    def test_bool_metric_blocked(self, guard):
+        """bool 不应被视为合法的 metric。"""
+        result = guard.analyze_tool_call(
+            "net_monitor",
+            {"metric": True},
+        )
+
+        assert result["allowed"] is False
+        assert result["risk_level"] == "medium"
+    def test_not_treated_as_unknown_tool(self, guard):
+        """net_monitor 不被当成 unknown tool"""
+        result = guard.analyze_tool_call("net_monitor", {"metric": "connections"})
+        assert result["allowed"] is True
+        assert "未知工具" not in result.get("reason", "")
+
+    def test_all_registered_tools_have_defined_behavior(self, guard):
+        """所有 Registry 注册工具在 SafetyGuard 中有明确行为（不误报 unknown）"""
+        from app.services.tool_registry import ToolRegistry
+        registry = ToolRegistry()
+        for tool_name in registry.get_tool_names():
+            result = guard.analyze_tool_call(tool_name, {})
+            # 不应返回 "未知工具" 原因
+            assert "未知工具" not in result.get("reason", ""), \
+                f"{tool_name} 被 SafetyGuard 当作 unknown tool"

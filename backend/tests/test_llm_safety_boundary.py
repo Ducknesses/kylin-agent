@@ -105,12 +105,13 @@ class TestChatPySafety:
     """chat.py 安全检查"""
 
     def test_chat_no_mcp_client_import(self):
-        """chat.py 不应直接导入 MCPClient"""
+        """chat.py 不应直接导入 MCPClient（允许从 dependencies 导入共享实例）"""
         imports = _get_imports_from_file("backend/app/api/chat.py")
         mcp_imports = [
             i for i in imports
-            if ("mcp" in i.lower() and "client" in i.lower())
-            or ("executor" in i.lower() and "mcp" in i.lower())
+            if (("mcp" in i.lower() and "client" in i.lower())
+                or ("executor" in i.lower() and "mcp" in i.lower()))
+            and "dependencies" not in i
         ]
         assert len(mcp_imports) == 0, (
             f"chat.py 不应直接导入 MCPClient 或 Executor，发现: {mcp_imports}"

@@ -267,6 +267,7 @@ class TestNetMonitor:
         assert registry.get_default_risk("net_monitor") == "low"
 
 
+
 # ── cmd_exec 测试 ─────────────────────────────────────────────────────
 
 class TestCmdExec:
@@ -387,3 +388,196 @@ class TestNoMCPClientDirectCall:
         # 检查模块级别是否引入了 mcp client
         assert "MCPClient" not in source
         assert "mcp" not in str(tr.__dict__.get("__builtins__", ""))
+
+
+# ── build_audit_metadata 直接测试 ─────────────────────────────────────
+
+
+class TestBuildAuditMetadata:
+    """ToolRegistry.build_audit_metadata 直接单元测试"""
+
+    @pytest.fixture
+    def registry(self) -> ToolRegistry:
+        return ToolRegistry()
+
+    # A. service_mgr — 只返回 action/service，不含 password/extra
+    def test_service_mgr_filters_password(self, registry):
+        meta = registry.build_audit_metadata("service_mgr", {
+            "action": "restart",
+            "service": "nginx",
+            "password": "secret",
+            "extra": "ignored",
+        })
+        assert meta.get("action") == "restart"
+        assert meta.get("service") == "nginx"
+        assert "password" not in meta
+        assert "extra" not in meta
+
+    # B. sys_info — 只返回 metric
+    def test_sys_info_only_metric(self, registry):
+        meta = registry.build_audit_metadata("sys_info", {
+            "metric": "cpu",
+            "secret": "should_not_appear",
+        })
+        assert meta.get("metric") == "cpu"
+        assert "secret" not in meta
+
+    # C. log_reader — 只返回 service、lines，不含日志内容字段
+    def test_log_reader_only_service_lines(self, registry):
+        meta = registry.build_audit_metadata("log_reader", {
+            "service": "nginx",
+            "lines": 100,
+            "source": "/var/log/syslog",
+            "keyword": "error",
+        })
+        assert meta.get("service") == "nginx"
+        assert meta.get("lines") == 100
+        assert "source" not in meta
+        assert "keyword" not in meta
+
+    # D. net_monitor — 只返回 audit_policy 声明的字段
+    def test_net_monitor_only_metric(self, registry):
+        meta = registry.build_audit_metadata("net_monitor", {
+            "metric": "connections",
+            "port": 80,
+        })
+        assert meta.get("metric") == "connections"
+        assert "port" not in meta
+
+    # E. file_guard — 只返回 action/path，不含 content/password
+    def test_file_guard_only_action_path(self, registry):
+        meta = registry.build_audit_metadata("file_guard", {
+            "action": "write",
+            "path": "/tmp/test.txt",
+            "content": "secret content",
+            "password": "pwd123",
+        })
+        assert meta.get("action") == "write"
+        assert meta.get("path") == "/tmp/test.txt"
+        assert "content" not in meta
+        assert "password" not in meta
+
+    # F. cmd_exec — 完整 command 不出现在 metadata；含安全摘要字段
+    def test_cmd_exec_safe_summary_no_full_command(self, registry):
+        meta = registry.build_audit_metadata("cmd_exec", {
+            "command": "systemctl restart nginx --token secret",
+            "timeout": 30,
+        })
+        # 完整 command 不出现
+        assert "systemctl restart nginx --token secret" not in str(meta)
+        # secret 不出现
+        assert "secret" not in str(meta)
+        # 安全摘要字段存在
+        assert "command_name" in meta
+        assert "argument_count" in meta
+        assert "contains_pipe" in meta
+        assert "contains_redirect" in meta
+        assert "contains_shell_chain" in meta
+        # 不含完整参数数组或原始路径
+        assert "timeout" not in meta
+
+    def test_cmd_exec_empty_command(self, registry):
+        meta = registry.build_audit_metadata("cmd_exec", {
+            "command": "",
+        })
+        assert meta.get("command") == "[empty]"
+
+    # G. unknown tool — 返回 {}，warning 存在，不含 params/secret
+    def test_unknown_tool_returns_empty(self, registry, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        meta = registry.build_audit_metadata("nonexistent_tool", {
+            "param1": "value1",
+            "token": "secret123",
+        })
+        assert meta == {}
+        # warning 存在
+        warnings = [r.message for r in caplog.records if "nonexistent_tool" in str(r.message)]
+        assert len(warnings) >= 1
+        # warning 不包含 params
+        warning_text = str(warnings[0])
+        assert "param1" not in warning_text
+        assert "secret123" not in warning_text
+        assert "token" not in warning_text
+
+    # H. 所有注册工具 — 参数化校验
+    @pytest.mark.parametrize("tool_name", [
+        "sys_info", "service_mgr", "log_reader",
+        "net_monitor", "cmd_exec", "file_guard",
+    ])
+    def test_all_tools_have_valid_audit_policy(self, registry, tool_name):
+        """每个注册工具 audit_policy 不为 None，safe_fields 都属于 params"""
+        policy = registry.get_audit_policy(tool_name)
+        assert policy is not None, f"{tool_name} 缺少 AuditPolicy"
+        spec = registry.get_tool_spec(tool_name)
+        assert spec is not None
+        for sf in policy.safe_fields:
+            assert sf in spec.params, f"{tool_name} safe_field '{sf}' 不在 params 中"
+        # summary_builder 如存在必须有效
+        if policy.summary_builder:
+            assert policy.summary_builder in ("cmd_exec_summary",), \
+                f"{tool_name} summary_builder '{policy.summary_builder}' 未注册"
+
+
+# ── S1: ToolSpec 深度不可变测试 ──────────────────────────────────────
+
+
+class TestToolSpecDeepImmutability:
+    """验证 ToolSpec params/action_risk_overrides 为 MappingProxyType"""
+
+    @pytest.fixture
+    def registry(self) -> ToolRegistry:
+        return ToolRegistry()
+
+    def test_params_item_assignment_raises_typeerror(self, registry):
+        spec = registry.get_tool_spec("sys_info")
+        with pytest.raises(TypeError):
+            spec.params["x"] = ToolRegistry  # type: ignore[index]
+
+    def test_params_item_deletion_raises_typeerror(self, registry):
+        spec = registry.get_tool_spec("sys_info")
+        with pytest.raises(TypeError):
+            del spec.params["metric"]  # type: ignore[arg-type]
+
+    def test_action_risk_overrides_assignment_raises_typeerror(self, registry):
+        spec = registry.get_tool_spec("service_mgr")
+        with pytest.raises(TypeError):
+            spec.action_risk_overrides["restart"] = "low"  # type: ignore[index]
+
+    def test_get_tool_info_mutation_does_not_affect_registry(self, registry):
+        info = registry.get_tool_info("sys_info")
+        info["params"]["metric"]["constraints"] = {"min": -999}
+        spec = registry.get_tool_spec("sys_info")
+        assert spec.params["metric"].constraints is None
+
+    def test_get_param_info_mutation_does_not_affect_registry(self, registry):
+        pi = registry.get_param_info("log_reader", "lines")
+        pi["constraints"]["min"] = -999
+        spec = registry.get_tool_spec("log_reader")
+        assert spec.params["lines"].constraints == {"min": 1, "max": 500}
+
+    def test_get_tool_spec_returns_same_content_twice(self, registry):
+        s1 = registry.get_tool_spec("sys_info")
+        s2 = registry.get_tool_spec("sys_info")
+        assert s1 is s2
+        assert s1.name == s2.name
+        assert s1.default_risk == s2.default_risk
+    def test_constraints_are_immutable(self, registry):
+        spec = registry.get_tool_spec("log_reader")
+        assert spec is not None
+
+        constraints = spec.params["lines"].constraints
+        assert constraints is not None
+
+        with pytest.raises(TypeError):
+            constraints["max"] = 9999  # type: ignore[index]
+    def test_constraints_item_deletion_raises_typeerror(self, registry):
+        spec = registry.get_tool_spec("log_reader")
+        assert spec is not None
+
+        constraints = spec.params["lines"].constraints
+        assert constraints is not None
+
+        with pytest.raises(TypeError):
+            del constraints["max"]  # type: ignore[arg-type]
+    

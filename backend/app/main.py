@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat, sessions, monitor, audit, config as config_api
+from app.api import chat, sessions, monitor, audit, config as config_api, actions
 from app.audit.models import init_db
 from config import settings
 
@@ -53,6 +53,7 @@ app.include_router(sessions.router, prefix="/api")
 app.include_router(monitor.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(config_api.router, prefix="/api")
+app.include_router(actions.router, prefix="/api")
 
 
 @app.get("/health")
