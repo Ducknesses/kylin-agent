@@ -27,7 +27,7 @@ from app.schemas.action import (
 # ── 固定合法参数 ──────────────────────────────────────────────────────
 
 _VALID_KWARGS = {
-    "option_id": "fix_001",
+    "option_id": "fix_00000001",
     "title": "重启 nginx 服务",
     "description": "执行 systemctl restart nginx 以恢复 Web 服务",
     "risk_level": "medium",
@@ -50,7 +50,7 @@ def _make(**overrides) -> FixOption:
 class TestValidFixOption:
     def test_valid_option_created(self):
         opt = _make()
-        assert opt.option_id == "fix_001"
+        assert opt.option_id == "fix_00000001"
         assert opt.risk_level == "medium"
         assert opt.requires_confirm is True
 
@@ -111,11 +111,11 @@ class TestNonEmptyStrings:
     def test_tool_whitespace_rejected(self):
         with pytest.raises(ValidationError): _make(tool="  \t  ")
     def test_option_id_with_leading_trailing_spaces_stripped(self):
-        assert _make(option_id="  fix_123  ").option_id == "fix_123"
+        assert _make(option_id="  fix_12345678  ").option_id == "fix_12345678"
     def test_all_fields_strip_consistently(self):
-        opt = FixOption(option_id="  opt_1  ", title="  重启  ", description="  描述  ",
+        opt = FixOption(option_id="  fix_aabbccdd  ", title="  重启  ", description="  描述  ",
                         risk_level="low", tool="  sys_info  ", params={"metric": "cpu"}, requires_confirm=False)
-        assert opt.option_id == "opt_1" and opt.title == "重启" and opt.description == "描述" and opt.tool == "sys_info"
+        assert opt.option_id == "fix_aabbccdd" and opt.title == "重启" and opt.description == "描述" and opt.tool == "sys_info"
 
 
 class TestParamsType:
@@ -174,7 +174,7 @@ class TestActionExecuteRequest:
     def test_option_id_uppercase_hex_rejected(self):
         with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_ABC12345")
     def test_extra_tool_field_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", tool="x")
+        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", tool="fix_9dd4e461")
     def test_extra_params_field_rejected(self):
         with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", params={})
     def test_extra_risk_level_rejected(self):
@@ -182,7 +182,7 @@ class TestActionExecuteRequest:
     def test_extra_confirm_field_rejected(self):
         with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", confirm=True)
     def test_whitespace_stripped(self):
-        req = ActionExecuteRequest(session_id="  s1  ", option_id="  fix_a1b2c3d4  ")
+        req = ActionExecuteRequest(session_id="  s1  ", option_id="fix_a1b2c3d4")
         assert req.session_id == "s1" and req.option_id == "fix_a1b2c3d4"
 
 
@@ -197,7 +197,7 @@ class TestActionExecuteResponse:
         resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="blocked", risk_level="high", message="已阻断", requires_confirm=False)
         assert resp.status == "blocked"
     def test_invalid_status_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="executing", risk_level="low", message="x", requires_confirm=False)
+        with pytest.raises(ValidationError): ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="executing", risk_level="low", message="fix_9dd4e461", requires_confirm=False)
 
 
 class TestResponseCrossValidation:
@@ -205,34 +205,34 @@ class TestResponseCrossValidation:
         with pytest.raises(ValidationError):
             ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
                                   status="confirm_required", risk_level="medium",
-                                  message="x", requires_confirm=True, confirm_id=None)
+                                  message="fix_9dd4e461", requires_confirm=True, confirm_id=None)
 
     def test_confirm_id_malformed_rejected(self):
         with pytest.raises(ValidationError):
             ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
                                   status="confirm_required", risk_level="medium",
-                                  message="x", requires_confirm=True, confirm_id="bad")
+                                  message="fix_9dd4e461", requires_confirm=True, confirm_id="bad")
 
     def test_executed_with_confirm_id_rejected(self):
         with pytest.raises(ValidationError):
             ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
                                   status="executed", risk_level="low",
-                                  message="x", requires_confirm=False, confirm_id="cfm_11111111")
+                                  message="fix_9dd4e461", requires_confirm=False, confirm_id="cfm_11111111")
 
     def test_blocked_with_confirm_id_rejected(self):
         with pytest.raises(ValidationError):
             ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
                                   status="blocked", risk_level="high",
-                                  message="x", requires_confirm=False, confirm_id="cfm_11111111")
+                                  message="fix_9dd4e461", requires_confirm=False, confirm_id="cfm_11111111")
 
     def test_confirm_required_with_confirm_id_ok(self):
         resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
                                      status="confirm_required", risk_level="medium",
-                                     message="x", requires_confirm=True, confirm_id="cfm_a1b2c3d4")
+                                     message="fix_9dd4e461", requires_confirm=True, confirm_id="cfm_a1b2c3d4")
         assert resp.confirm_id == "cfm_a1b2c3d4"
 
     def test_executed_without_confirm_id_ok(self):
         resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1",
                                      status="executed", risk_level="low",
-                                     message="x", requires_confirm=False, confirm_id=None)
+                                     message="fix_9dd4e461", requires_confirm=False, confirm_id=None)
         assert resp.confirm_id is None

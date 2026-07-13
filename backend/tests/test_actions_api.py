@@ -109,12 +109,12 @@ class TestConfirmAPI:
         from datetime import datetime, timedelta, timezone
         from app.dependencies import action_service
         store, _ = _clean_store
-        store.save_options("s1", "t1", [_opt("fix_ex1", "medium")])
+        store.save_options("s1", "t1", [_opt("fix_32f32f89", "medium")])
         action_service._store = store
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         conf_store = action_service._confirmation
         conf_store._clock = lambda: t0
-        conf, _ = conf_store.create_or_get("s1", "fix_ex1", "t1")
+        conf, _ = conf_store.create_or_get("s1", "fix_32f32f89", "t1")
         cid = conf.confirm_id
         conf_store._clock = lambda: t0 + timedelta(seconds=600)
         r = client.post("/api/actions/confirm", json={"session_id": "s1", "confirm_id": cid, "decision": "approve"})
@@ -124,12 +124,12 @@ class TestConfirmAPI:
         from datetime import datetime, timedelta, timezone
         from app.dependencies import action_service
         store, _ = _clean_store
-        store.save_options("s1", "t1", [_opt("fix_ex2", "medium")])
+        store.save_options("s1", "t1", [_opt("fix_89c9e74f", "medium")])
         action_service._store = store
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         conf_store = action_service._confirmation
         conf_store._clock = lambda: t0
-        conf, _ = conf_store.create_or_get("s1", "fix_ex2", "t1")
+        conf, _ = conf_store.create_or_get("s1", "fix_89c9e74f", "t1")
         cid = conf.confirm_id
         conf_store._clock = lambda: t0 + timedelta(seconds=600)
         r = client.post("/api/actions/confirm", json={"session_id": "s1", "confirm_id": cid, "decision": "reject"})

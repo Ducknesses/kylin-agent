@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 RiskLevel = Literal["low", "medium", "high"]
 
+# option_id 格式 —— FixOption 与 ActionExecuteRequest 共用同一严格规则
+_OPTION_ID_RE = re.compile(r"fix_[0-9a-f]{8}")
+
 
 # ── FixOption ─────────────────────────────────────────────────────────
 
@@ -35,6 +38,13 @@ class FixOption(BaseModel):
             raise ValueError("不能为空或仅包含空白字符")
         return stripped
 
+    @field_validator("option_id")
+    @classmethod
+    def _valid_option_id(cls, v: str) -> str:
+        if not _OPTION_ID_RE.fullmatch(v):
+            raise ValueError("option_id 格式无效，需为 fix_{字母数字}")
+        return v
+
 
 # ── Action API 模型 ──────────────────────────────────────────────────
 
@@ -55,7 +65,7 @@ class ActionExecuteRequest(BaseModel):
     @field_validator("option_id")
     @classmethod
     def _valid_option_id(cls, v: str) -> str:
-        if not re.fullmatch(r"fix_[0-9a-f]{8}", v):
+        if not _OPTION_ID_RE.fullmatch(v):
             raise ValueError("option_id 格式无效，需为 fix_{8位十六进制}")
         return v
 

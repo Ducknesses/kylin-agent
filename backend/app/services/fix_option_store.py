@@ -284,11 +284,24 @@ class FixOptionStore:
         target: FixOptionStatus,
         allowed_from: set[FixOptionStatus],
     ) -> bool:
-        """通用状态转移：检查前置条件后更新状态"""
+        """通用状态转移：检查前置条件 + TTL 后更新状态
+
+        pending/confirm_required 在 TTL 过期后阻止转换；
+        executing 即使过期也允许 mark_executed/failed 完成收口。
+        """
         key = (session_id, option_id)
+        now = self._clock()
         with self._lock:
             stored = self._store.get(key)
             if stored is None:
+                return False
+            # TTL 检查：仅 pending/confirm_required 在过期时阻止
+            if (
+                now >= stored.expires_at
+                and stored.status in {"pending", "confirm_required"}
+            ):
+                stored.status = "expired"
+                self._store[key] = stored
                 return False
             if stored.status not in allowed_from:
                 return False

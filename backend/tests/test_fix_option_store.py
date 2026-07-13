@@ -25,7 +25,14 @@ from app.services.fix_option_store import (
 
 # ── 固定合法 FixOption ────────────────────────────────────────────────
 
+import re
+_OPT_RE = re.compile(r"fix_[0-9a-f]{8}")
+_counter = [0]
+
 def _fix_option(option_id: str = "fix_001", **overrides) -> FixOption:
+    if not _OPT_RE.fullmatch(option_id):
+        _counter[0] += 1
+        option_id = f"fix_{_counter[0]:08x}"
     kwargs = {
         "option_id": option_id,
         "title": "重启 nginx 服务",
@@ -56,24 +63,24 @@ class TestSaveAndGet:
 
     def test_save_one_option(self):
         store = FixOptionStore()
-        opt = _fix_option("opt1")
+        opt = _fix_option("fix_2bb225ce")
         ids = store.save_options("s1", "t1", [opt])
-        assert ids == ["opt1"]
-        stored = store.get_option("s1", "opt1")
+        assert ids == ["fix_2bb225ce"]
+        stored = store.get_option("s1", "fix_2bb225ce")
         assert stored is not None
-        assert stored.option.option_id == "opt1"
+        assert stored.option.option_id == "fix_2bb225ce"
         assert isinstance(stored.option, FixOption)
 
     def test_save_multiple_options(self):
         store = FixOptionStore()
-        opts = [_fix_option("a"), _fix_option("b"), _fix_option("c")]
+        opts = [_fix_option("fix_0cc175b9"), _fix_option("fix_92eb5ffe"), _fix_option("fix_4a8a08f0")]
         ids = store.save_options("s1", "t1", opts)
-        assert ids == ["a", "b", "c"]
+        assert ids == ["fix_0cc175b9", "fix_92eb5ffe", "fix_4a8a08f0"]
 
     def test_get_returns_correct_option(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("x", title="X")])
-        stored = store.get_option("s1", "x")
+        store.save_options("s1", "t1", [_fix_option("fix_9dd4e461", title="X")])
+        stored = store.get_option("s1", "fix_9dd4e461")
         assert stored.option.title == "X"
 
     def test_get_unknown_returns_none(self):
@@ -82,13 +89,13 @@ class TestSaveAndGet:
 
     def test_list_options_per_session(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("a"), _fix_option("b")])
-        store.save_options("s2", "t2", [_fix_option("c")])
+        store.save_options("s1", "t1", [_fix_option("fix_0cc175b9"), _fix_option("fix_92eb5ffe")])
+        store.save_options("s2", "t2", [_fix_option("fix_4a8a08f0")])
         s1_list = store.list_options("s1")
         s2_list = store.list_options("s2")
         assert len(s1_list) == 2
         assert len(s2_list) == 1
-        assert {s.option.option_id for s in s1_list} == {"a", "b"}
+        assert {s.option.option_id for s in s1_list} == {"fix_0cc175b9", "fix_92eb5ffe"}
 
     def test_list_unknown_session_returns_empty(self):
         store = FixOptionStore()
@@ -109,26 +116,26 @@ class TestIsolation:
 
     def test_different_session_same_option_id_independent(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("dup")])
-        store.save_options("s2", "t2", [_fix_option("dup")])
-        assert store.get_option("s1", "dup") is not None
-        assert store.get_option("s2", "dup") is not None
+        store.save_options("s1", "t1", [_fix_option("fix_0e9f1e8e")])
+        store.save_options("s2", "t2", [_fix_option("fix_0e9f1e8e")])
+        assert store.get_option("s1", "fix_0e9f1e8e") is not None
+        assert store.get_option("s2", "fix_0e9f1e8e") is not None
 
     def test_same_session_duplicate_option_id_rejected(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("dup")])
+        store.save_options("s1", "t1", [_fix_option("fix_0e9f1e8e")])
         with pytest.raises(ValueError, match="option_id 重复"):
-            store.save_options("s1", "t2", [_fix_option("dup")])
+            store.save_options("s1", "t2", [_fix_option("fix_0e9f1e8e")])
 
     def test_duplicate_after_expired_allowed(self):
         """已过期（终态）的 option 可以被同名覆盖"""
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         store = FixOptionStore(ttl_seconds=60, clock=_fixed_clock(t0))
-        store.save_options("s1", "t1", [_fix_option("dup")])
+        store.save_options("s1", "t1", [_fix_option("fix_0e9f1e8e")])
         # 快进到过期
         store._clock = _fixed_clock(t0 + timedelta(seconds=120))
-        store.save_options("s1", "t2", [_fix_option("dup")])
-        assert store.get_option("s1", "dup") is not None
+        store.save_options("s1", "t2", [_fix_option("fix_0e9f1e8e")])
+        assert store.get_option("s1", "fix_0e9f1e8e") is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -176,19 +183,19 @@ class TestDeepCopy:
 
     def test_save_then_modify_original_no_effect(self):
         store = FixOptionStore()
-        opt = _fix_option("opt1", title="原始标题")
+        opt = _fix_option("fix_2bb225ce", title="原始标题")
         store.save_options("s1", "t1", [opt])
         # 修改原对象
         opt.title = "被篡改的标题"  # type: ignore[attr-defined]
-        stored = store.get_option("s1", "opt1")
+        stored = store.get_option("s1", "fix_2bb225ce")
         assert stored.option.title == "原始标题"
 
     def test_get_returned_modify_no_effect(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        stored1 = store.get_option("s1", "opt1")
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        stored1 = store.get_option("s1", "fix_2bb225ce")
         stored1.option.title = "外部修改"  # type: ignore[attr-defined]
-        stored2 = store.get_option("s1", "opt1")
+        stored2 = store.get_option("s1", "fix_2bb225ce")
         assert stored2.option.title != stored1.option.title
 
 
@@ -201,46 +208,46 @@ class TestTTL:
 
     def test_not_expired_can_get(self):
         store = FixOptionStore(ttl_seconds=60)
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        stored = store.get_option("s1", "opt1")
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        stored = store.get_option("s1", "fix_2bb225ce")
         assert stored is not None
         assert stored.status == "pending"
 
     def test_expired_get_marks_expired(self):
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         store = FixOptionStore(ttl_seconds=60, clock=_fixed_clock(t0))
-        store.save_options("s1", "t1", [_fix_option("opt1")])
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         # 快进 61 秒
         store._clock = _fixed_clock(t0 + timedelta(seconds=61))
-        stored = store.get_option("s1", "opt1")
+        stored = store.get_option("s1", "fix_2bb225ce")
         assert stored.status == "expired"
 
     def test_expired_cannot_claim(self):
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         store = FixOptionStore(ttl_seconds=60, clock=_fixed_clock(t0))
-        store.save_options("s1", "t1", [_fix_option("opt1")])
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         store._clock = _fixed_clock(t0 + timedelta(seconds=61))
-        claimed = store.claim_for_execution("s1", "opt1")
+        claimed = store.claim_for_execution("s1", "fix_2bb225ce")
         assert claimed is None
 
     def test_cleanup_removes_expired(self):
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         store = FixOptionStore(ttl_seconds=60, clock=_fixed_clock(t0))
-        store.save_options("s1", "t1", [_fix_option("a"), _fix_option("b")])
+        store.save_options("s1", "t1", [_fix_option("fix_0cc175b9"), _fix_option("fix_92eb5ffe")])
         # 未过期
         assert store.cleanup_expired() == 0
         # 过期
         store._clock = _fixed_clock(t0 + timedelta(seconds=120))
         assert store.cleanup_expired() == 2
-        assert store.get_option("s1", "a") is None
+        assert store.get_option("s1", "fix_0cc175b9") is None
 
     def test_cleanup_not_remove_unexpired(self):
         t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         store = FixOptionStore(ttl_seconds=60, clock=_fixed_clock(t0))
-        store.save_options("s1", "t1", [_fix_option("a")])
+        store.save_options("s1", "t1", [_fix_option("fix_0cc175b9")])
         store._clock = _fixed_clock(t0 + timedelta(seconds=30))
         assert store.cleanup_expired() == 0
-        assert store.get_option("s1", "a") is not None
+        assert store.get_option("s1", "fix_0cc175b9") is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -254,104 +261,104 @@ class TestStateMachine:
 
     def test_pending_can_claim(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        claimed = store.claim_for_execution("s1", "opt1")
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        claimed = store.claim_for_execution("s1", "fix_2bb225ce")
         assert claimed is not None
         assert claimed.status == "executing"
         # 确认状态已持久化
-        assert store.get_option("s1", "opt1").status == "executing"
+        assert store.get_option("s1", "fix_2bb225ce").status == "executing"
 
     def test_executing_cannot_claim_again(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.claim_for_execution("s1", "opt1")
-        claimed2 = store.claim_for_execution("s1", "opt1")
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        claimed2 = store.claim_for_execution("s1", "fix_2bb225ce")
         assert claimed2 is None
 
     def test_executed_cannot_claim(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.claim_for_execution("s1", "opt1")
-        store.mark_executed("s1", "opt1")
-        assert store.claim_for_execution("s1", "opt1") is None
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        store.mark_executed("s1", "fix_2bb225ce")
+        assert store.claim_for_execution("s1", "fix_2bb225ce") is None
 
     def test_blocked_cannot_claim(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.mark_blocked("s1", "opt1")
-        assert store.claim_for_execution("s1", "opt1") is None
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.mark_blocked("s1", "fix_2bb225ce")
+        assert store.claim_for_execution("s1", "fix_2bb225ce") is None
 
     def test_failed_cannot_claim(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.claim_for_execution("s1", "opt1")
-        store.mark_failed("s1", "opt1")
-        assert store.claim_for_execution("s1", "opt1") is None
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        store.mark_failed("s1", "fix_2bb225ce")
+        assert store.claim_for_execution("s1", "fix_2bb225ce") is None
 
     def test_confirm_required_can_claim(self):
         """confirm_required 可通过 claim 进入 executing（medium approve 需要）"""
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.mark_confirm_required("s1", "opt1")
-        assert store.claim_for_execution("s1", "opt1") is not None
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.mark_confirm_required("s1", "fix_2bb225ce")
+        assert store.claim_for_execution("s1", "fix_2bb225ce") is not None
 
     # ── mark_executed ──
 
     def test_mark_executed_from_executing(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.claim_for_execution("s1", "opt1")
-        assert store.mark_executed("s1", "opt1") is True
-        assert store.get_option("s1", "opt1").status == "executed"
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        assert store.mark_executed("s1", "fix_2bb225ce") is True
+        assert store.get_option("s1", "fix_2bb225ce").status == "executed"
 
     def test_mark_executed_from_pending_fails(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        assert store.mark_executed("s1", "opt1") is False
-        assert store.get_option("s1", "opt1").status == "pending"
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        assert store.mark_executed("s1", "fix_2bb225ce") is False
+        assert store.get_option("s1", "fix_2bb225ce").status == "pending"
 
     # ── mark_failed ──
 
     def test_mark_failed_from_executing(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.claim_for_execution("s1", "opt1")
-        assert store.mark_failed("s1", "opt1") is True
-        assert store.get_option("s1", "opt1").status == "failed"
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        assert store.mark_failed("s1", "fix_2bb225ce") is True
+        assert store.get_option("s1", "fix_2bb225ce").status == "failed"
 
     def test_mark_failed_from_pending_fails(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        assert store.mark_failed("s1", "opt1") is False
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        assert store.mark_failed("s1", "fix_2bb225ce") is False
 
     # ── mark_blocked ──
 
     def test_mark_blocked_from_pending(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        assert store.mark_blocked("s1", "opt1") is True
-        assert store.get_option("s1", "opt1").status == "blocked"
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        assert store.mark_blocked("s1", "fix_2bb225ce") is True
+        assert store.get_option("s1", "fix_2bb225ce").status == "blocked"
 
     def test_mark_blocked_from_confirm_required(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.mark_confirm_required("s1", "opt1")
-        assert store.mark_blocked("s1", "opt1") is True
-        assert store.get_option("s1", "opt1").status == "blocked"
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.mark_confirm_required("s1", "fix_2bb225ce")
+        assert store.mark_blocked("s1", "fix_2bb225ce") is True
+        assert store.get_option("s1", "fix_2bb225ce").status == "blocked"
 
     def test_mark_blocked_from_executing_fails(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        store.claim_for_execution("s1", "opt1")
-        assert store.mark_blocked("s1", "opt1") is False
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        assert store.mark_blocked("s1", "fix_2bb225ce") is False
 
     # ── mark_confirm_required ──
 
     def test_mark_confirm_required_from_pending(self):
         store = FixOptionStore()
-        store.save_options("s1", "t1", [_fix_option("opt1")])
-        assert store.mark_confirm_required("s1", "opt1") is True
-        assert store.get_option("s1", "opt1").status == "confirm_required"
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        assert store.mark_confirm_required("s1", "fix_2bb225ce") is True
+        assert store.get_option("s1", "fix_2bb225ce").status == "confirm_required"
 
     # ── 未知 option ──
 

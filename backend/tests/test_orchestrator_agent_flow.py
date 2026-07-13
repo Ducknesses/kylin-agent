@@ -475,7 +475,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fix_test01",
+            option_id="fix_072f5706",
             title="重启 nginx",
             description="测试",
             risk_level="medium",
@@ -501,7 +501,7 @@ class TestFixOptionFlow:
         fix_frames = [m for m in items if m["type"] == "fix_options"]
         assert len(fix_frames) == 1
         assert len(fix_frames[0]["options"]) == 1
-        assert fix_frames[0]["options"][0]["option_id"] == "fix_test01"
+        assert fix_frames[0]["options"][0]["option_id"] == "fix_072f5706"
 
     def test_fix_options_after_all_chunks_before_done(self):
         """fix_options 在所有 chunk 之后，done 之前"""
@@ -509,7 +509,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fix_f2", title="t", description="d",
+            option_id="fix_4cb68057", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "memory"}, requires_confirm=False,
         )
@@ -538,7 +538,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fix_f3", title="t", description="d",
+            option_id="fix_cd45bf59", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -578,7 +578,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fix_blocked", title="t", description="d",
+            option_id="fix_bfd72ad2", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -601,7 +601,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fx_save", title="t", description="d",
+            option_id="fix_2ea7b76e", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -623,7 +623,7 @@ class TestFixOptionFlow:
         sid, tid, opts = store.saved[0]
         assert sid == "s-f6"
         assert tid == "trace-xyz"
-        assert opts[0].option_id == "fx_save"
+        assert opts[0].option_id == "fix_2ea7b76e"
 
     def test_fix_options_not_return_store_internals(self):
         """fix_options 帧不暴露 Store 内部字段"""
@@ -631,7 +631,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fx_int", title="t", description="d",
+            option_id="fix_c8c0f093", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -656,7 +656,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fx_args", title="t", description="d",
+            option_id="fix_429ad523", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -683,7 +683,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fx_fail", title="t", description="d",
+            option_id="fix_0948af32", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -721,7 +721,7 @@ class TestFixOptionFlow:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fx_reg", title="t", description="d",
+            option_id="fix_33546053", title="t", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -755,7 +755,7 @@ class TestRealStoreIntegration:
         from app.schemas.action import FixOption
 
         opt = FixOption(
-            option_id="fx_real1", title="真实Store", description="d",
+            option_id="fix_b3aa6665", title="真实Store", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
@@ -776,7 +776,7 @@ class TestRealStoreIntegration:
 
         stored = store.get_option("s-real1", frame_opt_id)
         assert stored is not None
-        assert stored.option.option_id == "fx_real1"
+        assert stored.option.option_id == "fix_b3aa6665"
         assert stored.session_id == "s-real1"
         assert stored.trace_id == "trace-real1"
 
@@ -787,12 +787,12 @@ class TestRealStoreIntegration:
 
         store = FixOptionStore()
         opt1 = FixOption(
-            option_id="s1_opt", title="s1", description="d",
+            option_id="fix_8bb6a0f1", title="s1", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "cpu"}, requires_confirm=False,
         )
         opt2 = FixOption(
-            option_id="s2_opt", title="s2", description="d",
+            option_id="fix_24bab887", title="s2", description="d",
             risk_level="low", tool="sys_info",
             params={"metric": "memory"}, requires_confirm=False,
         )
@@ -808,10 +808,10 @@ class TestRealStoreIntegration:
         orch.fix_planner = FakeFixPlanner(options=[opt2])
         asyncio.run(_collect(orch.handle_chat("s-B", "查看 CPU")))
 
-        assert store.get_option("s-A", "s1_opt") is not None
-        assert store.get_option("s-B", "s2_opt") is not None
-        assert store.get_option("s-A", "s2_opt") is None
-        assert store.get_option("s-B", "s1_opt") is None
+        assert store.get_option("s-A", "fix_8bb6a0f1") is not None
+        assert store.get_option("s-B", "fix_24bab887") is not None
+        assert store.get_option("s-A", "fix_24bab887") is None
+        assert store.get_option("s-B", "fix_8bb6a0f1") is None
 
 
 # ═══════════════════════════════════════════════════════════════════
