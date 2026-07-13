@@ -24,7 +24,7 @@ class Config:
         return False
 
     # Bearer Token 认证
-    API_TOKEN: str = os.getenv("API_TOKEN", "change-me-in-production")
+    API_TOKEN: str = os.getenv("API_TOKEN", "123456789")
 
     # 沙箱配置
     COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "30"))

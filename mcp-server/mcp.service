@@ -19,16 +19,15 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/mcp-server
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8001
-Environment=API_TOKEN=change-me-in-production
+Environment=API_TOKEN=123456789
 
-# 安全加固（兼容 systemd v249+）
+# 安全加固
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes
 ReadWritePaths=/opt/mcp-server
 ReadOnlyPaths=/proc /sys /dev
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
