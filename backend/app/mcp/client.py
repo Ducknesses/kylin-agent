@@ -67,12 +67,21 @@ _MOCK_UPTIME = {
     "timestamp": _TS,
 }
 
+_MOCK_NETWORK = {
+    "network": {
+        "bytes_recv": 9876543210,
+        "bytes_sent": 1234567890,
+    },
+    "timestamp": _TS,
+}
+
 _MOCK_ALL = {
     "cpu": _MOCK_CPU["cpu"],
     "memory": _MOCK_MEMORY["memory"],
     "disk": _MOCK_DISK["disk"],
     "load": _MOCK_LOAD["load"],
     "uptime": _MOCK_UPTIME["uptime"],
+    "network": _MOCK_NETWORK["network"],
     "timestamp": _TS,
 }
 
@@ -203,6 +212,8 @@ class MCPClient:
             "cmd_exec": self._mock_cmd_exec,
             "file_guard": self._mock_file_guard,
         }
+        # sys_info handler 使用函数引用以便 patch（避免 lambda 绑定问题）
+        # 直接使用实例方法即可
 
         handler = handlers.get(tool_name)
         if handler is None:
@@ -224,6 +235,8 @@ class MCPClient:
             return _ok(_MOCK_LOAD)
         if metric == "uptime":
             return _ok(_MOCK_UPTIME)
+        if metric == "network":
+            return _ok(_MOCK_NETWORK)
         if metric == "all":
             return _ok(_MOCK_ALL)
 
