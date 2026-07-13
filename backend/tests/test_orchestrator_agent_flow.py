@@ -286,6 +286,38 @@ class TestFrameFormat:
             assert "llm_reasoning" not in m
             assert "chain_of_thought" not in m
 
+    def test_tool_call_has_result_and_tool_call_id(self):
+        """tool_call 帧必须携带 result 与 tool_call_id，供前端渲染"""
+        from app.services.orchestrator import Orchestrator
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(),
+        )
+        items = asyncio.run(_collect(orch.handle_chat("s-tool-result", "查看 CPU 使用率")))
+        tool_calls = [m for m in items if m["type"] == "tool_call"]
+        assert len(tool_calls) >= 1
+        for tc in tool_calls:
+            assert tc.get("tool_call_id"), "tool_call_id 不应为空"
+            assert tc.get("result") is not None, "成功工具调用应携带 result"
+            assert tc.get("ok") is True
+
+    def test_tool_call_failure_has_error(self):
+        """工具调用失败时 tool_call 帧应携带 error"""
+        from app.services.orchestrator import Orchestrator
+
+        orch = Orchestrator(
+            safety_guard=FakeSafetyGuard(),
+            tool_registry=FakeToolRegistry(),
+            mcp_client=FakeMCPClient(),
+            agent_harness=FakeAgentHarness(fail_tools=["sys_info"]),
+        )
+        items = asyncio.run(_collect(orch.handle_chat("s-tool-err", "查看 CPU 使用率")))
+        tool_calls = [m for m in items if m["type"] == "tool_call"]
+        assert any(tc.get("ok") is False and tc.get("error") for tc in tool_calls)
+
 
 class TestBoundaryChecks:
     """边界检查"""

@@ -191,11 +191,20 @@ class Orchestrator:
                 result = await self.agent_harness.run_tool(ctx, tool_name, params)
                 # 对前端帧脱敏 params，不影响真实执行
                 safe_params = self._safe_params_for_display(params)
-                yield {
+                tool_call_record = ctx.tool_calls[-1] if ctx.tool_calls else {}
+                tool_call_id = tool_call_record.get("tool_call_id") or f"tc_{str(uuid.uuid4())[:8]}"
+                frame: dict[str, Any] = {
                     "type": "tool_call", "trace_id": trace_id,
                     "tool": tool_name, "params": safe_params,
+                    "tool_call_id": tool_call_id,
                     "ok": result.get("ok", False),
                 }
+                if result.get("ok"):
+                    frame["result"] = result.get("result")
+                else:
+                    # 失败时优先使用 error，缺失则使用 reason（如 requires_confirm 场景）
+                    frame["error"] = result.get("error") or result.get("reason") or "工具调用失败"
+                yield frame
 
             # ── 6. ReporterAgent ──
             report = await self._generate_report(intent_result, ctx.observations, user_input)
