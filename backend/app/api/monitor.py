@@ -92,6 +92,7 @@ def _collect_flat_metrics() -> dict:
 async def _mcp_metrics_generator():
     """SSE 流式生成系统指标（通过 MCP 远程采集）"""
     client = MCPClient()
+    _prev_net_mcp = {"bytes_sent": 0, "bytes_recv": 0, "ts": 0.0}
     while True:
         try:
             try:
@@ -118,11 +119,30 @@ async def _mcp_metrics_generator():
             except (ValueError, TypeError):
                 disk_pct = 0.0
 
+            # 网络 IO：从 MCP 返回的原始计数器计算速率
+            net_data = raw.get("network", {})
+            net_in_kbps = 0.0
+            net_out_kbps = 0.0
+            if net_data:
+                now_ts = datetime.now().timestamp()
+                bytes_recv = net_data.get("bytes_recv", 0)
+                bytes_sent = net_data.get("bytes_sent", 0)
+                if _prev_net_mcp["ts"] > 0:
+                    elapsed = now_ts - _prev_net_mcp["ts"]
+                    if elapsed > 0:
+                        rx_delta = max(0, bytes_recv - _prev_net_mcp["bytes_recv"])
+                        tx_delta = max(0, bytes_sent - _prev_net_mcp["bytes_sent"])
+                        net_in_kbps = round(rx_delta / elapsed / 1024, 1)
+                        net_out_kbps = round(tx_delta / elapsed / 1024, 1)
+                _prev_net_mcp = {"bytes_sent": bytes_sent, "bytes_recv": bytes_recv, "ts": now_ts}
+
             data = {
                 "cpu_percent": cpu_data.get("cpu_percent_snapshot", 0.0),
                 "load_avg": load_data.get("load_avg", [0.0, 0.0, 0.0]),
                 "memory_percent": mem_data.get("percent", 0.0),
                 "disk_percent": disk_pct,
+                "net_in_kbps": net_in_kbps,
+                "net_out_kbps": net_out_kbps,
                 "timestamp": datetime.now().isoformat(),
             }
             yield f"data: {json.dumps(data)}\n\n"
@@ -140,27 +160,11 @@ async def get_metrics() -> dict:
 
 @router.get("/monitor/stream")
 async def monitor_stream():
-    """SSE 实时流 —— 扁平结构，每 3 秒推送一次（本地 psutil）"""
+    """SSE 实时流 —— 扁平结构，每 3 秒推送一次（通过 MCP 远程采集）"""
 
     async def _generator():
-        while True:
-            try:
-                data = _collect_flat_metrics()
-                yield f"data: {json.dumps(data)}\n\n"
-            except Exception as e:
-                logger.error(f"[Monitor] SSE 采集失败: {e}")
-                fallback = {
-                    "cpu_percent": 0.0,
-                    "load_avg": [0.0, 0.0, 0.0],
-                    "memory_percent": 0.0,
-                    "disk_percent": 0.0,
-                    "net_in_kbps": 0.0,
-                    "net_out_kbps": 0.0,
-                    "timestamp": datetime.now().isoformat(),
-                    "error": "采集失败",
-                }
-                yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(3)
+        async for event in _mcp_metrics_generator():
+            yield event
 
     return StreamingResponse(
         _generator(),

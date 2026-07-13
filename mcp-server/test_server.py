@@ -20,7 +20,7 @@ def http_post(path: str, data: dict) -> tuple:
     body = json.dumps(data).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
-        "Authorization": "Bearer change-me-in-production",
+        "Authorization": "Bearer 123456789",
     }
     req = Request(url, data=body, headers=headers)
     try:
