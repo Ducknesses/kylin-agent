@@ -608,18 +608,14 @@ class MCPClient:
     def _is_blocked_result(result: Any) -> bool:
         """判断 MCP result 是否为安全拦截
 
-        检测条件（任一满足即视为拦截）：
-          1. result.blocked == True（sandbox.py 标准格式）
-          2. result 包含 error 字段但无成功标志（插件拒绝兼容）
+        仅检测 result.blocked == True（sandbox.py 及各 MCP 插件安全拦截的标准格式）。
+
+        注意：仅包含 error 字段但无 blocked 标志的响应（如 systemctl 超时、
+        PermissionError 等运行时失败）不会被误判为安全拦截。
         """
         if not isinstance(result, dict):
             return False
-        if result.get("blocked") is True:
-            return True
-        # 插件返回 {error: "..."} 但未带 blocked 标志的兼容处理
-        if "error" in result and "blocked" not in result:
-            return True
-        return False
+        return result.get("blocked") is True
 
     # ── 主调用入口 ───────────────────────────────────────────────
 

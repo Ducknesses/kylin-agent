@@ -1156,6 +1156,85 @@ class TestRealHelpers:
         assert MCP._is_blocked_result("not dict") is False
         assert MCP._is_blocked_result(None) is False
 
+    def test_is_blocked_result_error_without_blocked_is_not_considered_blocked(self):
+        """仅有 error 字段但无 blocked 标志 → 不是安全拦截（修复语义过宽）"""
+        from app.mcp.client import MCPClient as MCP
+        # systemctl 超时场景
+        assert MCP._is_blocked_result({
+            "error": "systemctl status 执行超时",
+            "exit_code": -1,
+            "is_active": False,
+        }) is False
+        # PermissionError 场景
+        assert MCP._is_blocked_result({
+            "error": "权限不足，无法访问",
+        }) is False
+        # 文件写入异常
+        assert MCP._is_blocked_result({
+            "error": "磁盘空间不足",
+            "path": "/tmp/test.txt",
+        }) is False
+        # 只有 error 字段的通用失败
+        assert MCP._is_blocked_result({"error": "something broke"}) is False
+
+    def test_real_call_tool_runtime_error_not_treated_as_blocked(self):
+        """MCP Server 返回 error 字段（运行时失败）不应被当作安全拦截，应正常传递 result"""
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
+
+        # 模拟 service_mgr 超时：返回 error 但无 blocked
+        runtime_error_response = {
+            "jsonrpc": "2.0",
+            "result": {
+                "action": "status",
+                "service": "nginx.service",
+                "error": "systemctl status 执行超时",
+                "exit_code": -1,
+                "is_active": False,
+            },
+            "id": 15,
+        }
+
+        async def _run():
+            fake_resp = FakeResponse(runtime_error_response)
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = fake_resp
+                return await client.call_tool("service_mgr", {"action": "status", "service": "nginx"})
+
+        result = asyncio.run(_run())
+
+        assert result["ok"] is True, "运行时失败不应被当作 blocked，应通过 ok=true 透传 result"
+        assert result["error"] is None
+        assert result["result"]["error"] == "systemctl status 执行超时"
+        assert result["result"]["exit_code"] == -1
+        assert result["result"]["is_active"] is False
+
+    def test_real_call_tool_error_with_blocked_still_detected(self):
+        """MCP Server 同时返回 error 和 blocked=True → 仍然是安全拦截"""
+        client = MCPClient(base_url="http://mock-mcp:8001", mode="real", auth_token="test-token")
+
+        blocked_with_error = {
+            "jsonrpc": "2.0",
+            "result": {
+                "blocked": True,
+                "error": "命令被安全策略拦截",
+                "command": "rm -rf /",
+                "reason": "命令不在白名单中",
+            },
+            "id": 16,
+        }
+
+        async def _run():
+            fake_resp = FakeResponse(blocked_with_error)
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = fake_resp
+                return await client.call_tool("cmd_exec", {"command": "rm -rf /"})
+
+        result = asyncio.run(_run())
+
+        assert result["ok"] is False
+        assert result["error"] == "命令被安全策略拦截"
+        assert result["result"]["blocked"] is True
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 接口一致性防回归测试
