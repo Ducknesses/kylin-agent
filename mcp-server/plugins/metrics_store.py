@@ -167,7 +167,8 @@ def insert_metrics(data: dict) -> bool:
                         disk_pct, disk_used_gb, disk_total_gb,
                         network.get("bytes_recv", 0),
                         network.get("bytes_sent", 0),
-                        0.0, 0.0,  # net kbps 由采集线程在外层计算（via sys_info 不直接提供速率）
+                        network.get("net_recv_kbps", 0.0),
+                        network.get("net_sent_kbps", 0.0),
                     ),
                 )
                 conn.commit()
@@ -318,15 +319,40 @@ def vacuum_db():
 
 def _collect_loop():
     """后台采集线程主循环"""
-    logger.info("[MetricsStore] 后台采集线程启动，间隔 %d 秒",
-                getattr(_get_config(), "METRICS_COLLECT_INTERVAL", 15))
+    cfg = _get_config()
+    interval = getattr(cfg, "METRICS_COLLECT_INTERVAL", 15)
+    logger.info("[MetricsStore] 后台采集线程启动，间隔 %d 秒", interval)
 
     from plugins import sys_info
+
+    # 网络速率计算：维护上一轮的 bytes 计数器和时间戳
+    prev_net = {"bytes_recv": 0, "bytes_sent": 0, "ts": 0.0}
 
     while not _stop_event.is_set():
         try:
             result = sys_info.handle({"metric": "all"})
             if "error" not in result:
+                now_ts = time.time()
+
+                # 从 sys_info 结果中提取网络原始计数器，计算 kbps 速率
+                net_data = result.get("network", {})
+                bytes_recv = net_data.get("bytes_recv", 0)
+                bytes_sent = net_data.get("bytes_sent", 0)
+                net_recv_kbps = 0.0
+                net_sent_kbps = 0.0
+                if prev_net["ts"] > 0:
+                    elapsed = now_ts - prev_net["ts"]
+                    if elapsed > 0:
+                        rx_delta = max(0, bytes_recv - prev_net["bytes_recv"])
+                        tx_delta = max(0, bytes_sent - prev_net["bytes_sent"])
+                        net_recv_kbps = round(rx_delta / elapsed / 1024, 1)
+                        net_sent_kbps = round(tx_delta / elapsed / 1024, 1)
+                prev_net = {"bytes_recv": bytes_recv, "bytes_sent": bytes_sent, "ts": now_ts}
+
+                # 将计算出的速率回填到 result 中，供 insert_metrics 使用
+                result["network"]["net_recv_kbps"] = net_recv_kbps
+                result["network"]["net_sent_kbps"] = net_sent_kbps
+
                 insert_metrics(result)
                 # 每写入一次执行一次过期清理（轻量 DELETE）
                 cleanup_expired()
@@ -336,7 +362,7 @@ def _collect_loop():
             logger.exception("[MetricsStore] 采集异常: %s", e)
 
         # 等待下一次采集，支持被 stop_event 提前中断
-        _stop_event.wait(getattr(_get_config(), "METRICS_COLLECT_INTERVAL", 15))
+        _stop_event.wait(interval)
 
     logger.info("[MetricsStore] 后台采集线程已停止")
 
