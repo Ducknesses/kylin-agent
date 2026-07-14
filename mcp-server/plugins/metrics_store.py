@@ -42,8 +42,17 @@ def _get_config():
 # ============================================================
 
 def _get_connection() -> sqlite3.Connection:
-    """获取线程安全的数据库连接"""
+    """获取线程安全的数据库连接（_db_path 需已由 init_db() 设置）"""
+    conn = sqlite3.connect(_db_path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def init_db():
+    """初始化数据库表结构和索引（幂等），同时解析并设置 _db_path"""
     global _db_path
+
     cfg = _get_config()
     _db_path = getattr(cfg, "METRICS_DB_PATH", "/var/lib/mcp-server/metrics.db")
 
@@ -57,14 +66,6 @@ def _get_connection() -> sqlite3.Connection:
             _db_path = os.path.abspath(fallback)
             logger.warning("无法创建 %s，回退到 %s", db_dir, _db_path)
 
-    conn = sqlite3.connect(_db_path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
-
-
-def init_db():
-    """初始化数据库表结构和索引（幂等）"""
     with _db_lock:
         conn = _get_connection()
         try:
@@ -101,9 +102,122 @@ def init_db():
 # 数据写入
 # ============================================================
 
+def _parse_metrics_data(data: dict) -> tuple:
+    """解析采集数据为 INSERT 参数元组。
+    
+    返回:
+        (ts, cpu_pct, load_1, load_5, load_15,
+         mem_pct, mem_used, mem_total,
+         disk_pct, disk_used_gb, disk_total_gb,
+         net_bytes_recv, net_bytes_sent, net_recv_kbps, net_sent_kbps)
+    """
+    cpu = data.get("cpu", {})
+    memory = data.get("memory", {})
+    disk = data.get("disk", [])
+    load = data.get("load", {})
+    network = data.get("network", {})
+
+    if isinstance(disk, list) and len(disk) > 0:
+        disk_data = {}
+        for d in disk:
+            if isinstance(d, dict) and d.get("mount_point") == "/":
+                disk_data = d
+                break
+        if not disk_data and isinstance(disk[0], dict):
+            disk_data = disk[0]
+    elif isinstance(disk, dict):
+        disk_data = disk
+    else:
+        disk_data = {}
+
+    load_avg = load.get("load_avg", [0, 0, 0])
+    if isinstance(load_avg, list) and len(load_avg) >= 3:
+        l1, l5, l15 = load_avg[0], load_avg[1], load_avg[2]
+    else:
+        l1, l5, l15 = 0.0, 0.0, 0.0
+
+    disk_pct_str = str(disk_data.get("percent", "0")).replace("%", "").strip()
+    try:
+        disk_pct = float(disk_pct_str)
+    except (ValueError, TypeError):
+        disk_pct = 0.0
+
+    disk_size_str = str(disk_data.get("size", "0")).replace("G", "").replace("T", "").replace("M", "").strip()
+    disk_used_str = str(disk_data.get("used", "0")).replace("G", "").replace("T", "").replace("M", "").strip()
+    try:
+        disk_total_gb = float(disk_size_str)
+        disk_used_gb = float(disk_used_str)
+    except (ValueError, TypeError):
+        disk_total_gb, disk_used_gb = 0.0, 0.0
+
+    ts = time.time()
+
+    return (
+        ts,
+        cpu.get("cpu_percent_snapshot", 0.0),
+        l1, l5, l15,
+        memory.get("percent", 0.0),
+        memory.get("used_mb", 0.0),
+        memory.get("total_mb", 0.0),
+        disk_pct, disk_used_gb, disk_total_gb,
+        network.get("bytes_recv", 0),
+        network.get("bytes_sent", 0),
+        network.get("net_recv_kbps", 0.0),
+        network.get("net_sent_kbps", 0.0),
+    )
+
+
+def _insert_metrics_with_conn(conn: sqlite3.Connection, data: dict) -> bool:
+    """使用已有连接写入指标（由 _collect_loop 持有持久连接调用）"""
+    try:
+        values = _parse_metrics_data(data)
+
+        conn.execute(
+            """INSERT INTO metrics
+               (timestamp, cpu_percent, load_1, load_5, load_15,
+                memory_percent, memory_used_mb, memory_total_mb,
+                disk_percent, disk_used_gb, disk_total_gb,
+                net_recv_bytes, net_sent_bytes, net_recv_kbps, net_sent_kbps)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+        conn.commit()
+
+        # 检查行数上限
+        cfg = _get_config()
+        max_rows = getattr(cfg, "METRICS_MAX_ROWS", 100000)
+        row_count = conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0]
+        if row_count > max_rows:
+            excess = row_count - max_rows
+            conn.execute(
+                "DELETE FROM metrics WHERE id IN (SELECT id FROM metrics ORDER BY timestamp ASC LIMIT ?)",
+                (excess,),
+            )
+            conn.commit()
+            logger.info("[MetricsStore] 行数上限清理: 删除 %d 条旧记录", excess)
+
+        return True
+    except Exception as e:
+        logger.exception("[MetricsStore] 写入指标失败: %s", e)
+        return False
+
+
+def _cleanup_expired_with_conn(conn: sqlite3.Connection):
+    """使用已有连接清理过期数据"""
+    cfg = _get_config()
+    max_hours = getattr(cfg, "METRICS_MAX_RETENTION_HOURS", 24)
+    cutoff = time.time() - max_hours * 3600
+
+    cursor = conn.execute("DELETE FROM metrics WHERE timestamp < ?", (cutoff,))
+    deleted = cursor.rowcount
+    if deleted > 0:
+        conn.commit()
+        logger.info("[MetricsStore] 过期清理: 删除 %d 条记录 (超过 %d 小时)", deleted, max_hours)
+
+
 def insert_metrics(data: dict) -> bool:
     """
-    将一次采集的指标数据写入 SQLite。
+    将一次采集的指标数据写入 SQLite（独立调用，每次新建连接）。
 
     参数:
         data: sys_info.handle({"metric":"all"}) 的返回结果
@@ -112,88 +226,10 @@ def insert_metrics(data: dict) -> bool:
         True 成功, False 失败
     """
     try:
-        cpu = data.get("cpu", {})
-        memory = data.get("memory", {})
-        disk = data.get("disk", [])
-        load = data.get("load", {})
-        network = data.get("network", {})
-
-        if isinstance(disk, list) and len(disk) > 0:
-            # 优先匹配挂载点为 / 的根分区；否则回退到第一个条目
-            disk_data = {}
-            for d in disk:
-                if isinstance(d, dict) and d.get("mount_point") == "/":
-                    disk_data = d
-                    break
-            if not disk_data and isinstance(disk[0], dict):
-                disk_data = disk[0]
-        elif isinstance(disk, dict):
-            disk_data = disk
-        else:
-            disk_data = {}
-
-        load_avg = load.get("load_avg", [0, 0, 0])
-        if isinstance(load_avg, list) and len(load_avg) >= 3:
-            load_1, load_5, load_15 = load_avg[0], load_avg[1], load_avg[2]
-        else:
-            load_1, load_5, load_15 = 0.0, 0.0, 0.0
-
-        disk_pct_str = str(disk_data.get("percent", "0")).replace("%", "").strip()
-        try:
-            disk_pct = float(disk_pct_str)
-        except (ValueError, TypeError):
-            disk_pct = 0.0
-
-        disk_size_str = str(disk_data.get("size", "0")).replace("G", "").replace("T", "").replace("M", "").strip()
-        disk_used_str = str(disk_data.get("used", "0")).replace("G", "").replace("T", "").replace("M", "").strip()
-        try:
-            disk_total_gb = float(disk_size_str)
-            disk_used_gb = float(disk_used_str)
-        except (ValueError, TypeError):
-            disk_total_gb, disk_used_gb = 0.0, 0.0
-
-        ts = time.time()
-
         with _db_lock:
             conn = _get_connection()
             try:
-                conn.execute(
-                    """INSERT INTO metrics
-                       (timestamp, cpu_percent, load_1, load_5, load_15,
-                        memory_percent, memory_used_mb, memory_total_mb,
-                        disk_percent, disk_used_gb, disk_total_gb,
-                        net_recv_bytes, net_sent_bytes, net_recv_kbps, net_sent_kbps)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        ts,
-                        cpu.get("cpu_percent_snapshot", 0.0),
-                        load_1, load_5, load_15,
-                        memory.get("percent", 0.0),
-                        memory.get("used_mb", 0.0),
-                        memory.get("total_mb", 0.0),
-                        disk_pct, disk_used_gb, disk_total_gb,
-                        network.get("bytes_recv", 0),
-                        network.get("bytes_sent", 0),
-                        network.get("net_recv_kbps", 0.0),
-                        network.get("net_sent_kbps", 0.0),
-                    ),
-                )
-                conn.commit()
-
-                # 检查行数上限
-                cfg = _get_config()
-                max_rows = getattr(cfg, "METRICS_MAX_ROWS", 100000)
-                row_count = conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0]
-                if row_count > max_rows:
-                    excess = row_count - max_rows
-                    conn.execute(
-                        "DELETE FROM metrics WHERE id IN (SELECT id FROM metrics ORDER BY timestamp ASC LIMIT ?)",
-                        (excess,),
-                    )
-                    conn.commit()
-                    logger.info("[MetricsStore] 行数上限清理: 删除 %d 条旧记录", excess)
-
-                return True
+                return _insert_metrics_with_conn(conn, data)
             finally:
                 conn.close()
     except Exception as e:
@@ -289,19 +325,11 @@ def query_metrics(from_ts: float | None = None, to_ts: float | None = None,
 # ============================================================
 
 def cleanup_expired():
-    """删除超过保留时间的过期数据"""
-    cfg = _get_config()
-    max_hours = getattr(cfg, "METRICS_MAX_RETENTION_HOURS", 24)
-    cutoff = time.time() - max_hours * 3600
-
+    """删除超过保留时间的过期数据（独立调用，每次新建连接）"""
     with _db_lock:
         conn = _get_connection()
         try:
-            cursor = conn.execute("DELETE FROM metrics WHERE timestamp < ?", (cutoff,))
-            deleted = cursor.rowcount
-            if deleted > 0:
-                conn.commit()
-                logger.info("[MetricsStore] 过期清理: 删除 %d 条记录 (超过 %d 小时)", deleted, max_hours)
+            _cleanup_expired_with_conn(conn)
         finally:
             conn.close()
 
@@ -325,53 +353,57 @@ def vacuum_db():
 # ============================================================
 
 def _collect_loop():
-    """后台采集线程主循环"""
+    """后台采集线程主循环 — 使用持久连接复用，避免高频 create/close 开销"""
     cfg = _get_config()
     interval = getattr(cfg, "METRICS_COLLECT_INTERVAL", 15)
     logger.info("[MetricsStore] 后台采集线程启动，间隔 %d 秒", interval)
 
     from plugins import sys_info
 
-    # 网络速率计算：维护上一轮的 bytes 计数器和时间戳
-    prev_net = {"bytes_recv": 0, "bytes_sent": 0, "ts": 0.0}
+    # 持久连接：整个线程生命周期内复用同一个连接
+    conn = _get_connection()
+    try:
+        prev_net = {"bytes_recv": 0, "bytes_sent": 0, "ts": 0.0}
 
-    while not _stop_event.is_set():
-        try:
-            result = sys_info.handle({"metric": "all"})
-            if "error" not in result:
-                now_ts = time.time()
+        while not _stop_event.is_set():
+            try:
+                result = sys_info.handle({"metric": "all"})
+                if "error" not in result:
+                    now_ts = time.time()
 
-                # 从 sys_info 结果中提取网络原始计数器，计算 kbps 速率
-                net_data = result.get("network", {})
-                bytes_recv = net_data.get("bytes_recv", 0)
-                bytes_sent = net_data.get("bytes_sent", 0)
-                net_recv_kbps = 0.0
-                net_sent_kbps = 0.0
-                if prev_net["ts"] > 0:
-                    elapsed = now_ts - prev_net["ts"]
-                    if elapsed > 0:
-                        rx_delta = max(0, bytes_recv - prev_net["bytes_recv"])
-                        tx_delta = max(0, bytes_sent - prev_net["bytes_sent"])
-                        net_recv_kbps = round(rx_delta / elapsed / 1024, 1)
-                        net_sent_kbps = round(tx_delta / elapsed / 1024, 1)
-                prev_net = {"bytes_recv": bytes_recv, "bytes_sent": bytes_sent, "ts": now_ts}
+                    # 从 sys_info 结果中提取网络原始计数器，计算 kbps 速率
+                    net_data = result.get("network", {})
+                    bytes_recv = net_data.get("bytes_recv", 0)
+                    bytes_sent = net_data.get("bytes_sent", 0)
+                    net_recv_kbps = 0.0
+                    net_sent_kbps = 0.0
+                    if prev_net["ts"] > 0:
+                        elapsed = now_ts - prev_net["ts"]
+                        if elapsed > 0:
+                            rx_delta = max(0, bytes_recv - prev_net["bytes_recv"])
+                            tx_delta = max(0, bytes_sent - prev_net["bytes_sent"])
+                            net_recv_kbps = round(rx_delta / elapsed / 1024, 1)
+                            net_sent_kbps = round(tx_delta / elapsed / 1024, 1)
+                    prev_net = {"bytes_recv": bytes_recv, "bytes_sent": bytes_sent, "ts": now_ts}
 
-                # 将计算出的速率回填到 result 中，供 insert_metrics 使用
-                result["network"]["net_recv_kbps"] = net_recv_kbps
-                result["network"]["net_sent_kbps"] = net_sent_kbps
+                    # 将计算出的速率回填到 result 中
+                    result["network"]["net_recv_kbps"] = net_recv_kbps
+                    result["network"]["net_sent_kbps"] = net_sent_kbps
 
-                insert_metrics(result)
-                # 每写入一次执行一次过期清理（轻量 DELETE）
-                cleanup_expired()
-            else:
-                logger.warning("[MetricsStore] 采集失败: %s", result.get("error"))
-        except Exception as e:
-            logger.exception("[MetricsStore] 采集异常: %s", e)
+                    # 持锁写入 + 清理，复用持久连接
+                    with _db_lock:
+                        _insert_metrics_with_conn(conn, result)
+                        _cleanup_expired_with_conn(conn)
+                else:
+                    logger.warning("[MetricsStore] 采集失败: %s", result.get("error"))
+            except Exception as e:
+                logger.exception("[MetricsStore] 采集异常: %s", e)
 
-        # 等待下一次采集，支持被 stop_event 提前中断
-        _stop_event.wait(interval)
-
-    logger.info("[MetricsStore] 后台采集线程已停止")
+            # 等待下一次采集，支持被 stop_event 提前中断
+            _stop_event.wait(interval)
+    finally:
+        conn.close()
+        logger.info("[MetricsStore] 后台采集线程已停止 — 持久连接已关闭")
 
 
 def start_collect_thread():
