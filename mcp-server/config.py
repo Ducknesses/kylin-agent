@@ -52,6 +52,12 @@ class Config:
     LOG_FILE: str = os.getenv("LOG_FILE", "/var/log/mcp-server.log")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # 指标缓存（SQLite 本地存储）
+    METRICS_DB_PATH: str = os.getenv("METRICS_DB_PATH", "/var/lib/mcp-server/metrics.db")
+    METRICS_COLLECT_INTERVAL: int = int(os.getenv("METRICS_COLLECT_INTERVAL", "15"))
+    METRICS_MAX_RETENTION_HOURS: int = int(os.getenv("METRICS_MAX_RETENTION_HOURS", "24"))
+    METRICS_MAX_ROWS: int = int(os.getenv("METRICS_MAX_ROWS", "100000"))
+
     # 命令白名单：{pattern} 表示可变参数占位符
     # 支持精确匹配和参数化匹配
     ALLOWED_COMMANDS: list = [

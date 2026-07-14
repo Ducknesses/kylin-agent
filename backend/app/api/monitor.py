@@ -3,6 +3,7 @@
 正式接口（最新前后端 API 统一规范 v1.0）：
   GET /api/monitor/metrics  → 嵌套结构 REST 快照（本地 psutil）
   GET /api/monitor/stream   → 扁平结构 SSE 实时流（本地 psutil）
+  GET /api/monitor/history  → 历史指标数据（通过 MCP 拉取 SQLite 缓存）
 """
 import asyncio
 import json
@@ -11,7 +12,7 @@ import os
 from datetime import datetime
 
 import psutil
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
 from app.mcp.client import MCPClient
@@ -156,6 +157,28 @@ async def _mcp_metrics_generator():
 async def get_metrics() -> dict:
     """系统指标 REST 快照 —— 嵌套结构，无 code/data 包装"""
     return _collect_nested_metrics()
+
+
+@router.get("/monitor/history")
+async def get_metrics_history(
+    from_ts: float | None = Query(None, description="开始时间戳（Unix秒），默认5分钟前"),
+    to_ts: float | None = Query(None, description="结束时间戳（Unix秒），默认当前时间"),
+    metrics: str | None = Query(None, description="逗号分隔的指标名: cpu,memory,disk,network,all"),
+):
+    """历史指标数据 —— 通过 MCP 拉取 mcp-server 本地 SQLite 缓存"""
+    client = MCPClient()
+    args = {}
+    if from_ts is not None:
+        args["from_ts"] = from_ts
+    if to_ts is not None:
+        args["to_ts"] = to_ts
+    if metrics is not None:
+        args["metrics"] = metrics
+
+    result = await client.call_tool("metrics_history", args)
+    if result.get("ok"):
+        return result["result"]
+    return {"error": result.get("error", "获取历史数据失败"), "data": []}
 
 
 @router.get("/monitor/stream")

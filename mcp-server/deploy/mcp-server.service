@@ -1,8 +1,8 @@
 [Unit]
 Description=MCP Server for Kylin OS Agent
 Documentation=https://github.com/Ducknesses/kylin-agent
-After=network.target network-online.target
-Wants=network-online.target
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
@@ -12,6 +12,7 @@ WorkingDirectory=/opt/mcp-server
 ExecStart=/opt/mcp-server/venv/bin/python /opt/mcp-server/server.py
 Restart=always
 RestartSec=5
+TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mcp-server
@@ -19,6 +20,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/mcp-server
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8001
+Environment=LOG_FILE=/opt/mcp-server/mcp-server.log
+Environment=METRICS_DB_PATH=/opt/mcp-server/metrics.db
 # API_TOKEN 通过项目目录下的 .env 文件配置，不在此处硬编码
 # 请确保 /opt/mcp-server/.env 中设置了正确的 API_TOKEN
 

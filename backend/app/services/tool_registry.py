@@ -145,6 +145,20 @@ _register(ToolSpec(
     audit_policy=AuditPolicy(safe_fields=(), summary_builder="cmd_exec_summary"),
 ))
 
+# metrics_history
+_register(ToolSpec(
+    name="metrics_history",
+    description="查询系统历史指标数据（CPU、内存、磁盘、网络），按时间范围返回历史读数。用于分析系统负载趋势、排查历史性能问题。",
+    params=MappingProxyType({
+        "from_ts": ToolParamSpec(type="number", description="开始时间戳（Unix秒），默认5分钟前"),
+        "to_ts": ToolParamSpec(type="number", description="结束时间戳（Unix秒），默认当前时间"),
+        "metrics": ToolParamSpec(type="string", description="逗号分隔的指标名: cpu,memory,disk,network,all"),
+        "limit": ToolParamSpec(type="integer", constraints=_readonly_constraints({"min": 1, "max": 10000})),
+    }),
+    default_risk="low",
+    audit_policy=AuditPolicy(safe_fields=("from_ts", "to_ts", "metrics")),
+))
+
 # file_guard
 _register(ToolSpec(
     name="file_guard",

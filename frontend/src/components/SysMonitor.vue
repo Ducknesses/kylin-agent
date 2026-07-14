@@ -41,6 +41,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { FullScreen, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
+import { useWsStore } from '@/stores/wsStore'
 
 // 图表配置常量（静态数据，大写命名约定表示常量）
 const CHART_LIST = [
@@ -246,10 +247,77 @@ function stopPolling() {
   }
 }
 
+// ===== 历史数据拉取 =====
+
+async function fetchHistory(fromMs, toMs) {
+  try {
+    const fromTs = Math.floor(fromMs / 1000)
+    const toTs = Math.floor(toMs / 1000)
+    const apiBase = useWsStore().apiBaseUrl
+    const res = await axios.get(`${apiBase}/api/monitor/history`, {
+      params: { from_ts: fromTs, to_ts: toTs },
+      timeout: 8000
+    })
+    const historyData = res.data?.data || res.data?.result?.data || []
+    if (!Array.isArray(historyData) || historyData.length === 0) return
+
+    // 批量回填历史数据点
+    historyData.forEach(pt => {
+      rawMetrics.push({
+        time: new Date(pt.ts * 1000).toLocaleTimeString(),
+        timestamp: new Date(pt.ts * 1000),
+        cpu: pt.cpu_percent ?? 0,
+        mem: pt.memory_percent ?? 0,
+        disk: pt.disk_percent ?? 0,
+        netIn: pt.net_recv_kbps ?? 0,
+        netOut: pt.net_sent_kbps ?? 0
+      })
+    })
+
+    // 去重 + 按时间排序
+    const seen = new Set()
+    rawMetrics.sort((a, b) => a.timestamp - b.timestamp)
+    const deduped = []
+    for (const p of rawMetrics) {
+      const key = p.timestamp.getTime()
+      if (!seen.has(key)) {
+        seen.add(key)
+        deduped.push(p)
+      }
+    }
+    rawMetrics.length = 0
+    rawMetrics.push(...deduped)
+
+    // 按全局保留策略淘汰旧数据
+    const cutoff = new Date(Date.now() - MAX_RETAIN_MINUTES * 60 * 1000)
+    while (rawMetrics.length > MAX_RETAIN_POINTS || rawMetrics[0]?.timestamp < cutoff) {
+      rawMetrics.shift()
+    }
+
+    refreshAll()
+  } catch (e) {
+    console.warn('[History] 拉取历史数据失败，使用本地缓存', e)
+  }
+}
+
 // ===== 时间范围切换 =====
 
 function onRangeChange() {
-  refreshAll()
+  const now = Date.now()
+  let ms = 5 * 60 * 1000
+  if (timeRange.value === '30m') ms = 30 * 60 * 1000
+  if (timeRange.value === '1h') ms = 60 * 60 * 1000
+  const from = now - ms
+
+  // 检查本地缓存是否覆盖所选时间范围
+  const displayData = getDisplayMetrics()
+  if (displayData.length < 5) {
+    // 数据不足，拉取历史
+    fetchHistory(from, now)
+  } else {
+    refreshAll()
+  }
+
   // 切换范围后确保图表尺寸正确
   setTimeout(() => Object.values(charts).forEach(c => c && c.resize()), 0)
 }
@@ -274,15 +342,10 @@ onMounted(() => {
   // 等待 DOM 渲染完成后再初始化 echarts
   setTimeout(() => {
     initCharts()
-    // 注入初始 mock 数据点（后端就绪前展示用）
-    appendDataPoint({
-      cpu_percent: +(Math.random() * 30 + 20).toFixed(1),
-      memory_percent: +(Math.random() * 20 + 40).toFixed(1),
-      disk_percent: +(Math.random() * 10 + 50).toFixed(1),
-      net_in_kbps: +(Math.random() * 500 + 100).toFixed(0),
-      net_out_kbps: +(Math.random() * 300 + 50).toFixed(0),
-      timestamp: new Date().toISOString()
-    })
+    // 先拉取最近5分钟历史数据填充图表
+    const now = Date.now()
+    fetchHistory(now - 5 * 60 * 1000, now)
+    // 连接 SSE 持续接收实时数据
     connectSse()
   }, 0)
 
