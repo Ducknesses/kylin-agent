@@ -113,12 +113,14 @@ def handle(arguments: dict) -> dict:
     # 参数校验
     if not action or not service:
         return {
+            "blocked": True,
             "error": "缺少必要参数: action 和 service",
             "usage": {"action": "status|start|stop|restart", "service": "服务名"},
         }
 
     if action not in ALLOWED_ACTIONS:
         return {
+            "blocked": True,
             "error": f"不支持的操作: {action}",
             "allowed_actions": ALLOWED_ACTIONS,
         }
@@ -127,7 +129,7 @@ def handle(arguments: dict) -> dict:
     is_valid, error_msg = _validate_service(service)
     if not is_valid:
         logger.warning("[ServiceMgr] %s", error_msg)
-        return {"error": error_msg, "allowed_services": config.ALLOWED_SERVICES}
+        return {"blocked": True, "error": error_msg, "allowed_services": config.ALLOWED_SERVICES}
 
     # 变更操作需要 pending_confirmation
     MEDIUM_ACTIONS = {"start", "stop", "restart", "reload"}

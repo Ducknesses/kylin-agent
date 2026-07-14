@@ -82,6 +82,7 @@ def _read_file_safe(path: str, max_size: int = MAX_READ_SIZE) -> dict:
     is_protected, reason = _is_protected(path)
     if is_protected:
         return {
+            "blocked": True,
             "error": f"文件受保护: {reason}",
             "path": path,
         }
@@ -89,22 +90,23 @@ def _read_file_safe(path: str, max_size: int = MAX_READ_SIZE) -> dict:
     try:
         real_path = os.path.realpath(path)
     except Exception:
-        return {"error": f"路径不存在或无法解析: {path}"}
+        return {"blocked": True, "error": f"路径不存在或无法解析: {path}"}
 
     if not os.path.exists(real_path):
-        return {"error": f"文件不存在: {path}"}
+        return {"blocked": True, "error": f"文件不存在: {path}"}
 
     if not os.path.isfile(real_path):
-        return {"error": f"不是普通文件: {path}"}
+        return {"blocked": True, "error": f"不是普通文件: {path}"}
 
     # 检查文件大小
     try:
         file_size = os.path.getsize(real_path)
     except OSError:
-        return {"error": f"无法获取文件大小: {path}"}
+        return {"blocked": True, "error": f"无法获取文件大小: {path}"}
 
     if file_size > max_size:
         return {
+            "blocked": True,
             "error": f"文件过大({file_size}字节)，超过限制({max_size}字节)",
             "path": real_path,
             "size": file_size,
@@ -163,6 +165,7 @@ def _write_file_safe(path: str, content: str) -> dict:
     if is_protected:
         _write_audit("write", path, result="rejected_protected")
         return {
+            "blocked": True,
             "error": f"文件受保护: {reason}",
             "path": path,
             "risk_level": "high"
@@ -171,13 +174,14 @@ def _write_file_safe(path: str, content: str) -> dict:
     try:
         real_path = os.path.realpath(path)
     except Exception:
-        return {"error": f"路径无法解析: {path}"}
+        return {"blocked": True, "error": f"路径无法解析: {path}"}
 
     # 写入路径白名单校验
     allowed = any(real_path.startswith(d) for d in ALLOWED_WRITE_PATHS)
     if not allowed:
         _write_audit("write", real_path, result="rejected_not_allowed")
         return {
+            "blocked": True,
             "error": "写入路径不在允许范围内（仅 /tmp/ 和 /opt/mcp-server/）",
             "path": real_path,
             "risk_level": "high"
@@ -236,6 +240,7 @@ def handle(arguments: dict) -> dict:
 
     if not path:
         return {
+            "blocked": True,
             "error": "缺少必要参数: path",
             "usage": {
                 "action": "check|read|write",
@@ -257,11 +262,12 @@ def handle(arguments: dict) -> dict:
     elif action == "write":
         content = arguments.get("content")
         if content is None:
-            return {"error": "write 操作需要 content 参数", "path": path}
+            return {"blocked": True, "error": "write 操作需要 content 参数", "path": path}
         return _write_file_safe(path, content)
 
     else:
         return {
+            "blocked": True,
             "error": f"不支持的操作: {action}",
             "allowed_actions": ["check", "read", "write"],
         }
