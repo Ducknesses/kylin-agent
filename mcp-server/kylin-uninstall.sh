@@ -18,12 +18,23 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# ---- 读取当前 MCP 端口 ----
+read_mcp_port() {
+    if [ -f /opt/mcp-server/.env ]; then
+        grep -oP '^MCP_PORT=\K.*' /opt/mcp-server/.env 2>/dev/null || echo "8001"
+    else
+        echo "8001"
+    fi
+}
+
+MCP_PORT=$(read_mcp_port)
+
 # ---- 确认卸载 ----
 echo "[CONFIRM] 即将卸载 MCP Server，这将："
 echo "  1. 停止 mcp-server 服务"
 echo "  2. 移除 systemd 服务配置"
 echo "  3. 删除 /opt/mcp-server 目录"
-echo "  4. 清理防火墙规则（8001/tcp）"
+echo "  4. 清理防火墙规则（${MCP_PORT}/tcp）"
 echo "  5. 删除 sudoers 白名单 (/etc/sudoers.d/agent-op)"
 echo "  6. 删除 agent-read / agent-op 用户"
 echo "  7. 清理日志文件"
@@ -59,8 +70,7 @@ systemctl daemon-reload
 echo "  mcp-server.service 已移除"
 
 # ---- 3. 清理防火墙规则 ----
-echo "[3/7] 清理防火墙规则（端口 8001/tcp）..."
-MCP_PORT=8001
+echo "[3/7] 清理防火墙规则（端口 ${MCP_PORT}/tcp）..."
 
 if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
     if firewall-cmd --permanent --query-port="${MCP_PORT}/tcp" &>/dev/null 2>&1; then
@@ -134,7 +144,7 @@ echo ""
 echo "  以下内容已全部移除:"
 echo "    - mcp-server systemd 服务"
 echo "    - /opt/mcp-server 目录"
-echo "    - 防火墙规则（8001/tcp）"
+echo "    - 防火墙规则（${MCP_PORT}/tcp）"
 echo "    - sudoers 白名单 (/etc/sudoers.d/agent-op)"
 echo "    - agent-read / agent-op 用户"
 echo "    - 相关日志文件"
