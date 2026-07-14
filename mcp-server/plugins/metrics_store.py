@@ -119,7 +119,14 @@ def insert_metrics(data: dict) -> bool:
         network = data.get("network", {})
 
         if isinstance(disk, list) and len(disk) > 0:
-            disk_data = disk[0] if isinstance(disk[0], dict) else {}
+            # 优先匹配挂载点为 / 的根分区；否则回退到第一个条目
+            disk_data = {}
+            for d in disk:
+                if isinstance(d, dict) and d.get("mount_point") == "/":
+                    disk_data = d
+                    break
+            if not disk_data and isinstance(disk[0], dict):
+                disk_data = disk[0]
         elif isinstance(disk, dict):
             disk_data = disk
         else:
