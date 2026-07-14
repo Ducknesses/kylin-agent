@@ -279,8 +279,9 @@ def query_metrics(from_ts: float | None = None, to_ts: float | None = None,
             "network": ["net_recv_bytes", "net_sent_bytes", "net_recv_kbps", "net_sent_kbps"],
         }
         for m in metrics:
-            if m in col_map:
-                selected.extend(col_map[m])
+            if m not in col_map:
+                raise ValueError(f"Unknown metric key: '{m}'. Valid keys: {list(col_map.keys())}")
+            selected.extend(col_map[m])
         selected = list(dict.fromkeys(selected))  # 去重保持顺序
 
     columns_str = ", ".join(selected)
@@ -477,4 +478,7 @@ def handle(arguments: dict) -> dict:
     except (ValueError, TypeError):
         return {"error": f"limit 格式无效: {arguments.get('limit')}"}
 
-    return query_metrics(from_ts=from_ts, to_ts=to_ts, metrics=metrics, limit=limit)
+    try:
+        return query_metrics(from_ts=from_ts, to_ts=to_ts, metrics=metrics, limit=limit)
+    except ValueError as e:
+        return {"error": str(e)}
