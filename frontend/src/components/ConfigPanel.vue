@@ -116,15 +116,8 @@ async function fetchWhitelist() {
     blockedPatterns.value = (res.data.blocked_patterns || []).map(p => ({ pattern: p }))
   } catch (e) {
     console.error('拉取白名单失败', e)
-    whitelist.value = [
-      { pattern: 'df -h', role: 'agent-read', risk: 'low' },
-      { pattern: 'systemctl status *', role: 'agent-op', risk: 'low' }
-    ]
-    blockedPatterns.value = [
-      { pattern: 'rm -rf /' },
-      { pattern: '> /etc/passwd' },
-      { pattern: '| /bin/sh' }
-    ]
+    ElMessage.error('拉取白名单配置失败，请检查后端服务是否正常运行')
+    // 不再用硬编码数据覆盖本地状态，避免用户配置丢失
   }
 }
 
@@ -137,7 +130,8 @@ async function saveWhitelist() {
     ElMessage.success('保存成功')
   } catch (e) {
     console.error('保存白名单失败', e)
-    ElMessage.warning('后端 PUT 接口尚未实现持久化')
+    const detail = e?.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`保存失败: ${detail}`)
   }
 }
 

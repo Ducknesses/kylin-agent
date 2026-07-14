@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
 from plugins import sys_info, service_mgr, log_reader, net_monitor, cmd_exec, file_guard
-from plugins import mcp_self_monitor
+from plugins import mcp_self_monitor, metrics_store
 
 # ============================================================
 # 工具注册表
@@ -29,6 +29,7 @@ TOOLS = {
     "cmd_exec": cmd_exec.handle,
     "file_guard": file_guard.handle,
     "mcp_self_monitor": mcp_self_monitor.handle,
+    "metrics_history": metrics_store.handle,
 }
 
 # ============================================================
@@ -260,6 +261,15 @@ def handle_tools_list(req_id=None) -> dict:
                 "path": "文件路径",
                 "content": "写入内容（write 操作）",
                 "max_size": "最大读取字节数（默认1MB）",
+            },
+        },
+        "metrics_history": {
+            "description": "查询系统历史指标数据（CPU、内存、磁盘、网络），按时间范围返回历史读数",
+            "parameters": {
+                "from_ts": "开始时间戳（Unix秒，可选，默认5分钟前）",
+                "to_ts": "结束时间戳（Unix秒，可选，默认当前时间）",
+                "metrics": "逗号分隔的指标名: cpu,memory,disk,network,all（可选，默认all）",
+                "limit": "最大返回条数（默认5000，最大10000）",
             },
         },
     }
@@ -677,7 +687,7 @@ def main():
 
 
 def _init_self_monitor():
-    """初始化 mcp_self_monitor 插件的内部引用"""
+    """初始化 mcp_self_monitor 插件的内部引用，以及 metrics_store 数据库和后台采集"""
     mcp_self_monitor.server_instance = server_instance
     mcp_self_monitor.server_start_time = server_start_time
     mcp_self_monitor.request_stats = {
@@ -687,6 +697,36 @@ def _init_self_monitor():
         "last_reset": time.time(),
     }
     mcp_self_monitor.restart_server_cb = restart_server
+
+    # ── metrics_store 初始化 ──
+    t0 = time.time()
+    try:
+        metrics_store.init_db()
+        logger.info("[Server] metrics_store.init_db() 完成 (%.2fs)", time.time() - t0)
+
+        metrics_store.cleanup_expired()
+        logger.info("[Server] metrics_store.cleanup_expired() 完成 (%.2fs)", time.time() - t0)
+
+        # VACUUM 改用后台线程延迟执行，避免启动时阻塞（大数据库可能耗时数秒）
+        threading.Thread(
+            target=_delayed_vacuum,
+            daemon=True,
+            name="metrics-vacuum",
+        ).start()
+
+        metrics_store.start_collect_thread()
+        logger.info("[Server] 指标缓存初始化完成 (%.2fs)", time.time() - t0)
+    except Exception as e:
+        logger.exception("[Server] 指标缓存初始化失败: %s", e)
+
+
+def _delayed_vacuum():
+    """后台线程：延迟 5 秒后执行 VACUUM，避免阻塞服务启动"""
+    time.sleep(5)
+    try:
+        metrics_store.vacuum_db()
+    except Exception as e:
+        logger.warning("[Server] 后台 VACUUM 失败: %s", e)
 
 
 if __name__ == "__main__":

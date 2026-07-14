@@ -40,8 +40,14 @@ def _build_default_blocked() -> list:
     return list(DANGEROUS_PATTERNS)
 
 
-async def _load_runtime_config() -> None:
-    """启动时从 DB 加载白名单配置，无记录时使用默认值"""
+async def preload_config() -> None:
+    """启动时从 DB 预加载白名单配置到内存缓存，无记录时使用默认值"""
+    global _runtime_commands, _runtime_blocked
+    await _load_from_db()
+
+
+async def _load_from_db() -> None:
+    """从 DB 重新加载白名单配置"""
     global _runtime_commands, _runtime_blocked
 
     raw_commands = await load_config("whitelist_commands")
@@ -69,7 +75,7 @@ async def _load_runtime_config() -> None:
 async def get_whitelist() -> dict:
     """获取当前命令白名单 —— 直接返回 commands 和 blocked_patterns"""
     if _runtime_commands is None or _runtime_blocked is None:
-        await _load_runtime_config()
+        await _load_from_db()
 
     return {
         "commands": _runtime_commands,

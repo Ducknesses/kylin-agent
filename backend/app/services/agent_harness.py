@@ -156,6 +156,13 @@ class AgentHarness:
                 "risk_level": safety.get("risk_level"),
                 "reason": safety.get("reason"),
             }
+            ctx.add_observation({
+                "tool": tool_name,
+                "params": _sanitize_observation(params),
+                "ok": False,
+                "requires_confirm": True,
+                "reason": safety.get("reason", "需要二次确认"),
+            })
             return result
 
         # ── 4. 记录 tool_call（放行时） ──
@@ -219,6 +226,14 @@ class AgentHarness:
                 "risk_level": safety.get("risk_level"),
                 "reason": safety.get("reason"),
             }
+        ctx.add_observation({
+            "tool": tool_name,
+            "params": _sanitize_observation(params),
+            "ok": False,
+            "error": error,
+            "risk_level": risk_level,
+            "blocked": True,
+        })
         return {"ok": ok, "error": error, "risk_level": risk_level, "blocked": blocked}
 
     async def _audit(

@@ -46,7 +46,7 @@ def handle(arguments: dict) -> dict:
     """
     command = arguments.get("command", "").strip()
     if not command:
-        return {"error": "缺少必要参数: command", "usage": {"command": "df -h", "timeout": 30}}
+        return {"blocked": True, "error": "缺少必要参数: command", "usage": {"command": "df -h", "timeout": 30}}
 
     timeout = int(arguments.get("timeout", 30))
     user = arguments.get("user", "agent-read")

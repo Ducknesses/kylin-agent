@@ -3,18 +3,28 @@ import os
 from pathlib import Path
 
 # 优先从项目目录下的 .env 文件加载环境变量
+import sys
+
 try:
     from dotenv import load_dotenv
     _env_path = Path(__file__).parent / ".env"
     if _env_path.exists():
-        load_dotenv(_env_path)
+        _loaded = load_dotenv(_env_path)
+        if _loaded:
+            _token_val = os.getenv("API_TOKEN") or ""
+            print(f"[INFO] .env 文件已加载 (路径={_env_path}, token长度={len(_token_val)})", file=sys.stderr)
+        else:
+            print(f"[WARN] .env 文件存在但加载返回 False (路径={_env_path})", file=sys.stderr)
+    else:
+        print(f"[WARN] .env 文件不存在 (期望路径={_env_path})，API_TOKEN 将为空", file=sys.stderr)
 except ImportError:
-    import sys
     print(
         "[WARN] python-dotenv 未安装，将只使用系统环境变量。"
         "建议: pip install python-dotenv",
         file=sys.stderr,
     )
+except Exception as _e:
+    print(f"[ERROR] .env 文件加载异常: {_e}", file=sys.stderr)
 
 
 class Config:
@@ -51,6 +61,12 @@ class Config:
     # 日志
     LOG_FILE: str = os.getenv("LOG_FILE", "/var/log/mcp-server.log")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # 指标缓存（SQLite 本地存储）
+    METRICS_DB_PATH: str = os.getenv("METRICS_DB_PATH", "/var/lib/mcp-server/metrics.db")
+    METRICS_COLLECT_INTERVAL: int = int(os.getenv("METRICS_COLLECT_INTERVAL", "15"))
+    METRICS_MAX_RETENTION_HOURS: int = int(os.getenv("METRICS_MAX_RETENTION_HOURS", "24"))
+    METRICS_MAX_ROWS: int = int(os.getenv("METRICS_MAX_ROWS", "100000"))
 
     # 命令白名单：{pattern} 表示可变参数占位符
     # 支持精确匹配和参数化匹配

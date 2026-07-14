@@ -211,6 +211,7 @@ class MCPClient:
             "net_monitor": self._mock_net_monitor,
             "cmd_exec": self._mock_cmd_exec,
             "file_guard": self._mock_file_guard,
+            "metrics_history": self._mock_metrics_history,
         }
         # sys_info handler 使用函数引用以便 patch（避免 lambda 绑定问题）
         # 直接使用实例方法即可
@@ -605,8 +606,16 @@ class MCPClient:
 
     @staticmethod
     def _is_blocked_result(result: Any) -> bool:
-        """判断 MCP result 是否为安全拦截"""
-        return isinstance(result, dict) and result.get("blocked") is True
+        """判断 MCP result 是否为安全拦截
+
+        仅检测 result.blocked == True（sandbox.py 及各 MCP 插件安全拦截的标准格式）。
+
+        注意：仅包含 error 字段但无 blocked 标志的响应（如 systemctl 超时、
+        PermissionError 等运行时失败）不会被误判为安全拦截。
+        """
+        if not isinstance(result, dict):
+            return False
+        return result.get("blocked") is True
 
     # ── 主调用入口 ───────────────────────────────────────────────
 
@@ -694,6 +703,63 @@ class MCPClient:
         except Exception:
             logger.exception(f"[MCP] 工具调用异常 — {tool_name}")
             return _fail("MCP 工具调用异常")
+
+    # ── Mock: metrics_history ──────────────────────────────────────
+
+    def _mock_metrics_history(self, args: Dict[str, Any]) -> Dict:
+        """Mock 模式：按时间范围生成模拟历史指标数据"""
+        import random
+        import time as _time
+
+        now = _time.time()
+        from_ts = args.get("from_ts", now - 300)  # 默认最近5分钟
+        to_ts = args.get("to_ts", now)
+        metrics_arg = args.get("metrics")
+        limit = min(args.get("limit", 5000), 5000)
+
+        if isinstance(from_ts, str):
+            try:
+                from_ts = float(from_ts)
+            except (ValueError, TypeError):
+                from_ts = now - 300
+        if isinstance(to_ts, str):
+            try:
+                to_ts = float(to_ts)
+            except (ValueError, TypeError):
+                to_ts = now
+
+        # 每15秒一个数据点
+        interval = 15
+        data = []
+        t = from_ts
+        while t <= to_ts and len(data) < limit:
+            point = {
+                "ts": round(t, 1),
+                "cpu_percent": round(15 + random.random() * 35, 1),
+                "load_1": round(random.random() * 1.5, 2),
+                "load_5": round(random.random() * 1.0, 2),
+                "load_15": round(random.random() * 0.8, 2),
+                "memory_percent": round(38 + random.random() * 10, 1),
+                "memory_used_mb": round(3000 + random.random() * 500, 0),
+                "memory_total_mb": 8192.0,
+                "disk_percent": round(55 + random.random() * 10, 1),
+                "disk_used_gb": round(22 + random.random() * 4, 1),
+                "disk_total_gb": 40.0,
+                "net_recv_bytes": int(10_000_000_000 + random.random() * 2_000_000_000),
+                "net_sent_bytes": int(2_000_000_000 + random.random() * 1_000_000_000),
+                "net_recv_kbps": round(random.random() * 300 + 50, 1),
+                "net_sent_kbps": round(random.random() * 100 + 10, 1),
+            }
+            data.append(point)
+            t += interval
+
+        return _ok({
+            "count": len(data),
+            "interval_seconds": interval,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+            "data": data,
+        })
 
     # ── 便捷方法 ────────────────────────────────────────────────
 

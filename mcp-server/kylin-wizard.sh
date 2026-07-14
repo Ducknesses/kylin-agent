@@ -430,7 +430,7 @@ menu_change_address() {
     echo "  2. 更新 systemd 服务文件中的 MCP_HOST / MCP_PORT"
     echo "  3. 防火墙放行新端口 ${new_port}/tcp"
     if [ "$new_port" != "$cur_port" ]; then
-        echo "  4. 可选：清理旧端口 ${cur_port}/tcp 的防火墙规则"
+        echo "  4. 清理旧端口 ${cur_port}/tcp 的防火墙规则"
     fi
     echo "  5. 热重启 MCP Server（使新地址立即生效）"
     echo ""
@@ -486,12 +486,14 @@ menu_change_address() {
         return
     fi
 
-    # 5. 可选：清理旧端口防火墙规则
+    # 5. 清理旧端口防火墙规则（默认执行）
     if [ "$new_port" != "$cur_port" ]; then
         echo ""
-        read -p "  是否清理旧端口 ${cur_port}/tcp 的防火墙规则？(y/n，默认 n): " clean_old
-        if [ "$clean_old" = "y" ] || [ "$clean_old" = "Y" ]; then
+        read -p "  清理旧端口 ${cur_port}/tcp 的防火墙规则？(Y/n，默认 y): " clean_old
+        if [ "$clean_old" != "n" ] && [ "$clean_old" != "N" ]; then
             configure_firewall "$cur_port" "remove"
+        else
+            print_warn "已跳过旧端口防火墙清理，请手动处理: ${cur_port}/tcp"
         fi
     fi
 

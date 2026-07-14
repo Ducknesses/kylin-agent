@@ -74,10 +74,57 @@ _AUDIT_BYPASS_KEYWORDS: list[str] = [
 # 角色权限：viewer 只能 low，operator/admin 可以 low + medium（需 confirm）
 _ROLE_CAN_MEDIUM = {"admin", "operator"}  # admin/operator 可执行中危操作
 
-# cmd_exec 白名单命令（低风险只读查询）
+# cmd_exec 白名单命令（低风险只读查询 / 诊断）
 _CMD_EXEC_WHITELIST: list[str] = [
+    # ── 系统基本信息 ──
     "df -h", "free -m", "uptime", "whoami", "uname -a",
-    "systemctl status nginx", "journalctl -u nginx -n 50",
+    "hostnamectl", "timedatectl", "lscpu", "lsblk", "lsblk -f", "mount",
+    "systemd-analyze", "systemd-analyze blame",
+    # ── 进程 / 资源 ──
+    "ps aux", "top -bn1",
+    # ── 网络状态 ──
+    "ip addr", "ip route", "ip link",
+    "ss -tlnp", "ss -an", "ss -tuln",
+    "ping -c 4 127.0.0.1", "ping -c 4 localhost",
+    "curl -s --max-time 10 http://localhost",
+    # ── 日志 / dmesg ──
+    "systemctl status nginx", "systemctl status sshd",
+    "systemctl status docker", "systemctl status cron",
+    "journalctl -u nginx -n 50",
+    "journalctl --no-pager -n 50",
+    "journalctl --no-pager -p err -n 50",
+    "journalctl --no-pager -u nginx -n 50",
+    "dmesg -T", "dmesg --level=err",
+    "dmesg --level=err,warn -T",
+    # ── /proc 只读 ──
+    "cat /proc/cpuinfo", "cat /proc/meminfo",
+    "cat /proc/version", "cat /proc/loadavg",
+    "cat /proc/uptime",
+    # ── 文件 / 磁盘使用 ──
+    "ls -la /var/log", "ls -la /tmp",
+    "du -sh /var/log", "du -sh /tmp",
+    # ── service 列表 ──
+    "systemctl list-units --all", "systemctl list-unit-files",
+    "systemctl list-units --type=service",
+    "systemctl list-units --type=service --state=running",
+    "systemctl list-units --type=service --state=failed",
+    # ── 用户 / 登录 ──
+    "last -n 20", "lastb -n 20", "w",
+]
+
+# cmd_exec 中危白名单命令（允许但需二次确认）
+_CMD_EXEC_MEDIUM_WHITELIST: list[str] = [
+    # nginx
+    "systemctl restart nginx", "systemctl start nginx",
+    "systemctl stop nginx", "systemctl reload nginx",
+    # sshd
+    "systemctl restart sshd", "systemctl reload sshd",
+    # cron / rsyslog
+    "systemctl restart cron", "systemctl restart rsyslog",
+    # docker
+    "systemctl restart docker",
+    "docker ps", "docker ps -a",
+    "docker images", "docker info",
 ]
 
 # 敏感路径（high 拒绝 file_guard 访问）
@@ -241,6 +288,8 @@ class SafetyGuard:
             result = self._check_file_guard(params, role)
         elif tool == "net_monitor":
             result = self._check_net_monitor(params)
+        elif tool == "metrics_history":
+            result = self._check_metrics_history(params)
         else:
             return self._deny("medium", "未知工具")
 
@@ -364,13 +413,23 @@ class SafetyGuard:
         if risk["risk_level"] == "high":
             return self._deny("high", f"高危命令: {risk['reason']}")
 
-        # 白名单低风险命令
         normalized_cmd = command.lower().strip()
+
+        # 低风险白名单命令 —— 直接放行
         for allowed in _CMD_EXEC_WHITELIST:
             if normalized_cmd == allowed.lower():
                 return self._allow("low", f"白名单命令: {command}")
 
-        # 不在白名单但未命中高危
+        # 中危白名单命令 —— 需二次确认
+        for allowed in _CMD_EXEC_MEDIUM_WHITELIST:
+            if normalized_cmd == allowed.lower():
+                return self._result(
+                    allowed=True, risk_level="medium",
+                    reason=f"中危白名单命令: {command}",
+                    requires_confirm=True,
+                )
+
+        # 不在任何白名单但未命中高危
         return self._deny("medium", f"命令不在白名单中: {command[:60]}")
 
     def _check_file_guard(self, params: dict, role: str) -> dict[str, Any]:
@@ -444,6 +503,40 @@ class SafetyGuard:
             "low",
             "net_monitor 只读网络监控",
         )
+
+    def _check_metrics_history(
+        self,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        """检查 metrics_history 调用的安全边界。
+
+        metrics_history 是只读历史指标查询工具，所有参数都是可选的查询条件。
+        参数枚举与约束合法性由 ToolRegistry 负责，这里只做防御性类型检查。
+        """
+        # limit 参数做防御性类型校验
+        limit = params.get("limit")
+        if limit is not None:
+            try:
+                limit_int = int(str(limit))
+            except (ValueError, TypeError):
+                return self._deny("medium", "metrics_history limit 参数格式非法")
+            if limit_int < 1 or limit_int > 10000:
+                return self._deny("medium", f"metrics_history limit 超出允许范围: {limit_int}")
+
+        # metrics 参数如果是字符串，仅允许逗号分隔的合法指标名
+        valid_metric_names = {"cpu", "memory", "disk", "network", "all"}
+        metric_val = params.get("metrics")
+        if metric_val is not None:
+            if isinstance(metric_val, str):
+                parts = [p.strip() for p in metric_val.split(",") if p.strip()]
+                for p in parts:
+                    if p not in valid_metric_names:
+                        return self._deny("medium", f"metrics_history 非法指标名: {p}")
+            elif not isinstance(metric_val, list):
+                return self._deny("medium", "metrics_history metrics 参数类型非法")
+
+        # 只读历史指标查询，低风险
+        return self._allow("low", "metrics_history 只读历史指标查询")
     # ── 辅助方法 ────────────────────────────────────────────────────
 
     @staticmethod
