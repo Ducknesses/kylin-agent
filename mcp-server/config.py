@@ -9,7 +9,12 @@ try:
     if _env_path.exists():
         load_dotenv(_env_path)
 except ImportError:
-    pass
+    import sys
+    print(
+        "[WARN] python-dotenv 未安装，将只使用系统环境变量。"
+        "建议: pip install python-dotenv",
+        file=sys.stderr,
+    )
 
 
 class Config:
