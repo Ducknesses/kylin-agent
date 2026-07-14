@@ -200,6 +200,14 @@ hot_restart_server() {
     print_step "正在通过 JSON-RPC 热重启服务器..."
     print_step "  连接地址: ${host}:${port} → 目标地址: ${new_host}:${new_port}"
 
+    # B1: 校验 new_host 不包含 JSON 破坏字符（双引号、反斜杠、换行等）
+    if [ -n "$new_host" ]; then
+        if [[ "$new_host" == *['\"''\\']* ]]; then
+            print_err "HOST 包含非法字符，无法热重启"
+            return 1
+        fi
+    fi
+
     # 构造参数：只传递需要变更的字段
     local args_json=""
     if [ -n "$new_host" ] && [ -n "$new_port" ]; then
@@ -233,12 +241,10 @@ EOF
         -H "Content-Type: application/json" \
         -d "$payload" 2>&1) || true
 
-    if echo "$response" | grep -q '"success"'; then
-        if echo "$response" | grep -q '"success": true'; then
-            print_ok "热重启成功！"
-            echo "  $response"
-            return 0
-        fi
+    if echo "$response" | grep -q '"success": true'; then
+        print_ok "热重启成功！"
+        echo "  $response"
+        return 0
     fi
 
     # 热重启失败，输出详细错误
@@ -345,16 +351,18 @@ test_connection() {
     fi
 
     # 3. 测试 Bearer Token 认证
-    local ping_auth
-    ping_auth=$(timeout 10 curl -s -w "\n%{http_code}" -X POST "http://${host}:${port}/jsonrpc" \
+    # M3: 使用 -o 分离 body，-w 获取 HTTP 状态码，避免 stderr 污染
+    local ping_body_file="/tmp/mcp_wizard_ping_body.txt"
+    local http_code
+    http_code=$(timeout 10 curl -s -o "$ping_body_file" -w "%{http_code}" \
+        -X POST "http://${host}:${port}/jsonrpc" \
         -H "Authorization: Bearer ${token}" \
         -H "Content-Type: application/json" \
-        -d '{"jsonrpc":"2.0","method":"ping","id":1}' 2>&1) || true
+        -d '{"jsonrpc":"2.0","method":"ping","id":1}' 2>/dev/null) || true
 
-    local http_code
-    http_code=$(echo "$ping_auth" | tail -1)
     local body
-    body=$(echo "$ping_auth" | sed '$d')
+    body=$(cat "$ping_body_file" 2>/dev/null || echo "")
+    rm -f "$ping_body_file"
 
     if [ "$http_code" = "200" ]; then
         if echo "$body" | grep -q '"pong":true'; then
@@ -744,18 +752,25 @@ if [ ! -f "$ENV_FILE" ]; then
     _svc_host=$(grep -oP 'Environment=MCP_HOST=\K.*' "$SERVICE_FILE" 2>/dev/null || echo "127.0.0.1")
     _svc_port=$(grep -oP 'Environment=MCP_PORT=\K.*' "$SERVICE_FILE" 2>/dev/null || echo "8001")
 
+    # M1: 随机生成默认 Token，避免硬编码不安全值
+    if command -v openssl &>/dev/null; then
+        _auto_token=$(openssl rand -hex 32)
+    else
+        _auto_token=$(head -c 32 /dev/urandom | xxd -p -c 32 2>/dev/null || head -c 32 /dev/urandom | od -A n -t x1 | tr -d ' \n')
+    fi
+
     cat > "$ENV_FILE" <<EOF2
 # MCP Server 环境变量（由配置向导自动生成）
 MCP_HOST=${_svc_host}
 MCP_PORT=${_svc_port}
-API_TOKEN=123456789
+API_TOKEN=${_auto_token}
 COMMAND_TIMEOUT=30
 MAX_OUTPUT_LINES=1000
 LOG_FILE=/var/log/mcp-server.log
 LOG_LEVEL=INFO
 EOF2
     print_ok "已从 systemd 服务配置生成 ${ENV_FILE}"
-    print_warn "默认 API_TOKEN 为 123456789，请使用菜单 [2] 修改为安全值"
+    print_warn "已自动生成 API_TOKEN，请妥善保存: ${_auto_token}"
 fi
 
 print_banner
