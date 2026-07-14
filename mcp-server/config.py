@@ -3,18 +3,28 @@ import os
 from pathlib import Path
 
 # 优先从项目目录下的 .env 文件加载环境变量
+import sys
+
 try:
     from dotenv import load_dotenv
     _env_path = Path(__file__).parent / ".env"
     if _env_path.exists():
-        load_dotenv(_env_path)
+        _loaded = load_dotenv(_env_path)
+        if _loaded:
+            _token_val = os.getenv("API_TOKEN") or ""
+            print(f"[INFO] .env 文件已加载 (路径={_env_path}, token长度={len(_token_val)})", file=sys.stderr)
+        else:
+            print(f"[WARN] .env 文件存在但加载返回 False (路径={_env_path})", file=sys.stderr)
+    else:
+        print(f"[WARN] .env 文件不存在 (期望路径={_env_path})，API_TOKEN 将为空", file=sys.stderr)
 except ImportError:
-    import sys
     print(
         "[WARN] python-dotenv 未安装，将只使用系统环境变量。"
         "建议: pip install python-dotenv",
         file=sys.stderr,
     )
+except Exception as _e:
+    print(f"[ERROR] .env 文件加载异常: {_e}", file=sys.stderr)
 
 
 class Config:
