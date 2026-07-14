@@ -22,8 +22,8 @@ Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8001
 Environment=LOG_FILE=/opt/mcp-server/mcp-server.log
 Environment=METRICS_DB_PATH=/opt/mcp-server/metrics.db
-# API_TOKEN 通过项目目录下的 .env 文件配置，不在此处硬编码
-# 请确保 /opt/mcp-server/.env 中设置了正确的 API_TOKEN
+EnvironmentFile=/opt/mcp-server/.env
+# API_TOKEN 通过 EnvironmentFile 从 .env 注入，作为 python-dotenv 的 fallback
 
 # 安全加固（兼容 systemd v249+）
 NoNewPrivileges=yes
