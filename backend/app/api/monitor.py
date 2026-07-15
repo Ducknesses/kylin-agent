@@ -1,9 +1,9 @@
 """监控数据接口
 
 正式接口（最新前后端 API 统一规范 v1.0）：
-  GET /api/monitor/metrics  → 嵌套结构 REST 快照（本地 psutil）
+  GET /api/monitor/metrics  → 嵌套结构 REST 快照（本地 psutil）（需要 READ 权限）
   GET /api/monitor/stream   → 扁平结构 SSE 实时流（本地 psutil）
-  GET /api/monitor/history  → 历史指标数据（通过 MCP 拉取 SQLite 缓存）
+  GET /api/monitor/history  → 历史指标数据（通过 MCP 拉取 SQLite 缓存）（需要 READ 权限）
 """
 import asyncio
 import json
@@ -12,9 +12,11 @@ import os
 from datetime import datetime
 
 import psutil
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
+from app.core.auth import AuthContext, AuthLevel
+from app.dependencies import require_auth
 from app.mcp.client import MCPClient
 
 logger = logging.getLogger(__name__)
@@ -91,16 +93,24 @@ def _collect_flat_metrics() -> dict:
 
 
 async def _mcp_metrics_generator():
-    """SSE 流式生成系统指标（通过 MCP 远程采集）"""
+    """SSE 流式生成系统指标（通过 MCP 远程采集）
+
+    每个事件均包含 mcp_connected 字段，前端可据此判断数据来源：
+      - true  → MCP 连接正常，数据真实有效
+      - false → MCP 连接失败，前端应标记为"已断开"并不再追加 0 值点
+    """
     client = MCPClient()
     _prev_net_mcp = {"bytes_sent": 0, "bytes_recv": 0, "ts": 0.0}
     while True:
         try:
+            mcp_ok = False
             try:
                 result = await client.get_system_metrics()
                 raw = result.get("result", {}) if result.get("ok") else {}
+                mcp_ok = result.get("ok") and bool(raw)
             except Exception:
                 raw = {}
+                mcp_ok = False
 
             cpu_data = raw.get("cpu", {})
             mem_data = raw.get("memory", {})
@@ -145,22 +155,26 @@ async def _mcp_metrics_generator():
                 "net_in_kbps": net_in_kbps,
                 "net_out_kbps": net_out_kbps,
                 "timestamp": datetime.now().isoformat(),
+                "mcp_connected": mcp_ok,
             }
             yield f"data: {json.dumps(data)}\n\n"
         except Exception as e:
             logger.error(f"[Monitor] MCP 获取指标失败: {e}")
-            yield f"data: {json.dumps({'error': '监控数据采集失败'})}\n\n"
+            yield f"data: {json.dumps({'error': '监控数据采集失败', 'mcp_connected': False})}\n\n"
         await asyncio.sleep(3)
 
 
 @router.get("/monitor/metrics")
-async def get_metrics() -> dict:
+async def get_metrics(
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
+) -> dict:
     """系统指标 REST 快照 —— 嵌套结构，无 code/data 包装"""
     return _collect_nested_metrics()
 
 
 @router.get("/monitor/history")
 async def get_metrics_history(
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
     from_ts: float | None = Query(None, description="开始时间戳（Unix秒），默认5分钟前"),
     to_ts: float | None = Query(None, description="结束时间戳（Unix秒），默认当前时间"),
     metrics: str | None = Query(None, description="逗号分隔的指标名: cpu,memory,disk,network,all"),

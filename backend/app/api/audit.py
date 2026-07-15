@@ -9,8 +9,10 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.core.auth import AuthContext, AuthLevel
+from app.dependencies import require_auth
 from app.schemas.models import AuditRecordOut
 from app.services.audit_service import AuditService
 
@@ -26,6 +28,7 @@ _audit_service = AuditService()
 
 @router.get("/audit")
 async def get_audit_logs(
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
     limit: int = Query(50, ge=1, le=200, description="每页条数"),
     offset: int = Query(0, ge=0, description="偏移量"),
     start_date: str | None = Query(None, description="开始时间 ISO-8601"),
@@ -62,5 +65,3 @@ async def get_audit_logs(
     ]
     # v1.1：直接返回数组，不使用 code/data/records 包装
     return [rec.model_dump() for rec in records]
-
-

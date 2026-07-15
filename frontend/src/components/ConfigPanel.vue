@@ -97,7 +97,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
+import http from '@/api/http'
 
 const activeTab = ref('whitelist')
 const whitelist = ref([])
@@ -111,19 +111,18 @@ const permForm = ref({ read: '', op: '', admin: '' })
 
 async function fetchWhitelist() {
   try {
-    const res = await axios.get('/api/config/whitelist')
+    const res = await http.get('/config/whitelist')
     whitelist.value = res.data.commands || []
     blockedPatterns.value = (res.data.blocked_patterns || []).map(p => ({ pattern: p }))
   } catch (e) {
     console.error('拉取白名单失败', e)
     ElMessage.error('拉取白名单配置失败，请检查后端服务是否正常运行')
-    // 不再用硬编码数据覆盖本地状态，避免用户配置丢失
   }
 }
 
 async function saveWhitelist() {
   try {
-    await axios.put('/api/config/whitelist', {
+    await http.put('/config/whitelist', {
       commands: whitelist.value,
       blocked_patterns: blockedPatterns.value.map(p => p.pattern)
     })

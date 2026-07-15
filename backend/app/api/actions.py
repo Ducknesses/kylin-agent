@@ -1,13 +1,14 @@
 """Action API —— 修复操作执行与确认接口
 
-POST /api/actions/execute  — 执行/预检
-POST /api/actions/confirm  — approve/reject 确认
+POST /api/actions/execute  — 执行/预检（需要 OP 权限）
+POST /api/actions/confirm  — approve/reject 确认（需要 OP 权限）
 """
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
-from app.dependencies import action_service
+from app.core.auth import AuthContext, AuthLevel
+from app.dependencies import action_service, require_auth
 from app.schemas.action import (
     ActionConfirmRequest,
     ActionConfirmResponse,
@@ -36,7 +37,10 @@ def _raise_for_result(result) -> None:
 
 
 @router.post("/actions/execute", response_model=ActionExecuteResponse)
-async def execute_action(req: ActionExecuteRequest):
+async def execute_action(
+    req: ActionExecuteRequest,
+    auth: AuthContext = Depends(require_auth(AuthLevel.OP)),
+):
     result = await action_service.execute(req.session_id, req.option_id)
     _raise_for_result(result)
 
@@ -49,7 +53,10 @@ async def execute_action(req: ActionExecuteRequest):
 
 
 @router.post("/actions/confirm", response_model=ActionConfirmResponse)
-async def confirm_action(req: ActionConfirmRequest):
+async def confirm_action(
+    req: ActionConfirmRequest,
+    auth: AuthContext = Depends(require_auth(AuthLevel.OP)),
+):
     result = await action_service.decide_confirmation(req.session_id, req.confirm_id, req.decision)
     _raise_for_result(result)
 

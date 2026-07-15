@@ -43,7 +43,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import axios from 'axios'
+import http from '@/api/http'
 
 const auditList = ref([])
 const filterLevel = ref('')
@@ -55,7 +55,7 @@ const filteredList = computed(() => {
 
 async function fetchAudit() {
   try {
-    const res = await axios.get('/api/audit?limit=50')
+    const res = await http.get('/audit', { params: { limit: 50 } })
     const body = res.data
     // 兼容新旧格式：新格式 { records, total }，旧格式是数组
     if (Array.isArray(body)) {

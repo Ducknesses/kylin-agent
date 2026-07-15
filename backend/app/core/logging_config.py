@@ -13,6 +13,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Callable, Tuple, Union
+from typing import Any, Tuple
 
 
 # ============================================================
@@ -112,7 +113,7 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
     @staticmethod
-    def _redact(value) -> str:
+    def _redact(value) -> Any:
         """对任意值进行脱敏处理"""
         if not isinstance(value, str):
             return value

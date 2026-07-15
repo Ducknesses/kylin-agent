@@ -52,6 +52,8 @@ class Settings:
 
     # Token 认证（空字符串表示不启用认证，向后兼容）
     API_TOKEN: str = os.getenv("API_TOKEN", "")
+    # 多 token 分级模式：read:tok1,op:tok2,admin:tok3（API_TOKENS 优先于 API_TOKEN）
+    API_TOKENS: str = os.getenv("API_TOKENS", "")
 
 # Deprecated: use LLM_ENABLED instead. Kept for backward compatibility only.
     USE_REAL_LLM: bool = os.getenv("USE_REAL_LLM", "false").lower() == "true"
