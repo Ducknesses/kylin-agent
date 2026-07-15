@@ -40,8 +40,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { FullScreen, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
-import axios from 'axios'
-import { useWsStore } from '@/stores/wsStore'
+import http from '@/api/http'
 
 // 图表配置常量（静态数据，大写命名约定表示常量）
 const CHART_LIST = [
@@ -213,7 +212,7 @@ function connectSse() {
 
 async function fetchMetrics() {
   try {
-    const res = await axios.get('/api/monitor/metrics', { timeout: 5000 })
+    const res = await http.get('/monitor/metrics', { timeout: 5000 })
     const data = res.data
     if (data.cpu) {
       appendDataPoint({
@@ -253,8 +252,7 @@ async function fetchHistory(fromMs, toMs) {
   try {
     const fromTs = Math.floor(fromMs / 1000)
     const toTs = Math.floor(toMs / 1000)
-    const apiBase = useWsStore().apiBaseUrl
-    const res = await axios.get(`${apiBase}/api/monitor/history`, {
+    const res = await http.get('/monitor/history', {
       params: { from_ts: fromTs, to_ts: toTs },
       timeout: 8000
     })

@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
+from app.core.security import TokenStore
 from app.dependencies import fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
@@ -48,8 +49,14 @@ async def chat_ws(websocket: WebSocket, session_id: str):
     3. chat → 安全检测 → risk_alert / Orchestrator.handle_chat
     4. confirm → 处理中危确认
     5. 全程记录审计日志
+
+    认证：connect() 内部校验 ?token= 参数，认证失败时自动 close WebSocket。
     """
-    await manager.connect(websocket, session_id)
+    auth = await manager.connect(websocket, session_id)
+
+    # 如果 token 已配置但认证失败，connect() 已 close WebSocket，直接返回
+    if not auth.is_authenticated and TokenStore.singleton().is_configured():
+        return
 
     try:
         while True:
