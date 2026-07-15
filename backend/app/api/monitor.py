@@ -93,16 +93,24 @@ def _collect_flat_metrics() -> dict:
 
 
 async def _mcp_metrics_generator():
-    """SSE 流式生成系统指标（通过 MCP 远程采集）"""
+    """SSE 流式生成系统指标（通过 MCP 远程采集）
+
+    每个事件均包含 mcp_connected 字段，前端可据此判断数据来源：
+      - true  → MCP 连接正常，数据真实有效
+      - false → MCP 连接失败，前端应标记为"已断开"并不再追加 0 值点
+    """
     client = MCPClient()
     _prev_net_mcp = {"bytes_sent": 0, "bytes_recv": 0, "ts": 0.0}
     while True:
         try:
+            mcp_ok = False
             try:
                 result = await client.get_system_metrics()
                 raw = result.get("result", {}) if result.get("ok") else {}
+                mcp_ok = result.get("ok") and bool(raw)
             except Exception:
                 raw = {}
+                mcp_ok = False
 
             cpu_data = raw.get("cpu", {})
             mem_data = raw.get("memory", {})
@@ -147,11 +155,12 @@ async def _mcp_metrics_generator():
                 "net_in_kbps": net_in_kbps,
                 "net_out_kbps": net_out_kbps,
                 "timestamp": datetime.now().isoformat(),
+                "mcp_connected": mcp_ok,
             }
             yield f"data: {json.dumps(data)}\n\n"
         except Exception as e:
             logger.error(f"[Monitor] MCP 获取指标失败: {e}")
-            yield f"data: {json.dumps({'error': '监控数据采集失败'})}\n\n"
+            yield f"data: {json.dumps({'error': '监控数据采集失败', 'mcp_connected': False})}\n\n"
         await asyncio.sleep(3)
 
 
