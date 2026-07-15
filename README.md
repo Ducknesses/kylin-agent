@@ -35,6 +35,7 @@
 kylin-agent/
 ├── backend/                     # Python + FastAPI 后端 (控制节点)
 │   ├── config.py                # 全局配置 (环境变量驱动)
+│   ├── diagnose.py              # 系统诊断工具 (CLI)
 │   ├── run.py                   # uvicorn 启动入口
 │   ├── requirements.txt         # Python 依赖
 │   ├── .env.example             # 环境变量模板
@@ -331,6 +332,77 @@ sudo ./deploy/mcp-server/uninstall.sh
 | 前端 | Vue 3 + Vite + Pinia |
 | 部署 | systemd + venv + Nginx (原生) |
 | 目标平台 | 麒麟 V11 + LoongArch |
+
+## 诊断工具
+
+Backend 提供了独立 CLI 诊断脚本 `backend/diagnose.py`，可离线检测后端环境，**不依赖后端 API 服务**。
+
+### 功能
+
+| 检测项 | 说明 |
+|--------|------|
+| 依赖检测 | 解析 `requirements.txt`，检查每个包是否已安装，缺失项给出安装建议 |
+| 监听地址 | 查看当前 `APP_HOST:APP_PORT` 配置，支持交互式修改 `.env` |
+| 启动状态 | 端口监听检测、`/health` 端点探测、Redis 连通性、SQLite 可读写性、systemd 服务状态 |
+| 网络连通性 | MCP Server、DeepSeek API、前端 Nginx 的 HTTP 可达性检测，含延迟测量和故障建议 |
+
+### 使用方式
+
+```bash
+cd backend
+
+# 完整检测（含依赖检测 + 交互式修改监听地址）
+python diagnose.py
+
+# 快速检测（跳过依赖检测）
+python diagnose.py --quick
+
+# 非交互模式（不提示修改监听地址）
+python diagnose.py --non-interactive
+
+# 快速 + 非交互（适合 CI/脚本调用）
+python diagnose.py --quick --non-interactive
+```
+
+### 输出示例
+
+```
+  Kylin Agent Backend 诊断工具
+
+[1/4] 依赖检测
+  ✓ fastapi (0.110.0)
+  ✓ uvicorn (0.29.0)
+  ...
+
+[2/4] 监听地址
+  当前配置: 0.0.0.0:8000
+
+[3/4] Backend 启动状态
+  ✓ 端口监听 — 端口 8000 正在监听
+  ✓ Health API — /health 返回 200
+  ✗ Redis — Redis 不可达 (localhost:6379)
+    → 建议: systemctl start redis
+  ✓ SQLite — audit.db 可读写
+  ✗ Systemd 服务 — systemd 服务状态: inactive
+    → 建议: systemctl start kylin-agent
+
+[4/4] 网络连通性
+  ✗ MCP Server (http://192.168.1.37:8001) — HTTP 502 Bad Gateway
+  ✓ DeepSeek API (https://api.deepseek.com) — 130ms
+  ✓ 前端 (http://127.0.0.1:80) — 6ms
+
+  诊断完成: 通过 6/9
+  失败: 3
+```
+
+### 部署后使用
+
+生产环境部署 Backend 后，可直接使用诊断脚本排查问题：
+
+```bash
+cd /opt/kylin-agent/backend
+python diagnose.py --non-interactive
+```
 
 ## 开发
 
