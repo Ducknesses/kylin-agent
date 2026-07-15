@@ -18,12 +18,12 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.llm_client import (
-    LLMClient, LLMResponse, DeepSeekProvider,
+    LLMClient, LLMResponse, DeepSeekProvider, BaseProvider,
     LocalOpenAICompatibleProvider, _sanitize_error, _fail_response,
 )
 
 
-class MockProvider:
+class MockProvider(BaseProvider):
     """可控制的 mock provider，用于注入 LLMClient"""
     def __init__(self, response=None, should_raise=None):
         self.response = response
@@ -68,7 +68,7 @@ def test_llm_disabled_fallback(monkeypatch):
     resp = asyncio.run(_run())
     assert resp.ok is False
     assert resp.fallback_used is True
-    assert "未启用" in resp.error
+    assert "未启用" in (resp.error or "")
 
 
 # ── mock provider 成功 ─────────────────────────────────────────────
@@ -111,7 +111,7 @@ def test_provider_exception_fallback(monkeypatch):
     resp = asyncio.run(_run())
     assert resp.ok is False
     assert resp.fallback_used is True
-    assert "回退" in resp.error or "异常" in resp.error
+    assert "回退" in (resp.error or "") or "异常" in (resp.error or "")
 
 
 def test_provider_returns_failure(monkeypatch):
@@ -136,7 +136,7 @@ def test_deepseek_provider_no_key(monkeypatch):
     resp = asyncio.run(_run())
     assert resp.ok is False
     assert resp.fallback_used is True
-    assert "未配置" in resp.error
+    assert "未配置" in (resp.error or "")
 
 
 def test_deepseek_provider_success(monkeypatch):
@@ -168,7 +168,7 @@ def test_deepseek_provider_timeout(monkeypatch):
     resp = asyncio.run(_run())
     assert resp.ok is False
     assert resp.fallback_used is True
-    assert "超时" in resp.error
+    assert "超时" in (resp.error or "")
 
 
 def test_deepseek_provider_http_error(monkeypatch):
@@ -188,7 +188,7 @@ def test_deepseek_provider_http_error(monkeypatch):
     resp = asyncio.run(_run())
     assert resp.ok is False
     assert resp.fallback_used is True
-    assert "500" in resp.error
+    assert "500" in (resp.error or "")
 
 
 # ── LocalOpenAICompatibleProvider ──────────────────────────────────
@@ -222,7 +222,7 @@ def test_local_provider_connect_error(monkeypatch):
     resp = asyncio.run(_run())
     assert resp.ok is False
     assert resp.fallback_used is True
-    assert "未就绪" in resp.error
+    assert "未就绪" in (resp.error or "")
 
 
 # ── 敏感信息脱敏 ───────────────────────────────────────────────────
@@ -251,7 +251,7 @@ class TestSanitizeError:
 
     def test_fail_response_sanitizes(self):
         resp = _fail_response("API error: api_key=sk-leaked-key-here-12345", "deepseek", "v4")
-        assert "sk-" not in resp.error
+        assert "sk-" not in (resp.error or "")
         assert resp.ok is False
         assert resp.fallback_used is True
 

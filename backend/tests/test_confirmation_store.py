@@ -104,7 +104,11 @@ class TestConfirmationStore:
         store._clock = lambda: t0
         store.create_or_get("s1", "fix_a1b2c3d4", "t1")
         store._clock = lambda: t0 + timedelta(seconds=120)
-        r = store.claim_approve("s1", store.get("s1", store.get_by_option("s1", "fix_a1b2c3d4").confirm_id).confirm_id)
+        opt_conf = store.get_by_option("s1", "fix_a1b2c3d4")
+        assert opt_conf is not None
+        conf = store.get("s1", opt_conf.confirm_id)
+        assert conf is not None
+        r = store.claim_approve("s1", conf.confirm_id)
         assert r.result == "expired"
 
     def test_reject_expired(self):

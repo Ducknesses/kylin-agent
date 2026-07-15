@@ -81,6 +81,7 @@ class TestSaveAndGet:
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("fix_9dd4e461", title="X")])
         stored = store.get_option("s1", "fix_9dd4e461")
+        assert stored is not None
         assert stored.option.title == "X"
 
     def test_get_unknown_returns_none(self):
@@ -188,14 +189,17 @@ class TestDeepCopy:
         # 修改原对象
         opt.title = "被篡改的标题"  # type: ignore[attr-defined]
         stored = store.get_option("s1", "fix_2bb225ce")
+        assert stored is not None
         assert stored.option.title == "原始标题"
 
     def test_get_returned_modify_no_effect(self):
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         stored1 = store.get_option("s1", "fix_2bb225ce")
+        assert stored1 is not None
         stored1.option.title = "外部修改"  # type: ignore[attr-defined]
         stored2 = store.get_option("s1", "fix_2bb225ce")
+        assert stored2 is not None
         assert stored2.option.title != stored1.option.title
 
 
@@ -220,6 +224,7 @@ class TestTTL:
         # 快进 61 秒
         store._clock = _fixed_clock(t0 + timedelta(seconds=61))
         stored = store.get_option("s1", "fix_2bb225ce")
+        assert stored is not None
         assert stored.status == "expired"
 
     def test_expired_cannot_claim(self):
@@ -266,7 +271,8 @@ class TestStateMachine:
         assert claimed is not None
         assert claimed.status == "executing"
         # 确认状态已持久化
-        assert store.get_option("s1", "fix_2bb225ce").status == "executing"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "executing"  # type: ignore[reportOptionalMemberAccess]
 
     def test_executing_cannot_claim_again(self):
         store = FixOptionStore()
@@ -309,13 +315,15 @@ class TestStateMachine:
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         store.claim_for_execution("s1", "fix_2bb225ce")
         assert store.mark_executed("s1", "fix_2bb225ce") is True
-        assert store.get_option("s1", "fix_2bb225ce").status == "executed"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "executed"  # type: ignore[reportOptionalMemberAccess]
 
     def test_mark_executed_from_pending_fails(self):
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         assert store.mark_executed("s1", "fix_2bb225ce") is False
-        assert store.get_option("s1", "fix_2bb225ce").status == "pending"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "pending"  # type: ignore[reportOptionalMemberAccess]
 
     # ── mark_failed ──
 
@@ -324,7 +332,8 @@ class TestStateMachine:
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         store.claim_for_execution("s1", "fix_2bb225ce")
         assert store.mark_failed("s1", "fix_2bb225ce") is True
-        assert store.get_option("s1", "fix_2bb225ce").status == "failed"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "failed"  # type: ignore[reportOptionalMemberAccess]
 
     def test_mark_failed_from_pending_fails(self):
         store = FixOptionStore()
@@ -337,14 +346,16 @@ class TestStateMachine:
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         assert store.mark_blocked("s1", "fix_2bb225ce") is True
-        assert store.get_option("s1", "fix_2bb225ce").status == "blocked"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "blocked"  # type: ignore[reportOptionalMemberAccess]
 
     def test_mark_blocked_from_confirm_required(self):
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         store.mark_confirm_required("s1", "fix_2bb225ce")
         assert store.mark_blocked("s1", "fix_2bb225ce") is True
-        assert store.get_option("s1", "fix_2bb225ce").status == "blocked"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "blocked"  # type: ignore[reportOptionalMemberAccess]
 
     def test_mark_blocked_from_executing_fails(self):
         store = FixOptionStore()
@@ -358,7 +369,8 @@ class TestStateMachine:
         store = FixOptionStore()
         store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
         assert store.mark_confirm_required("s1", "fix_2bb225ce") is True
-        assert store.get_option("s1", "fix_2bb225ce").status == "confirm_required"
+        assert store.get_option("s1", "fix_2bb225ce") is not None
+        assert store.get_option("s1", "fix_2bb225ce").status == "confirm_required"  # type: ignore[reportOptionalMemberAccess]
 
     # ── 未知 option ──
 
