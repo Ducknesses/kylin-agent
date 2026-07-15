@@ -89,7 +89,7 @@ def check_command_permission(cmd: str, user_level: str) -> Dict:
     return {"allowed": False, "reason": "命令不在当前权限白名单中"}
 
 
-def get_user_level(auth: Optional[AuthContext] = None, user_id: str = "") -> str:
+def get_user_level(user_id: str = "", *, auth: Optional[AuthContext] = None) -> str:
     """
     获取用户权限等级。
 
@@ -98,11 +98,12 @@ def get_user_level(auth: Optional[AuthContext] = None, user_id: str = "") -> str
     2. 回退到 READ（未认证 / 匿名）
 
     参数：
-    - auth: 认证上下文（由 require_auth 中间件注入）
     - user_id: 保留参数，兼容旧接口
+    - auth: 认证上下文（由 require_auth 中间件注入），仅限关键字参数
     """
     if auth is not None and auth.is_authenticated:
         return auth.level.value
 
     # 回退：匿名用户默认 READ
     return Permission.READ
+

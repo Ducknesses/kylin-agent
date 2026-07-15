@@ -48,6 +48,7 @@ class ConnectionManager:
                 logger.warning(
                     f"[Connection] WS 认证失败 session={session_id}, ip={client_ip}"
                 )
+                await websocket.accept()
                 await websocket.close(code=4001, reason="认证失败：令牌无效或缺失")
                 return AuthContext.anonymous(client_ip)
         else:

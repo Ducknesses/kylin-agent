@@ -2,6 +2,7 @@
 import logging
 import re
 import hashlib
+import threading
 from typing import Dict, Optional
 
 from config import settings
@@ -144,6 +145,7 @@ class TokenStore:
     """
 
     _instance: Optional["TokenStore"] = None
+    _lock = threading.Lock()
 
     def __init__(self) -> None:
         self._tokens: dict[str, AuthLevel] = {}
@@ -154,7 +156,9 @@ class TokenStore:
     @classmethod
     def singleton(cls) -> "TokenStore":
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     # ── 环境变量加载 ──

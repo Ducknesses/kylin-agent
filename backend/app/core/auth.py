@@ -24,38 +24,53 @@ class AuthLevel(str, Enum):
 
     @staticmethod
     def from_string(raw: str, default: Optional["AuthLevel"] = None) -> "AuthLevel":
-        """大小写不敏感转换，未知值回退到 default"""
+        """大小写不敏感转换，未知值回退到 default
+
+        支持两种格式（大小写不敏感）：
+          - value 格式：如 "agent-admin" → ADMIN
+          - name 格式： 如 "ADMIN"       → ADMIN
+        """
         raw_lower = raw.strip().lower()
         for level in AuthLevel:
+            # 同时匹配 value（如 "agent-admin"）和 name（如 "ADMIN"）
             if level.value.lower() == raw_lower or raw_lower == level.name.lower():
                 return level
-        return default or AuthLevel.READ
+        if default is not None:
+            return default
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[Auth] 未识别的权限等级: '{raw}'，回退到 ANONYMOUS")
+        return AuthLevel.ANONYMOUS
 
     # ── 自定义比较（按枚举定义顺序，不是按字符串值） ──
 
     def _order(self) -> int:
-        """返回枚举成员的定义顺序索引"""
-        return list(AuthLevel).index(self)
+        """返回枚举成员的定义顺序索引（从缓存的 _AUTH_LEVEL_ORDER 字典 O(1) 查找）"""
+        return _AUTH_LEVEL_ORDER[self]
 
     def __gt__(self, other: "AuthLevel") -> bool:
         if not isinstance(other, AuthLevel):
             return NotImplemented
-        return self._order() > other._order()
+        return _AUTH_LEVEL_ORDER[self] > _AUTH_LEVEL_ORDER[other]
 
     def __ge__(self, other: "AuthLevel") -> bool:
         if not isinstance(other, AuthLevel):
             return NotImplemented
-        return self._order() >= other._order()
+        return _AUTH_LEVEL_ORDER[self] >= _AUTH_LEVEL_ORDER[other]
 
     def __lt__(self, other: "AuthLevel") -> bool:
         if not isinstance(other, AuthLevel):
             return NotImplemented
-        return self._order() < other._order()
+        return _AUTH_LEVEL_ORDER[self] < _AUTH_LEVEL_ORDER[other]
 
     def __le__(self, other: "AuthLevel") -> bool:
         if not isinstance(other, AuthLevel):
             return NotImplemented
-        return self._order() <= other._order()
+        return _AUTH_LEVEL_ORDER[self] <= _AUTH_LEVEL_ORDER[other]
+
+
+# 缓存枚举成员 → 排序索引映射（模块级，避免每次比较都创建新 list）
+_AUTH_LEVEL_ORDER: dict["AuthLevel", int] = {member: idx for idx, member in enumerate(AuthLevel)}
 
 
 @dataclass
