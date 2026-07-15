@@ -171,6 +171,63 @@ class TestRedaction:
         assert RED in c and "secretkey123" not in c
 
 
+class TestUrlRedaction:
+    """URL 查询参数脱敏：? 和 & 分隔符必须保留"""
+
+    def test_url_question_mark_separator_preserved(self, tmp_path):
+        """?token=secret&name=test → ?token=[REDACTED]&name=test"""
+        ld = tmp_path / "logs"
+        setup_logging(log_dir=str(ld), log_file="url1.log", log_to_file=True, backend_dir=tmp_path)
+        logging.getLogger("t").info("/path?" + "token=" + "secret123" + "&name=test")
+        c = _read_log_file(ld / "url1.log")
+        assert RED in c
+        assert "secret123" not in c
+        assert "?token=" in c      # ? separator preserved
+        assert "&name=test" in c   # other params untouched
+
+    def test_url_ampersand_separator_preserved(self, tmp_path):
+        """&api_key=secret → &api_key=[REDACTED]"""
+        ld = tmp_path / "logs"
+        setup_logging(log_dir=str(ld), log_file="url2.log", log_to_file=True, backend_dir=tmp_path)
+        logging.getLogger("t").info("/path?a=1&" + "api_key=" + "key" + "secret")
+        c = _read_log_file(ld / "url2.log")
+        assert RED in c
+        assert "keysecret" not in c
+        assert "&api_key=" in c    # & separator preserved
+        assert "?a=1" in c
+
+    def test_url_case_insensitive_key(self, tmp_path):
+        """?TOKEN=secret → ?TOKEN=[REDACTED] (case-insensitive)"""
+        ld = tmp_path / "logs"
+        setup_logging(log_dir=str(ld), log_file="url3.log", log_to_file=True, backend_dir=tmp_path)
+        logging.getLogger("t").info("/path?" + "TOKEN=" + "SECRET" + "VAL")
+        c = _read_log_file(ld / "url3.log")
+        assert RED in c
+        assert "SECRETVAL" not in c
+        assert "?TOKEN=" in c
+
+    def test_url_sensitive_param_middle(self, tmp_path):
+        """Sensitive param in middle position: ?a=1&token=x&b=2"""
+        ld = tmp_path / "logs"
+        setup_logging(log_dir=str(ld), log_file="url4.log", log_to_file=True, backend_dir=tmp_path)
+        logging.getLogger("t").info("/x?a=1&" + "token=" + "mid" + "val" + "&b=2")
+        c = _read_log_file(ld / "url4.log")
+        assert RED in c
+        assert "midval" not in c
+        assert "?a=1" in c
+        assert "&b=2" in c
+
+    def test_url_sensitive_param_end(self, tmp_path):
+        """Sensitive param at end: ?name=test&token=secret"""
+        ld = tmp_path / "logs"
+        setup_logging(log_dir=str(ld), log_file="url5.log", log_to_file=True, backend_dir=tmp_path)
+        logging.getLogger("t").info("/y?name=test&" + "token=" + "end" + "value")
+        c = _read_log_file(ld / "url5.log")
+        assert RED in c
+        assert "endvalue" not in c
+        assert "?name=test" in c
+
+
 class TestIdempotency:
     def test_no_dup_handlers(self, tmp_path):
         setup_logging(log_to_file=False, backend_dir=tmp_path)

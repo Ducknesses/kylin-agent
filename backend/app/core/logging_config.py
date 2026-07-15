@@ -12,7 +12,7 @@ import logging.handlers
 import re
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
 
 
 # ============================================================
@@ -37,15 +37,16 @@ _SENSITIVE_KEYS: Tuple[str, ...] = (
 _REDACTED = "[REDACTED]"
 
 # 匹配模式列表: (正则, 替换文本)
-_SENSITIVE_PATTERNS: List[Tuple[re.Pattern, str]] = []
+_SENSITIVE_PATTERNS: Tuple[Tuple[re.Pattern, str], ...] = ()
 
 
-def _build_patterns() -> List[Tuple[re.Pattern, str]]:
-    """构建敏感信息匹配正则列表（延迟编译，避免模块级开销）"""
+def _build_patterns() -> Tuple[Tuple[re.Pattern, str], ...]:
+    """构建并缓存敏感信息匹配正则列表（模块级一次性构建，并发安全）"""
+    global _SENSITIVE_PATTERNS
     if _SENSITIVE_PATTERNS:
         return _SENSITIVE_PATTERNS
 
-    patterns: List[Tuple[re.Pattern, str]] = []
+    patterns: list[Tuple[re.Pattern, str]] = []
 
     # Authorization: Bearer <value> / Authorization=<value> / Bearer <value>
     patterns.append((re.compile(r"Authorization\s*[:=]\s*Bearer\s+\S+", re.IGNORECASE),
@@ -55,10 +56,10 @@ def _build_patterns() -> List[Tuple[re.Pattern, str]]:
 
     # KEY=value 模式（URL 查询参数 / 环境变量风格）
     for key in _SENSITIVE_KEYS:
-        # key=value (不区分大小写)
+        # key=value (不区分大小写，保留原 key 大小写)
         patterns.append((
-            re.compile(rf"{re.escape(key)}\s*=\s*\S+", re.IGNORECASE),
-            f"{key}={_REDACTED}",
+            re.compile(rf"({re.escape(key)})\s*=\s*[^\s&]+", re.IGNORECASE),
+            lambda m, k=key: f"{m.group(1)}={_REDACTED}",
         ))
         # key: value (JSON 风格，双引号)
         patterns.append((
@@ -74,15 +75,9 @@ def _build_patterns() -> List[Tuple[re.Pattern, str]]:
     # sk- 前缀密钥 (OpenAI/DeepSeek 风格: sk-xxxxxxxx)
     patterns.append((re.compile(r"\bsk-[a-zA-Z0-9_-]{20,}\b"), f"sk-{_REDACTED}"))
 
-    # URL 查询参数中的敏感 key（token=X&api_key=Y）
-    for key in ("token", "api_key", "apikey", "password", "secret"):
-        # ?key=value 或 &key=value
-        patterns.append((
-            re.compile(rf"[?&]{re.escape(key)}=[^&\s]+", re.IGNORECASE),
-            f"&{key}={_REDACTED}",
-        ))
 
-    _SENSITIVE_PATTERNS.extend(patterns)
+
+    _SENSITIVE_PATTERNS = tuple(patterns)
     return _SENSITIVE_PATTERNS
 
 
@@ -107,7 +102,9 @@ class SensitiveDataFilter(logging.Filter):
                 except (TypeError, ValueError, KeyError):
                     formatted = str(record.msg)
                 record.msg = self._redact(formatted)
-                record.args = None  # 清空避免二次格式化
+                # 清空 args：getMessage 已完成参数插值，msg 已替换为脱敏后的完整文本；
+                # 清空是为避免后续 Handler 二次格式化和敏感值绕过
+                record.args = None
             else:
                 record.msg = self._redact(record.msg)
         except Exception:
@@ -185,7 +182,7 @@ def setup_logging(
     log_to_file: bool = True,
     log_dir: str = "./logs",
     log_file: str = "backend.log",
-    log_backup_count: int = 14,
+    log_backup_count: int | str = 14,
     backend_dir: Path | None = None,
 ) -> logging.Logger:
     """统一日志初始化（幂等）。
@@ -221,12 +218,12 @@ def setup_logging(
     if not log_file or not log_file.strip():
         log_file = "backend.log"
 
-    # 校验 LOG_BACKUP_COUNT
+    # 校验 LOG_BACKUP_COUNT：接受 int / 数字字符串 / None，非法/负数回退 14
     try:
         backup_count = int(log_backup_count)
-        if backup_count < 0:
-            backup_count = 14
     except (ValueError, TypeError):
+        backup_count = 14
+    if backup_count < 0:
         backup_count = 14
 
     # 获取 root logger

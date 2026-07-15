@@ -16,7 +16,7 @@ setup_logging(
     log_to_file=settings.LOG_TO_FILE,
     log_dir=settings.LOG_DIR,
     log_file=settings.LOG_FILE,
-    log_backup_count=int(settings.LOG_BACKUP_COUNT) if settings.LOG_BACKUP_COUNT.isdigit() else 14,
+    log_backup_count=settings.LOG_BACKUP_COUNT,
 )
 logger = logging.getLogger(__name__)
 
