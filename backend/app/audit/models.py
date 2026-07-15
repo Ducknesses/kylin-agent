@@ -36,6 +36,29 @@ CREATE TABLE IF NOT EXISTS app_config (
 
 CREATE INDEX IF NOT EXISTS idx_trace_id ON audit_chain(trace_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_chain(timestamp);
+
+-- chat_sessions: 对话会话元数据
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '新会话',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- chat_messages: 聊天消息持久化
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES chat_sessions(id),
+    trace_id TEXT,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+    ON chat_messages(session_id, created_at);
 """
 
 

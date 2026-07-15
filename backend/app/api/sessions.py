@@ -4,17 +4,18 @@
   GET  /api/sessions                       → 会话列表（需要 READ 权限）
   POST /api/sessions                       → 创建会话（需要 READ 权限）
   GET  /api/sessions/{session_id}/messages → 会话历史消息（需要 READ 权限）
+
+数据源：SQLite（通过 MessageRepository），未来可替换为 PostgreSQL。
 """
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import AuthContext, AuthLevel
-from app.core.redis_client import get_session, list_sessions, set_session
-from app.dependencies import require_auth
-from app.schemas.models import SessionCreate, SessionOut, SessionMessagesOut
+from app.dependencies import message_repository, require_auth
+from app.schemas.models import SessionCreate, SessionMessage, SessionMessagesOut, SessionOut
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,8 +25,8 @@ router = APIRouter()
 async def get_sessions(
     auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
 ) -> list[SessionOut]:
-    """获取所有会话列表（从 Redis 读取）"""
-    sessions = list_sessions()
+    """获取所有会话列表（从 SQLite 读取）"""
+    sessions = await message_repository.list_sessions()
     return [
         SessionOut(
             id=s["id"],
@@ -41,16 +42,11 @@ async def create_session(
     body: SessionCreate,
     auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
 ) -> SessionOut:
-    """创建新会话并存入 Redis"""
+    """创建新会话并存入 SQLite"""
     sid = str(uuid.uuid4())[:12]
-    now = datetime.now().isoformat()
-    session_data = {
-        "id": sid,
-        "title": body.title,
-        "created_at": now,
-    }
-    set_session(sid, session_data, expire=3600)
-    logger.info(f"[Session] 创建会话并存入 Redis: {sid} - {body.title}")
+    now = datetime.now(timezone.utc).isoformat()
+    await message_repository.create_session(sid, body.title)
+    logger.info(f"[Session] 创建会话: {sid} - {body.title}")
     return SessionOut(id=sid, title=body.title, created_at=now)
 
 
@@ -62,10 +58,39 @@ async def get_session_messages(
     """
     获取会话历史消息。
 
-    当前阶段消息持久化尚未实现。
-    已存在会话返回空列表；会话不存在时返回 404。
+    从 SQLite 读取持久化的消息记录，重建为前端可消费的格式。
     """
-    session = get_session(session_id)
+    session = await message_repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return SessionMessagesOut(session_id=session_id, messages=[])
+
+    raw_messages = await message_repository.get_messages(session_id)
+
+    # 组装消息：user 消息直接映射，assistant 消息按 message_type 分组
+    messages: list[SessionMessage] = []
+    for raw in raw_messages:
+        role = raw.get("role", "assistant")
+        content = raw.get("content", "")
+        created_at = raw.get("created_at", "")
+        msg_meta = raw.get("metadata")
+
+        # 对 assistant 的 tool_call 消息，展开 metadata
+        tool_calls = None
+        if raw.get("message_type") == "tool_call" and msg_meta:
+            tool_calls = [{
+                "tool": msg_meta.get("tool", ""),
+                "tool_call_id": msg_meta.get("tool_call_id", ""),
+                "params": msg_meta.get("params"),
+                "ok": msg_meta.get("ok"),
+                "result": msg_meta.get("result"),
+                "error": msg_meta.get("error"),
+            }]
+
+        messages.append(SessionMessage(
+            role=role,
+            content=content,
+            timestamp=created_at,
+            tool_calls=tool_calls,
+        ))
+
+    return SessionMessagesOut(session_id=session_id, messages=messages)

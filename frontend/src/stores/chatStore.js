@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import http from '@/api/http'
 
 function generateId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -15,6 +16,8 @@ export const useChatStore = defineStore('chat', () => {
   const currentSessionId = ref('')
   // 消息记录，按 sessionId 分组
   const messagesMap = ref(new Map())
+  // 历史加载状态
+  const historyLoaded = ref(new Set())
 
   const currentMessages = computed(() => {
     if (!currentSessionId.value) return []
@@ -32,6 +35,28 @@ export const useChatStore = defineStore('chat', () => {
     })
     messagesMap.value.set(id, [])
     return id
+  }
+
+  // 从后端加载会话历史消息
+  async function fetchHistory(sessionId) {
+    if (historyLoaded.value.has(sessionId)) return
+    try {
+      const { data } = await http.get(`/sessions/${sessionId}/messages`)
+      if (data.messages && data.messages.length > 0) {
+        const msgs = data.messages.map(m => ({
+          role: m.role,
+          type: m.tool_calls ? 'tool_call' : 'text',
+          content: m.content,
+          timestamp: m.timestamp,
+          tool_calls: m.tool_calls || undefined,
+        }))
+        messagesMap.value.set(sessionId, msgs)
+      }
+      historyLoaded.value.add(sessionId)
+    } catch (e) {
+      // 会话不存在或无消息时静默
+      console.debug('[ChatStore] 历史加载: 无已有消息或会话不存在', sessionId)
+    }
   }
 
   // 切换会话
@@ -84,6 +109,7 @@ export const useChatStore = defineStore('chat', () => {
     currentSessionId,
     currentMessages,
     createSession,
+    fetchHistory,
     switchSession,
     addMessage,
     appendToLastAssistant,

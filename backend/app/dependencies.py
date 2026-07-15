@@ -58,6 +58,11 @@ fix_planner = FixPlannerAgent(
     llm_client=llm_client,
 )
 
+# MessageRepository —— 聊天消息持久化（SQLite，未来可替换为 PostgreSQL）
+from app.repositories import SQLiteMessageRepository
+
+message_repository = SQLiteMessageRepository()
+
 
 # ── 认证依赖链 ─────────────────────────────────────────────────────
 # 多通道 token 提取 + 验证 + 权限门控
