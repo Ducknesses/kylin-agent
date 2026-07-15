@@ -1,4 +1,7 @@
 #!/bin/bash
+# DEPRECATED: 此脚本已迁移到 deploy/mcp-server/install.sh
+# 请使用: sudo ./deploy/mcp-server/install.sh
+# 本文件保留仅用于向后兼容，后续版本将移除。
 # ============================================================
 # MCP Server 一键安装脚本（麒麟 V11 + LoongArch）
 # ============================================================
