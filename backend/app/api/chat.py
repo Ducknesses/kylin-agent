@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
+from app.core.auth import AuthContext, AuthLevel
 from app.core.security import TokenStore
 from app.dependencies import fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository
 from app.services.connection_manager import ConnectionManager
@@ -58,10 +59,14 @@ async def chat_ws(websocket: WebSocket, session_id: str):
     if not auth.is_authenticated and TokenStore.singleton().is_configured():
         return
 
+    # 从 AuthContext 解析角色字符串，贯穿后续所有操作
+    # 映射规则：ADMIN→admin, OP→operator, READ/ANONYMOUS→viewer
+    role = _resolve_role(auth)
+
     try:
         while True:
             raw = await websocket.receive_text()
-            await _handle_message(websocket, session_id, raw)
+            await _handle_message(websocket, session_id, raw, role)
     except WebSocketDisconnect:
         logger.info(f"[WebSocket] 会话断开: {session_id}")
     except Exception as e:
@@ -77,7 +82,25 @@ async def chat_ws(websocket: WebSocket, session_id: str):
 # ── 内部处理函数 ─────────────────────────────────────────────────
 
 
-async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> None:
+def _resolve_role(auth: AuthContext) -> str:
+    """将 AuthContext.level 映射为 SafetyGuard 兼容的角色字符串
+
+    映射规则（最小权限原则）：
+      ANONYMOUS / READ → "viewer"   — 只能执行 low 风险查询
+      OP               → "operator" — low 放行，medium 需确认
+      ADMIN            → "admin"    — low 放行，medium 需确认，high 仍拒绝
+
+    所有高危操作继续经过 SafetyGuard，不受角色影响。
+    """
+    if auth.level == AuthLevel.ADMIN:
+        return "admin"
+    if auth.level == AuthLevel.OP:
+        return "operator"
+    # READ / ANONYMOUS → viewer（最小权限）
+    return "viewer"
+
+
+async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role: str = "viewer") -> None:
     """按最新规范 v1.0 分发处理 WebSocket 消息
 
     协议层校验完成后，业务逻辑委托给 Orchestrator.handle_chat。
@@ -133,9 +156,12 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
             user_input = popped.get("user_input", "")
             trace_id = popped.get("trace_id", "")
             # 确认后走 Day5 Agent 主流程（confirmed=True，trace_id 保持连续性）
+            # 从 ConnectionManager 获取认证信息，解析真实 role（不再硬编码 viewer）
+            auth_ctx = manager.get_auth(session_id)
+            role = _resolve_role(auth_ctx) if auth_ctx else "viewer"
             assistant_frames: list[dict[str, Any]] = []
             async for frame in _orchestrator.handle_chat(
-                session_id=session_id, user_input=user_input, role="viewer", confirmed=True,
+                session_id=session_id, user_input=user_input, role=role, confirmed=True,
                 trace_id=trace_id,
             ):
                 await websocket.send_json(frame)
@@ -196,9 +222,10 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
         return
 
     # 低危：Day5 Agent 主流程（Orchestrator.handle_chat）
+    # role 由调用方从 AuthContext 解析传入，不再硬编码 viewer
     assistant_frames: list[dict[str, Any]] = []
     async for frame in _orchestrator.handle_chat(
-        session_id=session_id, user_input=user_input, role="viewer", trace_id=trace_id,
+        session_id=session_id, user_input=user_input, role=role, trace_id=trace_id,
     ):
         await websocket.send_json(frame)
         assistant_frames.append(frame)
