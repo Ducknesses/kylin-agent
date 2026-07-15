@@ -165,8 +165,10 @@ function openSettings() {
 }
 
 // 初始化会话与连接
-onMounted(() => {
+onMounted(async () => {
   const sessionId = chatStore.createSession()
+  // 尝试从后端加载历史消息
+  await chatStore.fetchHistory(sessionId)
   wsClient.connect(sessionId)
   wsClient.on('risk_alert', onRiskAlert)
   wsClient.on('pending_confirmation', onToolPending)
