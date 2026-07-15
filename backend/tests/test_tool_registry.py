@@ -49,7 +49,19 @@ class TestToolExistence:
     def test_get_tool_names_returns_all(self, registry):
         """get_tool_names 应返回全部 6 个工具"""
         names = registry.get_tool_names()
-        assert len(names) == 6
+
+        expected_names = {
+            "sys_info",
+            "service_mgr",
+            "log_reader",
+            "net_monitor",
+            "cmd_exec",
+            "metrics_history",
+            "file_guard",
+        }
+
+        assert set(names) == expected_names
+        assert len(names) == len(set(names))
         for t in self._EXPECTED_TOOLS:
             assert t in names
 

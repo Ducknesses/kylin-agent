@@ -7,12 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import chat, sessions, monitor, audit, config as config_api, actions
 from app.audit.models import init_db
+from app.core.logging_config import setup_logging
 from config import settings
 
-# 配置日志
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+# 统一日志初始化（幂等，ConsoleHandler + TimedRotatingFileHandler + 脱敏Filter + trace_id）
+setup_logging(
+    log_level=settings.LOG_LEVEL,
+    log_to_file=settings.LOG_TO_FILE,
+    log_dir=settings.LOG_DIR,
+    log_file=settings.LOG_FILE,
+    log_backup_count=settings.LOG_BACKUP_COUNT,
 )
 logger = logging.getLogger(__name__)
 

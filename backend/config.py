@@ -1,6 +1,5 @@
 """全局配置"""
 import os
-from typing import Optional
 
 
 class Settings:
@@ -61,6 +60,12 @@ class Settings:
 
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    # 文件日志开关：true/1/yes → 启用，其他 → 禁用
+    LOG_TO_FILE: bool = os.getenv("LOG_TO_FILE", "true").strip().lower() in ("true", "1", "yes")
+    LOG_DIR: str = os.getenv("LOG_DIR", "./logs")
+    LOG_FILE: str = os.getenv("LOG_FILE", "backend.log")
+    # 轮转保留天数，非负整数
+    LOG_BACKUP_COUNT: str = os.getenv("LOG_BACKUP_COUNT", "14")
 
 
 settings = Settings()
