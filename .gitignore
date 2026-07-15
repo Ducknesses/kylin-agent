@@ -39,6 +39,10 @@ env/
 backend/data/backup/
 backend/data/audit.db
 
+# Logs
+backend/logs/*
+!backend/logs/.gitkeep
+
 # Misc
 ws_test.py
 tmp/
