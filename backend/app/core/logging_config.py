@@ -12,6 +12,7 @@ import logging.handlers
 import re
 import sys
 from pathlib import Path
+from typing import Callable, Tuple, Union
 from typing import Any, Tuple
 
 
@@ -37,16 +38,16 @@ _SENSITIVE_KEYS: Tuple[str, ...] = (
 _REDACTED = "[REDACTED]"
 
 # 匹配模式列表: (正则, 替换文本)
-_SENSITIVE_PATTERNS: Tuple[Tuple[re.Pattern, str], ...] = ()
+_SENSITIVE_PATTERNS: Tuple[Tuple[re.Pattern, Union[str, Callable[[re.Match], str]]], ...] = ()
 
 
-def _build_patterns() -> Tuple[Tuple[re.Pattern, str], ...]:
+def _build_patterns() -> Tuple[Tuple[re.Pattern, Union[str, Callable[[re.Match], str]]], ...]:
     """构建并缓存敏感信息匹配正则列表（模块级一次性构建，并发安全）"""
     global _SENSITIVE_PATTERNS
     if _SENSITIVE_PATTERNS:
         return _SENSITIVE_PATTERNS
 
-    patterns: list[Tuple[re.Pattern, str]] = []
+    patterns: list[Tuple[re.Pattern, Union[str, Callable[[re.Match], str]]]] = []
 
     # Authorization: Bearer <value> / Authorization=<value> / Bearer <value>
     patterns.append((re.compile(r"Authorization\s*[:=]\s*Bearer\s+\S+", re.IGNORECASE),
