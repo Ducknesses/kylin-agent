@@ -1,7 +1,4 @@
 #!/bin/bash
-# DEPRECATED: 此脚本已迁移到 deploy/mcp-server/wizard.sh
-# 请使用: sudo bash deploy/mcp-server/wizard.sh
-# 本文件保留仅用于向后兼容，后续版本将移除。
 # ============================================================
 # MCP Server 配置向导
 # ============================================================
@@ -11,8 +8,8 @@
 #   3. 连接测试
 #   4. 查看当前配置
 #
-# 用法: sudo ./kylin-wizard.sh
-# 前提: mcp-server 已通过 kylin-install.sh 安装
+# 用法: sudo bash deploy/mcp-server/wizard.sh
+# 前提: mcp-server 已通过 deploy/mcp-server/install.sh 安装
 # ============================================================
 # ---- 颜色定义 ----
 RED='\033[0;31m'
@@ -354,7 +351,7 @@ test_connection() {
     fi
 
     # 3. 测试 Bearer Token 认证
-    # M3: 使用 -o 分离 body，-w 获取 HTTP 状态码，避免 stderr 污染
+    # 使用 -o 分离 body，-w 获取 HTTP 状态码，避免 stderr 污染
     local ping_body_file="/tmp/mcp_wizard_ping_body.txt"
     local http_code
     http_code=$(timeout 10 curl -s -o "$ping_body_file" -w "%{http_code}" \
@@ -738,14 +735,14 @@ main_menu() {
 
 # ---- 检查 root 权限 ----
 if [ "$(id -u)" -ne 0 ]; then
-    print_err "请使用 sudo 运行此脚本: sudo ./kylin-wizard.sh"
+    print_err "请使用 sudo 运行此脚本: sudo bash deploy/mcp-server/wizard.sh"
     exit 1
 fi
 
 # ---- 检查是否已安装 ----
 if [ ! -f "$SERVICE_FILE" ]; then
     print_err "未检测到 mcp-server 服务文件 (${SERVICE_FILE})"
-    echo "  请先运行安装脚本: sudo ./kylin-install.sh"
+    echo "  请先运行安装脚本: sudo bash deploy/mcp-server/install.sh"
     exit 1
 fi
 
@@ -757,7 +754,7 @@ if [ ! -f "$ENV_FILE" ]; then
     _svc_host=$(grep -oP 'Environment=MCP_HOST=\K.*' "$SERVICE_FILE" 2>/dev/null || echo "127.0.0.1")
     _svc_port=$(grep -oP 'Environment=MCP_PORT=\K.*' "$SERVICE_FILE" 2>/dev/null || echo "8001")
 
-    # M1: 随机生成默认 Token，避免硬编码不安全值
+    # 随机生成默认 Token，避免硬编码不安全值
     if command -v openssl &>/dev/null; then
         _auto_token=$(openssl rand -hex 32)
     else
