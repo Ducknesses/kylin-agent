@@ -23,9 +23,8 @@ INSTALL_DIR="/opt/kylin-agent"
 echo "[CONFIRM] 即将卸载 Kylin Agent Backend，这将："
 echo "  1. 停止 kylin-agent 服务"
 echo "  2. 移除 systemd 服务配置"
-echo "  3. 删除 $INSTALL_DIR 目录"
-echo "  4. 移除 Nginx 配置（如果已安装）"
-echo "  5. 删除 agent-read 用户"
+echo "  3. 删除 $INSTALL_DIR/backend 目录"
+echo "  4. 删除 agent-read 用户"
 echo ""
 read -p "确定要继续吗？ (yes/no): " confirm
 if [ "$confirm" != "yes" ]; then
@@ -35,7 +34,7 @@ fi
 echo ""
 
 # ---- 1. 停止并禁用服务 ----
-echo "[1/5] 停止 kylin-agent 服务..."
+echo "[1/4] 停止 kylin-agent 服务..."
 if systemctl is-active --quiet kylin-agent 2>/dev/null; then
     systemctl stop kylin-agent
     echo "  服务已停止"
@@ -52,32 +51,20 @@ fi
 echo ""
 
 # ---- 2. 移除 systemd 服务文件 ----
-echo "[2/5] 移除 systemd 服务文件..."
+echo "[2/4] 移除 systemd 服务文件..."
 rm -f /etc/systemd/system/kylin-agent.service
 systemctl daemon-reload
 echo "  kylin-agent.service 已移除"
 echo ""
 
-# ---- 3. 移除 Nginx 配置 ----
-echo "[3/5] 移除 Nginx 配置..."
-rm -f /etc/nginx/sites-available/kylin-agent
-rm -f /etc/nginx/sites-enabled/kylin-agent
-if command -v nginx &>/dev/null; then
-    systemctl reload nginx 2>/dev/null || true
-    echo "  Nginx 配置已移除并重载"
-else
-    echo "  Nginx 未安装（跳过）"
-fi
+# ---- 3. 删除后端目录 ----
+echo "[3/4] 删除 $INSTALL_DIR/backend 目录..."
+rm -rf "$INSTALL_DIR/backend"
+echo "  $INSTALL_DIR/backend 已删除"
 echo ""
 
-# ---- 4. 删除安装目录 ----
-echo "[4/5] 删除 $INSTALL_DIR 目录..."
-rm -rf "$INSTALL_DIR"
-echo "  $INSTALL_DIR 已删除"
-echo ""
-
-# ---- 5. 删除专用用户 ----
-echo "[5/5] 删除 agent-read 用户..."
+# ---- 4. 删除专用用户 ----
+echo "[4/4] 删除 agent-read 用户..."
 if id agent-read &>/dev/null; then
     userdel -r agent-read 2>/dev/null || true
     echo "  agent-read 用户已删除"
@@ -92,10 +79,8 @@ echo "=============================================="
 echo ""
 echo "  以下内容已全部移除:"
 echo "    - kylin-agent systemd 服务"
-echo "    - $INSTALL_DIR 目录"
-echo "    - Nginx 反向代理配置"
+echo "    - $INSTALL_DIR/backend 目录"
 echo "    - agent-read 用户"
 echo ""
-echo "  注意: Redis 和 Nginx 包未被移除，如需清理请手动执行:"
-echo "    sudo apt purge redis nginx"
+echo "  提示: Frontend + Nginx 请用 deploy/frontend/uninstall.sh 单独卸载"
 echo ""

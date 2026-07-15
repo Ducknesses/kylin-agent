@@ -24,7 +24,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INSTALL_DIR="/opt/kylin-agent"
 
 # ---- 1. 检查 Python 版本 ----
-echo "[1/7] 检查 Python 版本..."
+echo "[1/6] 检查 Python 版本..."
 if ! command -v python3 &>/dev/null; then
     echo "[ERROR] python3 未安装！请执行: sudo apt install python3 python3-venv python3-pip"
     exit 1
@@ -41,22 +41,15 @@ fi
 echo ""
 
 # ---- 2. 创建专用用户 ----
-echo "[2/7] 创建 agent-read 用户..."
+echo "[2/6] 创建 agent-read 用户..."
 useradd -r -s /bin/false agent-read 2>/dev/null || echo "  agent-read 用户已存在"
 echo ""
 
 # ---- 3. 复制后端源码 ----
-echo "[3/7] 部署后端源码到 $INSTALL_DIR ..."
+echo "[3/6] 部署后端源码到 $INSTALL_DIR/backend ..."
 mkdir -p "$INSTALL_DIR"
-# 复制 backend/ 目录
 cp -r "$PROJECT_ROOT/backend" "$INSTALL_DIR/backend"
-# 复制前端构建产物（如果存在）
-if [ -d "$PROJECT_ROOT/frontend/dist" ]; then
-    cp -r "$PROJECT_ROOT/frontend/dist" "$INSTALL_DIR/frontend/dist"
-    echo "  ✓ 前端构建产物已复制"
-else
-    echo "  [WARN] 未找到 frontend/dist/，请先在前端目录执行 npm run build"
-fi
+
 # 复制 .env（如果存在）
 if [ -f "$PROJECT_ROOT/backend/.env" ]; then
     cp "$PROJECT_ROOT/backend/.env" "$INSTALL_DIR/backend/.env"
@@ -68,58 +61,63 @@ fi
 echo ""
 
 # ---- 4. 创建虚拟环境并安装依赖 ----
-echo "[4/7] 创建 Python 虚拟环境并安装依赖..."
+echo "[4/6] 创建 Python 虚拟环境并安装依赖..."
 cd "$INSTALL_DIR/backend"
 python3 -m venv venv
 source venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
+
+# pip 镜像源：可通过 PIP_INDEX_URL 环境变量覆盖
+PIP_INDEX="${PIP_INDEX_URL:-https://pypi.org/simple}"
+echo "  使用 pip 源: $PIP_INDEX"
+PIP_OPTS="--index-url $PIP_INDEX --timeout 120 --retries 3"
+
+pip install $PIP_OPTS --upgrade pip || {
+    echo "[ERROR] pip 升级失败，请检查网络连接"
+    echo "  提示: 可设置 PIP_INDEX_URL 使用国内镜像"
+    echo "  例如: PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple sudo ./deploy/backend/install.sh"
+    deactivate
+    exit 1
+}
+pip install $PIP_OPTS -r requirements.txt || {
+    echo "[ERROR] Python 依赖安装失败，请检查网络或使用 PIP_INDEX_URL 指定镜像"
+    deactivate
+    exit 1
+}
 echo "  ✓ 依赖安装完成"
-# 验证关键依赖
-python3 -c "import fastapi; import uvicorn; print(f'  fastapi={fastapi.__version__}')"
+
+# 验证关键依赖（Python 模块 + 可执行文件）
+python3 -c "import fastapi; import uvicorn; print(f'  fastapi={fastapi.__version__}')" || {
+    echo "[ERROR] Python 模块导入失败，fastapi/uvicorn 未正确安装"
+    deactivate
+    exit 1
+}
+if [ ! -x "$INSTALL_DIR/backend/venv/bin/uvicorn" ]; then
+    echo "[ERROR] uvicorn 可执行文件不存在: $INSTALL_DIR/backend/venv/bin/uvicorn"
+    echo "  请检查 pip install 是否成功，或手动执行:"
+    echo "    cd $INSTALL_DIR/backend && source venv/bin/activate && pip install uvicorn[standard]"
+    deactivate
+    exit 1
+fi
+echo "  ✓ uvicorn 可执行文件验证通过"
 deactivate
 echo ""
 
 # ---- 5. 创建数据目录 ----
-echo "[5/7] 创建数据目录..."
+echo "[5/6] 创建数据目录..."
 mkdir -p "$INSTALL_DIR/backend/data"
 echo "  ✓ data/ 目录已创建"
 echo ""
 
-# ---- 6. 安装 systemd 服务 ----
-echo "[6/7] 安装 systemd 服务..."
+# ---- 6. 安装 systemd 服务 + 修正权限 ----
+echo "[6/6] 安装 systemd 服务..."
 cp "$SCRIPT_DIR/kylin-agent.service" /etc/systemd/system/kylin-agent.service
 systemctl daemon-reload
 systemctl enable kylin-agent
-echo "  ✓ kylin-agent.service 已安装并设为开机自启"
-echo ""
 
-# ---- 7. 修正文件权限 ----
-echo "[7/7] 修正文件所有权为 agent-read:agent-read ..."
-chown -R agent-read:agent-read "$INSTALL_DIR"
+echo "  修正文件所有权为 agent-read:agent-read ..."
+chown -R agent-read:agent-read "$INSTALL_DIR/backend"
 echo "  ✓ 权限已修正"
-echo ""
-
-# ---- 可选：安装 Nginx 配置 ----
-read -p "是否安装 Nginx 反向代理配置？(yes/no): " install_nginx
-if [ "$install_nginx" = "yes" ]; then
-    if ! command -v nginx &>/dev/null; then
-        echo "[INFO] Nginx 未安装，正在安装..."
-        apt-get update -qq && apt-get install -y -qq nginx
-    fi
-    cp "$SCRIPT_DIR/nginx-kylin-agent.conf" /etc/nginx/sites-available/kylin-agent
-    ln -sf /etc/nginx/sites-available/kylin-agent /etc/nginx/sites-enabled/kylin-agent
-    # 移除默认站点
-    rm -f /etc/nginx/sites-enabled/default
-    if nginx -t 2>&1; then
-        systemctl reload nginx
-        echo "  ✓ Nginx 配置已安装并重载"
-    else
-        echo "  [ERROR] Nginx 配置测试失败，请检查 /etc/nginx/sites-available/kylin-agent"
-    fi
-else
-    echo "  已跳过 Nginx 配置"
-fi
+echo "  ✓ kylin-agent.service 已安装并设为开机自启"
 echo ""
 
 echo "=============================================="
@@ -127,22 +125,34 @@ echo "  ✓ Kylin Agent Backend 安装完成！"
 echo "=============================================="
 echo ""
 echo "  ╔══════════════════════════════════════════════╗"
-echo "  ║  📋 下一步                                   ║"
+echo "  ║  📋 下一步：配置 Token（必须！）             ║"
 echo "  ║                                              ║"
-echo "  ║  1. 编辑配置:                                ║"
-echo "  ║     vim $INSTALL_DIR/backend/.env            ║"
+echo "  ║  编辑配置文件:                               ║"
+echo "  ║    vim $INSTALL_DIR/backend/.env             ║"
 echo "  ║                                              ║"
-echo "  ║  2. 启动服务:                                ║"
-echo "  ║     sudo systemctl start kylin-agent         ║"
+echo "  ║  需要配置的 Token:                           ║"
 echo "  ║                                              ║"
-echo "  ║  3. 查看日志:                                ║"
-echo "  ║     sudo journalctl -u kylin-agent -f        ║"
+echo "  ║  ① API_TOKEN — 前端连接后端的认证密钥        ║"
+echo "  ║     前端在 ConnectionSettings 面板填入       ║"
+echo "  ║     不设置则无需认证（开发环境可跳过）       ║"
 echo "  ║                                              ║"
-echo "  ║  4. 健康检查:                                ║"
-echo "  ║     curl http://127.0.0.1:8000/health        ║"
+echo "  ║  ② MCP_AUTH_TOKEN — 后端连接 MCP Server      ║"
+echo "  ║     需与麒麟目标机的 .env 中保持一致         ║"
+echo "  ║     Mock 模式可跳过                          ║"
+echo "  ║                                              ║"
+echo "  ║  ③ DEEPSEEK_API_KEY — LLM API 密钥           ║"
+echo "  ║     LLM_ENABLED=false 时可跳过               ║"
+echo "  ║                                              ║"
+echo "  ║  配置完成后:                                 ║"
+echo "  ║    sudo systemctl start kylin-agent          ║"
+echo "  ║    sudo journalctl -u kylin-agent -f         ║"
+echo "  ║    curl http://127.0.0.1:8000/health         ║"
 echo "  ╚══════════════════════════════════════════════╝"
 echo ""
-echo "  安装路径:   $INSTALL_DIR"
-echo "  服务名称:   kylin-agent"
-echo "  监听地址:   127.0.0.1:8000"
+echo "  安装路径:    $INSTALL_DIR/backend"
+echo "  配置文件:    $INSTALL_DIR/backend/.env"
+echo "  服务名称:    kylin-agent"
+echo "  监听地址:    127.0.0.1:8000"
+echo ""
+echo "  提示: Frontend + Nginx 请用 deploy/frontend/install.sh 单独安装"
 echo ""

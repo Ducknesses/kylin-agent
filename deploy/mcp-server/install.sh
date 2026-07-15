@@ -60,13 +60,33 @@ cd "$INSTALL_DIR"
 python3 -m venv venv
 source venv/bin/activate
 echo "[3/7] 安装依赖..."
-pip install --quiet --upgrade pip
+
+# pip 镜像源：可通过 PIP_INDEX_URL 环境变量覆盖
+PIP_INDEX="${PIP_INDEX_URL:-https://pypi.org/simple}"
+echo "  使用 pip 源: $PIP_INDEX"
+PIP_OPTS="--index-url $PIP_INDEX --timeout 120 --retries 3"
+
+pip install $PIP_OPTS --upgrade pip || {
+    echo "[ERROR] pip 升级失败，请检查网络连接"
+    echo "  提示: 可设置 PIP_INDEX_URL 使用国内镜像"
+    echo "  例如: PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple sudo ./deploy/mcp-server/install.sh"
+    deactivate
+    exit 1
+}
 if [ -f "$INSTALL_DIR/requirements.txt" ]; then
-    pip install --quiet -r requirements.txt
+    pip install $PIP_OPTS -r requirements.txt
 else
-    pip install --quiet psutil>=5.9.0 python-dotenv>=1.0.0
+    pip install $PIP_OPTS psutil>=5.9.0 python-dotenv>=1.0.0
 fi
 echo "  依赖安装完成"
+
+# 验证关键依赖
+python3 -c "import psutil; print(f'  psutil={psutil.__version__}')" || {
+    echo "[ERROR] psutil 模块无法导入"
+    deactivate
+    exit 1
+}
+echo "  ✓ psutil 导入验证通过"
 deactivate
 
 # ---- 4. 创建专用用户 ----

@@ -97,11 +97,14 @@ kylin-agent/
 │       ├── router/              # Vue Router
 │       └── views/               # HomeView, AuditView, MonitorView
 │
-├── deploy/                      # 部署脚本 (新增)
+├── deploy/                      # 部署脚本 (三端独立)
 │   ├── backend/
-│   │   ├── install.sh           # 控制节点一键安装
-│   │   ├── uninstall.sh         # 控制节点一键卸载
-│   │   ├── kylin-agent.service  # Backend systemd 服务
+│   │   ├── install.sh           # Backend 一键安装
+│   │   ├── uninstall.sh         # Backend 一键卸载
+│   │   └── kylin-agent.service  # Backend systemd 服务
+│   ├── frontend/
+│   │   ├── install.sh           # Frontend + Nginx 一键安装
+│   │   ├── uninstall.sh         # Frontend + Nginx 一键卸载
 │   │   └── nginx-kylin-agent.conf # Nginx 反向代理配置
 │   └── mcp-server/
 │       ├── install.sh           # 麒麟目标机一键安装
@@ -174,39 +177,46 @@ python server.py
 
 ### 部署架构
 
-控制节点和麒麟目标机**可分开部署**：
+三个组件**可独立部署**：
 
 | 组件 | 部署位置 | 安装脚本 |
 |------|---------|----------|
-| Backend + Nginx + Redis | 控制节点 (x86_64 / ARM) | `sudo ./deploy/backend/install.sh` |
+| Backend | 控制节点 (x86_64 / ARM) | `sudo ./deploy/backend/install.sh` |
+| Frontend + Nginx | 控制节点 (x86_64 / ARM) | `sudo ./deploy/frontend/install.sh` |
 | MCP Server | 麒麟 V11 目标机 (LoongArch) | `sudo ./deploy/mcp-server/install.sh` |
 
-### 控制节点部署
+### Backend 部署
 
 ```bash
-# 1. 构建前端
-cd frontend && npm run build && cd ..
-
-# 2. 一键安装 Backend + Nginx
 sudo ./deploy/backend/install.sh
-# 交互式询问是否安装 Nginx 配置
 
-# 3. 启动服务
+# 编辑配置
+vim /opt/kylin-agent/backend/.env
+
+# 启动服务
 sudo systemctl start kylin-agent
 
-# 4. 查看日志
+# 查看日志
 sudo journalctl -u kylin-agent -f
 ```
 
-安装后路径：`/opt/kylin-agent/`
-- 后端：`/opt/kylin-agent/backend/`
-- 前端静态文件：`/opt/kylin-agent/frontend/dist/`
-- 配置：`/opt/kylin-agent/backend/.env`
+安装后路径：`/opt/kylin-agent/backend/`
+
+### Frontend + Nginx 部署
+
+```bash
+# 需要先构建前端产物
+cd frontend && npm run build && cd ..
+
+sudo ./deploy/frontend/install.sh
+```
+
+安装后路径：`/opt/kylin-agent/frontend/dist/`
+Nginx 配置：`/etc/nginx/sites-available/kylin-agent`
 
 ### 麒麟目标机部署
 
 ```bash
-# 一键安装 MCP Server
 sudo ./deploy/mcp-server/install.sh
 # 安装前自动运行 loongarch-check.sh 架构检查
 
@@ -222,10 +232,13 @@ cd /opt/mcp-server && sudo bash kylin-wizard.sh
 ### 卸载
 
 ```bash
-# 控制节点卸载
+# Backend 卸载
 sudo ./deploy/backend/uninstall.sh
 
-# 麒麟目标机卸载
+# Frontend + Nginx 卸载
+sudo ./deploy/frontend/uninstall.sh
+
+# MCP Server 卸载
 sudo ./deploy/mcp-server/uninstall.sh
 ```
 
