@@ -1,17 +1,19 @@
 """会话管理 REST 接口
 
 正式接口（最新前后端 API 统一规范 v1.0）：
-  GET  /api/sessions                       → 会话列表
-  POST /api/sessions                       → 创建会话
-  GET  /api/sessions/{session_id}/messages → 会话历史消息
+  GET  /api/sessions                       → 会话列表（需要 READ 权限）
+  POST /api/sessions                       → 创建会话（需要 READ 权限）
+  GET  /api/sessions/{session_id}/messages → 会话历史消息（需要 READ 权限）
 """
 import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.auth import AuthContext, AuthLevel
 from app.core.redis_client import get_session, list_sessions, set_session
+from app.dependencies import require_auth
 from app.schemas.models import SessionCreate, SessionOut, SessionMessagesOut
 
 logger = logging.getLogger(__name__)
@@ -19,7 +21,9 @@ router = APIRouter()
 
 
 @router.get("/sessions")
-async def get_sessions() -> list[SessionOut]:
+async def get_sessions(
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
+) -> list[SessionOut]:
     """获取所有会话列表（从 Redis 读取）"""
     sessions = list_sessions()
     return [
@@ -33,7 +37,10 @@ async def get_sessions() -> list[SessionOut]:
 
 
 @router.post("/sessions")
-async def create_session(body: SessionCreate) -> SessionOut:
+async def create_session(
+    body: SessionCreate,
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
+) -> SessionOut:
     """创建新会话并存入 Redis"""
     sid = str(uuid.uuid4())[:12]
     now = datetime.now().isoformat()
@@ -48,7 +55,10 @@ async def create_session(body: SessionCreate) -> SessionOut:
 
 
 @router.get("/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str) -> SessionMessagesOut:
+async def get_session_messages(
+    session_id: str,
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
+) -> SessionMessagesOut:
     """
     获取会话历史消息。
 

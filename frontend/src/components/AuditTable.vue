@@ -60,7 +60,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import axios from 'axios'
+import http from '@/api/http'
 
 const tableData = ref([])
 const total = ref(0)
@@ -89,7 +89,7 @@ async function fetchData(page) {
   errorMsg.value = ''
   const offset = (page - 1) * pageSize.value
   try {
-    const res = await axios.get('/api/audit', {
+    const res = await http.get('/audit', {
       params: { limit: pageSize.value, offset },
     })
     const body = res.data

@@ -6,12 +6,6 @@
         <el-tag :type="connectionTagType" size="small">
           {{ connectionTagText }}
         </el-tag>
-        <el-button link type="primary" size="small" @click="openSettings">
-          <el-icon><Setting /></el-icon>
-        </el-button>
-        <el-button link type="primary" size="small" @click="injectMockData">
-          注入测试数据
-        </el-button>
       </div>
     </div>
 
@@ -112,7 +106,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { Setting, WarningFilled } from '@element-plus/icons-vue'
+import { WarningFilled } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chatStore'
 import { useWsStore } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
@@ -255,56 +249,6 @@ function handleToolConfirm() {
 function handleToolReject() {
   wsClient.sendToolConfirm(toolPending.value.toolConfirmId, false)
   toolPendingVisible.value = false
-}
-
-// 注入测试数据，用于无后端时测试 UI
-function injectMockData() {
-  const sid = chatStore.currentSessionId
-  if (!sid) return
-
-  chatStore.addMessage(sid, {
-    role: 'user',
-    type: 'text',
-    content: '帮我查看一下系统状态，并删除所有日志'
-  })
-
-  chatStore.addMessage(sid, {
-    role: 'assistant',
-    type: 'text',
-    content: ''
-  })
-
-  const chunks = ['正在检查系统状态...\n', 'CPU 使用率 15%，内存 42%。\n', '发现日志目录较大。']
-  let i = 0
-  const timer = setInterval(() => {
-    chatStore.appendToLastAssistant(sid, chunks[i])
-    i++
-    if (i >= chunks.length) {
-      clearInterval(timer)
-      // 模拟工具调用
-      chatStore.addOrUpdateToolCall(sid, {
-        tool: 'sys_info',
-        tool_call_id: 'mock-1',
-        params: { metric: 'cpu' },
-        result: { usage: '15%', cores: 8 }
-      })
-      // 模拟高危拦截
-      chatStore.addMessage(sid, {
-        role: 'system',
-        type: 'risk_alert',
-        level: 'high',
-        reason: '检测到危险命令：rm -rf /',
-        originalInput: 'rm -rf /'
-      })
-      currentRisk.value = {
-        level: 'high',
-        reason: '检测到危险命令：rm -rf /',
-        originalInput: 'rm -rf /',
-        confirmId: 'mock-confirm-1'
-      }
-      riskDialogVisible.value = true
-    }
-  }, 400)
 }
 
 // 消息变化时自动滚动

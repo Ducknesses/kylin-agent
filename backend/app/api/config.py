@@ -1,16 +1,18 @@
 """白名单/权限配置接口
 
 正式接口（最新前后端 API 统一规范 v1.0）：
-  GET  /api/config/whitelist  → {commands, blocked_patterns}
-  PUT  /api/config/whitelist  → {message, saved_commands, saved_blocked_patterns}
+  GET  /api/config/whitelist  → {commands, blocked_patterns}（需要 ADMIN 权限）
+  PUT  /api/config/whitelist  → {message, saved_commands, saved_blocked_patterns}（需要 ADMIN 权限）
 """
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.audit.models import load_config, save_config
+from app.core.auth import AuthContext, AuthLevel
 from app.core.rbac import COMMAND_WHITELIST, DANGEROUS_PATTERNS, Permission
+from app.dependencies import require_auth
 from app.schemas.models import WhitelistUpdate
 
 logger = logging.getLogger(__name__)
@@ -72,7 +74,9 @@ async def _load_from_db() -> None:
 
 
 @router.get("/config/whitelist")
-async def get_whitelist() -> dict:
+async def get_whitelist(
+    auth: AuthContext = Depends(require_auth(AuthLevel.ADMIN)),
+) -> dict:
     """获取当前命令白名单 —— 直接返回 commands 和 blocked_patterns"""
     if _runtime_commands is None or _runtime_blocked is None:
         await _load_from_db()
@@ -84,7 +88,10 @@ async def get_whitelist() -> dict:
 
 
 @router.put("/config/whitelist")
-async def update_whitelist(body: WhitelistUpdate) -> dict:
+async def update_whitelist(
+    body: WhitelistUpdate,
+    auth: AuthContext = Depends(require_auth(AuthLevel.ADMIN)),
+) -> dict:
     """更新白名单并持久化到 SQLite"""
     global _runtime_commands, _runtime_blocked
 

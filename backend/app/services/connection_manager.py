@@ -1,36 +1,85 @@
-"""WebSocket 连接管理器"""
+"""WebSocket 连接管理器（含 token 校验）"""
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import WebSocket
+
+from app.core.auth import AuthContext
+from app.core.security import TokenStore
 
 logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
-    """管理 WebSocket 连接的生命周期，按 session_id 索引"""
+    """管理 WebSocket 连接的生命周期，按 session_id 索引
+
+    认证流程：
+    1. connect() 被调用时，从 query string 提取 ?token=
+    2. 如果 API_TOKEN 已配置，校验 token；无效则 close(code=4001)
+    3. 如果 API_TOKEN 未配置，放行（向后兼容）
+    4. 返回 AuthContext 供调用方做 RBAC
+    """
 
     def __init__(self) -> None:
         self._connections: Dict[str, WebSocket] = {}
+        self._sessions_auth: Dict[str, AuthContext] = {}
         self._pending_confirm: Dict[str, dict] = {}
 
     # ── 连接管理 ──
 
-    async def connect(self, websocket: WebSocket, session_id: str) -> None:
-        """接受连接并注册到管理器"""
+    async def connect(self, websocket: WebSocket, session_id: str) -> AuthContext:
+        """接受 WebSocket 连接，校验 token，注册到管理器
+
+        返回 AuthContext（调用方用于 RBAC 判定）。
+        校验失败时直接 close WebSocket 并返回 AuthContext.anonymous()。
+        """
+        token_store = TokenStore.singleton()
+        token = websocket.query_params.get("token", None)
+
+        # 提取客户端 IP
+        client_ip = ""
+        if websocket.client:
+            client_ip = websocket.client.host or ""
+
+        # Token 校验
+        if token_store.is_configured():
+            auth = token_store.validate(token, client_ip)
+            if auth is None:
+                logger.warning(
+                    f"[Connection] WS 认证失败 session={session_id}, ip={client_ip}"
+                )
+                await websocket.accept()
+                await websocket.close(code=4001, reason="认证失败：令牌无效或缺失")
+                return AuthContext.anonymous(client_ip)
+        else:
+            # 未配置 token → 匿名（向后兼容）
+            auth = AuthContext.anonymous(client_ip)
+
         await websocket.accept()
         self._connections[session_id] = websocket
-        logger.info(f"[Connection] 会话建立: {session_id}")
+        self._sessions_auth[session_id] = auth
+        logger.info(
+            f"[Connection] 会话建立: {session_id}, "
+            f"level={auth.level.value}, authenticated={auth.is_authenticated}"
+        )
+        return auth
 
     def disconnect(self, session_id: str) -> None:
         """移除连接和关联的挂起操作"""
         self._connections.pop(session_id, None)
+        self._sessions_auth.pop(session_id, None)
         self._pending_confirm.pop(session_id, None)
         logger.info(f"[Connection] 会话断开: {session_id}")
 
     def is_connected(self, session_id: str) -> bool:
         """检查会话是否在线"""
         return session_id in self._connections
+
+    # ── 认证信息查询 ──
+
+    def get_auth(self, session_id: str) -> Optional[AuthContext]:
+        """获取会话的认证上下文"""
+        return self._sessions_auth.get(session_id)
 
     # ── 消息发送 ──
 

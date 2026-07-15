@@ -1,16 +1,18 @@
-"""最小权限控制"""
+"""最小权限控制（对接 AuthContext）"""
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from app.core.auth import AuthContext, AuthLevel
 
 logger = logging.getLogger(__name__)
 
 
 class Permission:
-    """权限常量"""
-    READ = "agent-read"
-    OP = "agent-op"
-    ADMIN = "agent-admin"
+    """权限常量（与 AuthLevel 对齐）"""
+    READ = AuthLevel.READ.value      # "agent-read"
+    OP = AuthLevel.OP.value          # "agent-op"
+    ADMIN = AuthLevel.ADMIN.value    # "agent-admin"
 
 
 # 命令模板白名单：权限 -> 允许的正则模板
@@ -87,9 +89,21 @@ def check_command_permission(cmd: str, user_level: str) -> Dict:
     return {"allowed": False, "reason": "命令不在当前权限白名单中"}
 
 
-def get_user_level(user_id: str) -> str:
+def get_user_level(user_id: str = "", *, auth: Optional[AuthContext] = None) -> str:
     """
-    获取用户权限等级（阶段1先简单返回READ，后续接入认证系统）
+    获取用户权限等级。
+
+    优先级：
+    1. AuthContext.level（已认证用户）
+    2. 回退到 READ（未认证 / 匿名）
+
+    参数：
+    - user_id: 保留参数，兼容旧接口
+    - auth: 认证上下文（由 require_auth 中间件注入），仅限关键字参数
     """
-    # TODO: 接入实际用户认证后从 token/session 中读取
+    if auth is not None and auth.is_authenticated:
+        return auth.level.value
+
+    # 回退：匿名用户默认 READ
     return Permission.READ
+

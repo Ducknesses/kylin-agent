@@ -3,8 +3,8 @@
     <div class="monitor-header">
       <span class="title">系统监控大盘</span>
       <div class="header-right">
-        <el-tag :type="dataSource === 'sse' ? 'success' : 'warning'" size="small">
-          {{ dataSource === 'sse' ? 'SSE 实时' : dataSource === 'polling' ? '轮询中' : '模拟数据' }}
+        <el-tag :type="sourceTagType" size="small">
+          {{ sourceTagText }}
         </el-tag>
         <el-radio-group v-model="timeRange" size="small" @change="onRangeChange">
           <el-radio-button label="5m">最近5分钟</el-radio-button>
@@ -40,8 +40,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { FullScreen, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
-import axios from 'axios'
-import { useWsStore } from '@/stores/wsStore'
+import http from '@/api/http'
 
 // 图表配置常量（静态数据，大写命名约定表示常量）
 const CHART_LIST = [
@@ -53,6 +52,7 @@ const CHART_LIST = [
 
 const timeRange = ref('5m')
 const dataSource = ref('mock') // 'sse' | 'polling' | 'mock'
+const mcpConnected = ref(false) // MCP Server 连接状态（由 SSE 数据中的 mcp_connected 字段驱动）
 const maximizedChart = ref(null)
 
 // 每个图表容器的 DOM 引用
@@ -74,9 +74,27 @@ const gridStyle = computed(() => {
   }
 })
 
+// 状态标签：根据 SSE 连接 + MCP 连接状态综合显示
+const sourceTagType = computed(() => {
+  if (dataSource.value === 'sse' && mcpConnected.value) return 'success'   // SSE 实时 + MCP 在线
+  if (dataSource.value === 'sse' && !mcpConnected.value) return 'danger'   // SSE 实时 + MCP 离线
+  if (dataSource.value === 'polling') return 'warning'                     // 轮询中
+  return 'info'                                                             // 无数据/初始
+})
+
+const sourceTagText = computed(() => {
+  if (dataSource.value === 'sse' && mcpConnected.value) return 'SSE 实时'
+  if (dataSource.value === 'sse' && !mcpConnected.value) return 'MCP 已断开'
+  if (dataSource.value === 'polling') return '轮询中'
+  return '等待数据'
+})
+
 // ===== 数据写入 =====
 
 function appendDataPoint(data) {
+  // 仅当 MCP 正常连接时才追加数据点，避免 MCP 断开时图表持续显示 0 值"伪实时"数据
+  if (!mcpConnected.value) return
+
   const ts = data.timestamp ? new Date(data.timestamp) : new Date()
   const point = {
     time: ts.toLocaleTimeString(),
@@ -182,10 +200,15 @@ function connectSse() {
         const data = JSON.parse(event.data)
         if (data.error) {
           console.error('[SSE] 服务端错误:', data.error)
+          mcpConnected.value = false
           return
         }
+        // 根据后端推送的 mcp_connected 标志更新状态
+        mcpConnected.value = data.mcp_connected === true
         dataSource.value = 'sse'
-        appendDataPoint(data)
+        if (data.mcp_connected === true) {
+          appendDataPoint(data)
+        }
       } catch (e) {
         console.error('[SSE] 数据解析失败:', e)
       }
@@ -193,6 +216,7 @@ function connectSse() {
 
     sseSource.onerror = () => {
       console.warn('[SSE] 连接断开，降级为轮询')
+      mcpConnected.value = false
       sseSource.close()
       sseSource = null
       startPolling()
@@ -213,7 +237,7 @@ function connectSse() {
 
 async function fetchMetrics() {
   try {
-    const res = await axios.get('/api/monitor/metrics', { timeout: 5000 })
+    const res = await http.get('/monitor/metrics', { timeout: 5000 })
     const data = res.data
     if (data.cpu) {
       appendDataPoint({
@@ -253,8 +277,7 @@ async function fetchHistory(fromMs, toMs) {
   try {
     const fromTs = Math.floor(fromMs / 1000)
     const toTs = Math.floor(toMs / 1000)
-    const apiBase = useWsStore().apiBaseUrl
-    const res = await axios.get(`${apiBase}/api/monitor/history`, {
+    const res = await http.get('/monitor/history', {
       params: { from_ts: fromTs, to_ts: toTs },
       timeout: 8000
     })
