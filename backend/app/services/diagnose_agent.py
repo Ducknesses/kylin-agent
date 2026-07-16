@@ -52,8 +52,9 @@ class DiagnoseAgent:
         # → [{"tool": "sys_info", "params": {"metric": "cpu"}}]
     """
 
-    def __init__(self, tool_registry: Any = None) -> None:
+    def __init__(self, tool_registry: Any = None, knowledge_service: Any = None) -> None:
         self.tool_registry = tool_registry
+        self.knowledge_service = knowledge_service
 
     def plan(self, intent_result: dict) -> dict[str, Any]:
         intent = intent_result.get("intent", "unknown")
@@ -163,6 +164,33 @@ class DiagnoseAgent:
         ]):
             return ([{"tool": "cmd_exec", "params": {"command": command}}], f"执行系统命令: {command}")
         return [], f"命令不在只读白名单中，不生成执行计划: {command[:60]}"
+
+    # ── 知识库查询 ──────────────────────────────────────────────────
+
+    async def search_knowledge(
+        self,
+        intent: str,
+        observations: list[dict],
+        user_input: str,
+    ) -> dict:
+        """查询知识库，返回匹配结果。
+
+        如果 knowledge_service 未注入或查询异常，返回空结果（不抛异常），
+        确保调用方可以安全 fallback 到原有逻辑。
+        """
+        if self.knowledge_service is None:
+            return {"matched": False, "items": [], "confidence": 0.0}
+
+        try:
+            result = await self.knowledge_service.search(
+                user_input=user_input,
+                intent=intent,
+                observations=observations,
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"[DiagnoseAgent] 知识库查询异常（已忽略）: {e}")
+            return {"matched": False, "items": [], "confidence": 0.0}
 
     # ── LLM 增强路径 ──────────────────────────────────────────────────
 

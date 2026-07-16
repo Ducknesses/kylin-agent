@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.audit.logger import log_chain
 from app.core.auth import AuthContext, AuthLevel
 from app.core.security import TokenStore
-from app.dependencies import fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository
+from app.dependencies import (fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository, knowledge_service)
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
 
@@ -36,6 +36,7 @@ _orchestrator = Orchestrator(
     audit_service=audit_service,
     fix_planner=fix_planner,
     fix_option_store=fix_option_store,
+    knowledge_service=knowledge_service,
 )
 
 # ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────

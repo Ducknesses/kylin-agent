@@ -87,6 +87,7 @@ class Orchestrator:
         audit_service: Any = None,
         fix_planner: Any = None,
         fix_option_store: Any = None,
+        knowledge_service: Any = None,
     ) -> None:
         self.safety_guard = safety_guard
         self.tool_registry = tool_registry
@@ -99,7 +100,10 @@ class Orchestrator:
 
         if diagnose_agent is None:
             from app.services.diagnose_agent import DiagnoseAgent
-            diagnose_agent = DiagnoseAgent(tool_registry=tool_registry)
+            diagnose_agent = DiagnoseAgent(
+                tool_registry=tool_registry,
+                knowledge_service=knowledge_service,
+            )
         self.diagnose_agent = diagnose_agent
 
         if agent_harness is None:
@@ -222,8 +226,17 @@ class Orchestrator:
                     frame["error"] = result.get("error") or result.get("reason") or "工具调用失败"
                 yield frame
 
+            # ── 5.5 知识库查询 ──
+            ctx.knowledge_result = await self.diagnose_agent.search_knowledge(
+                intent=intent or "unknown",
+                observations=ctx.observations,
+                user_input=user_input,
+            )
+
             # ── 6. ReporterAgent ──
-            report = await self._generate_report(intent_result, ctx.observations, user_input)
+            report = await self._generate_report(
+                intent_result, ctx.observations, user_input, ctx.knowledge_result,
+            )
             ctx.final_response = report
 
             # ── 7. FixPlannerAgent → FixOptionStore → fix_options 帧 ──
@@ -272,14 +285,16 @@ class Orchestrator:
 
     # ── 内部辅助 ──────────────────────────────────────────────────────
 
-    async def _generate_report(self, intent_result: dict, observations: list, user_input: str) -> str:
+    async def _generate_report(self, intent_result: dict, observations: list, user_input: str, knowledge_result: dict | None = None) -> str:
         """根据 LLM_ENABLED 选择报告生成路径"""
         if settings.LLM_ENABLED:
             return await self.reporter_agent.generate_with_llm(
                 intent_result=intent_result, observations=observations, user_input=user_input,
+                knowledge_result=knowledge_result,
             )
         return self.reporter_agent.generate(
             intent_result=intent_result, observations=observations, user_input=user_input,
+            knowledge_result=knowledge_result,
         )
 
     @staticmethod

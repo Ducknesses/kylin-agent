@@ -99,6 +99,7 @@ class ReporterAgent:
         intent_result: dict,
         observations: list[dict],
         user_input: str = "",
+        knowledge_result: dict | None = None,
     ) -> str:
         """根据意图和观测结果生成诊断报告
 
@@ -106,6 +107,7 @@ class ReporterAgent:
             intent_result: IntentAgent.detect() 的返回结果
             observations: AgentContext.observations 列表
             user_input: 用户原始输入
+            knowledge_result: 可选，知识库匹配结果
 
         返回:
             Markdown 格式诊断报告字符串
@@ -116,12 +118,12 @@ class ReporterAgent:
         # unknown intent 优先处理——不能让空 observations 分支覆盖
         if intent == "unknown":
             report = self._report_unknown(user_input)
-            return sanitize_text(report)
+            return sanitize_text(self._append_knowledge_reference(report, knowledge_result))
 
         # 防御：observations 为空
         if not obs_list:
             report = self._empty_report(user_input)
-            return sanitize_text(report)
+            return sanitize_text(self._append_knowledge_reference(report, knowledge_result))
 
         # 按 intent 分发
         if intent == "cpu_query":
@@ -145,7 +147,31 @@ class ReporterAgent:
         else:
             report = self._report_unknown(user_input)
 
-        return sanitize_text(report)
+        return sanitize_text(self._append_knowledge_reference(report, knowledge_result))
+
+    # ── 知识依据 ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _append_knowledge_reference(report: str, knowledge_result: dict | None) -> str:
+        """如果知识库有匹配结果，在报告末尾追加「知识依据」章节。"""
+        if not knowledge_result or not knowledge_result.get("matched"):
+            return report
+        items = knowledge_result.get("items", [])
+        if not items:
+            return report
+
+        lines = ["", "### 知识依据", ""]
+        for i, item in enumerate(items, 1):
+            title = item.get("title", "未命名")
+            item_type = item.get("type", "")
+            solution = item.get("solution", "")
+            confidence = item.get("confidence", 0.0)
+            type_label = {"faq": "常见问题", "fault_pattern": "故障模式", "solution": "解决方案"}.get(item_type, item_type)
+            lines.append(f"{i}. **[{type_label}] {title}**（匹配度: {confidence:.0%}）")
+            if solution:
+                lines.append(f"   {solution}")
+            lines.append("")
+        return report.rstrip() + "\n" + "\n".join(lines)
 
     # ── 空报告 ────────────────────────────────────────────────────────
 
@@ -740,6 +766,7 @@ class ReporterAgent:
         intent_result: dict,
         observations: list[dict],
         user_input: str = "",
+        knowledge_result: dict | None = None,
     ) -> str:
         """使用 LLM 生成诊断报告，失败时 fallback 到规则版 generate()
 
@@ -756,12 +783,12 @@ class ReporterAgent:
         from config import settings
         if not settings.LLM_ENABLED:
             logger.debug("[ReporterAgent] LLM 未启用，使用规则版")
-            return self.generate(intent_result, observations, user_input)
+            return self.generate(intent_result, observations, user_input, knowledge_result)
 
         obs_summary = self._summarize_observations(observations)
         if not obs_summary:
             logger.debug("[ReporterAgent] 无可用的 observations，使用规则版")
-            return self.generate(intent_result, observations, user_input)
+            return self.generate(intent_result, observations, user_input, knowledge_result)
 
         try:
             client = LLMClient()
@@ -799,22 +826,22 @@ class ReporterAgent:
 
             if not resp.ok:
                 logger.info(f"[ReporterAgent] LLM 调用失败，fallback 规则版: {resp.error}")
-                return self.generate(intent_result, observations, user_input)
+                return self.generate(intent_result, observations, user_input, knowledge_result)
 
             content = resp.content.strip()
             if not content:
                 logger.warning("[ReporterAgent] LLM 返回空内容，fallback 规则版")
-                return self.generate(intent_result, observations, user_input)
+                return self.generate(intent_result, observations, user_input, knowledge_result)
 
             if self._contains_dangerous_content(content):
                 logger.warning("[ReporterAgent] LLM 输出包含危险内容，fallback 规则版")
-                return self.generate(intent_result, observations, user_input)
+                return self.generate(intent_result, observations, user_input, knowledge_result)
 
-            return sanitize_text(content)
+            return sanitize_text(self._append_knowledge_reference(content, knowledge_result))
 
         except Exception as e:
             logger.warning(f"[ReporterAgent] LLM 路径异常，fallback 规则版: {e}")
-            return self.generate(intent_result, observations, user_input)
+            return self.generate(intent_result, observations, user_input, knowledge_result)
 
     @staticmethod
     def _summarize_observations(observations: list[dict]) -> str:

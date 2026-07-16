@@ -39,6 +39,9 @@ class AgentContext:
     # ── 观察结果，每条为 MCP 工具返回的原始观察 ──
     observations: list[dict] = field(default_factory=list)
 
+    # ── 知识库匹配结果，由 DiagnoseAgent.search_knowledge 填充 ──
+    knowledge_result: dict | None = None
+
     # ── 最终回复，由 ReporterAgent 填充 ──
     final_response: str | None = None
 
