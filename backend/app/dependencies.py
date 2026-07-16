@@ -63,6 +63,11 @@ from app.repositories import SQLiteMessageRepository
 
 message_repository = SQLiteMessageRepository()
 
+# KnowledgeBaseService —— 知识库匹配（SQLite，未来可替换为向量检索）
+from app.services.knowledge_service import KnowledgeBaseService
+
+knowledge_service = KnowledgeBaseService()
+
 
 # ── 认证依赖链 ─────────────────────────────────────────────────────
 # 多通道 token 提取 + 验证 + 权限门控

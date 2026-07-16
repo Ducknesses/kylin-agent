@@ -10,5 +10,6 @@ Base = declarative_base()
 from app.models.audit import AuditChain  # noqa: E402, F401
 from app.models.chat import ChatMessage, ChatSession  # noqa: E402, F401
 from app.models.config import AppConfig  # noqa: E402, F401
+from app.models.knowledge import KnowledgeItem  # noqa: E402, F401
 
-__all__ = ["Base", "AuditChain", "ChatSession", "ChatMessage", "AppConfig"]
+__all__ = ["Base", "AuditChain", "ChatSession", "ChatMessage", "AppConfig", "KnowledgeItem"]
