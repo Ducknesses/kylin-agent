@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import chat, sessions, monitor, audit, config as config_api, actions
-from app.audit.models import init_db
+from app.core.database import init_engine
 from app.core.logging_config import setup_logging
 from config import settings
 
@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化数据库并预加载白名单配置"""
-    logger.info("正在初始化 SQLite 数据库...")
+    logger.info("正在初始化数据库...")
     try:
-        await init_db()
+        await init_engine()
         logger.info("数据库初始化完成")
     except Exception as e:
         logger.error(f"数据库初始化失败: {e}")

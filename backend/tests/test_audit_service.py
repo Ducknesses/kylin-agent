@@ -323,3 +323,61 @@ class TestExtendedSensitive:
                                 llm_reasoning="secret_key=abc123"))
         records = _run(service.list_records())
         assert records[0].get("llm_reasoning") is None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PR20: Authorization Bearer Token 脱敏专项测试
+# ═══════════════════════════════════════════════════════════════════
+
+class TestAuthorizationSanitize:
+    """Authorization Bearer Token 脱敏 —— PR20 安全修复"""
+
+    def test_bearer_token_standard(self, service):
+        """标准 Authorization: Bearer <token> 格式被脱敏"""
+        _run(service.save_event(
+            trace_id="t-auth1", user_input="test", risk_level="low",
+            raw_output="Authorization: Bearer sk-test123456",
+        ))
+        records = _run(service.list_records())
+        raw = records[0].get("raw_output", "")
+        assert "sk-test" not in raw, f"Token leaked: {raw}"
+        assert "[REDACTED]" in raw, f"Not replaced: {raw}"
+
+    def test_bearer_token_lowercase(self, service):
+        """大小写兼容：authorization: bearer 也脱敏"""
+        _run(service.save_event(
+            trace_id="t-auth2", user_input="test", risk_level="low",
+            final_response="authorization: bearer abc123456",
+        ))
+        records = _run(service.list_records())
+        fr = records[0].get("final_response", "")
+        assert "abc123" not in fr, f"Token leaked in lowercase: {fr}"
+
+    def test_whitespace_variants(self, service):
+        """空格兼容：:Bearer / : Bearer / :  Bearer 均匹配"""
+        cases = [
+            "Authorization:Bearer tok1",
+            "Authorization: Bearer tok2",
+            "Authorization:  Bearer tok3",
+        ]
+        for case in cases:
+            _run(service.save_event(
+                trace_id="t-auth3", user_input="test", risk_level="low",
+                command=case,
+            ))
+            records = _run(service.list_records())
+            cmd = records[0].get("command", "")
+            assert "tok" not in cmd.split("[")[-1], f"Whitespace variant leaked: {cmd}"
+
+    def test_other_patterns_unaffected(self, service):
+        """其他脱敏规则不受影响：api_key / password / token / secret"""
+        _run(service.save_event(
+            trace_id="t-auth4", user_input="test", risk_level="low",
+            raw_output="api_key=mykey password=mypw token=mytok secret=mysec",
+        ))
+        records = _run(service.list_records())
+        raw = records[0].get("raw_output", "")
+        assert "mykey" not in raw
+        assert "mypw" not in raw
+        assert "mytok" not in raw
+        assert "mysec" not in raw
