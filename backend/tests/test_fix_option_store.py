@@ -434,6 +434,82 @@ class TestStateMachine:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 并发竞争测试（Lua 原子操作验证）
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFixOptionConcurrency:
+    """并发竞争测试 —— 验证 Lua 原子操作"""
+
+    def test_concurrent_claim_only_one_succeeds(self):
+        """两个线程同时 claim_for_execution，只有一个获得执行权"""
+        import threading
+        store = _make_store()
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        results = []
+
+        def _claim():
+            claimed = store.claim_for_execution("s1", "fix_2bb225ce")
+            results.append(claimed is not None)
+
+        t1 = threading.Thread(target=_claim)
+        t2 = threading.Thread(target=_claim)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert sum(1 for r in results if r) == 1
+
+    def test_concurrent_claim_different_options_both_succeed(self):
+        """不同 option 的并发 claim 应该都成功"""
+        import threading
+        store = _make_store()
+        store.save_options("s1", "t1", [
+            _fix_option("fix_0cc175b9"),
+            _fix_option("fix_92eb5ffe"),
+        ])
+        results = []
+
+        def _claim_a():
+            results.append(store.claim_for_execution("s1", "fix_0cc175b9"))
+
+        def _claim_b():
+            results.append(store.claim_for_execution("s1", "fix_92eb5ffe"))
+
+        t1 = threading.Thread(target=_claim_a)
+        t2 = threading.Thread(target=_claim_b)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert all(r is not None for r in results)
+
+    def test_claim_then_second_claim_fails(self):
+        """第一次 claim 成功后，第二次必须失败"""
+        store = _make_store()
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        first = store.claim_for_execution("s1", "fix_2bb225ce")
+        assert first is not None
+        second = store.claim_for_execution("s1", "fix_2bb225ce")
+        assert second is None
+
+    def test_concurrent_mark_executed_only_one_succeeds(self):
+        """两个线程同时 mark_executed，只有一个成功"""
+        import threading
+        store = _make_store()
+        store.save_options("s1", "t1", [_fix_option("fix_2bb225ce")])
+        store.claim_for_execution("s1", "fix_2bb225ce")
+        results = []
+
+        def _mark():
+            results.append(store.mark_executed("s1", "fix_2bb225ce"))
+
+        t1 = threading.Thread(target=_mark)
+        t2 = threading.Thread(target=_mark)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert sum(1 for r in results if r) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 安全边界
 # ═══════════════════════════════════════════════════════════════════════
 

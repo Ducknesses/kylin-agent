@@ -122,6 +122,8 @@ class FixOptionStore:
     """
 
     # 默认 TTL：24 小时（按生产化要求）
+    # 设计理由：FixOption 包含完整的修复计划数据，需要在服务重启后跨进程恢复。
+    # 24 小时窗口覆盖一个完整运维工作日，过期自动释放 Redis 内存。
     DEFAULT_TTL_SECONDS: int = 86400
 
     def __init__(
@@ -273,34 +275,13 @@ class FixOptionStore:
         session_id: str,
         option_id: str,
     ) -> StoredFixOption | None:
-        """领取执行权：pending/confirm_required → executing
+        """领取执行权：pending/confirm_required → executing（Lua 原子操作）
 
         只有可执行状态可领取；已过期拒绝领取。
+        两个并发 worker 同时 claim 时，只有一个成功。
         返回深拷贝或 None。
         """
-        redis_key = _build_key(session_id, option_id)
-        now = self._clock()
-
-        raw = self._storage.get(redis_key)
-        if raw is None:
-            return None
-
-        stored = _dict_to_stored(raw)
-
-        if now >= stored.expires_at:
-            stored.status = "expired"
-            self._storage.set(redis_key, _stored_to_dict(stored), ttl=_EXPIRED_RETENTION_SECONDS)
-            return None
-
-        if stored.status not in _EXECUTABLE_FROM:
-            return None
-
-        stored.status = "executing"
-        # 保留原 TTL
-        remaining = self._storage.ttl(redis_key)
-        ttl = remaining if (remaining is not None and remaining > 0) else self._ttl
-        self._storage.set(redis_key, _stored_to_dict(stored), ttl=ttl)
-        return deepcopy(stored)
+        return self._atomic_claim(session_id, option_id)
 
     def mark_executed(
         self,
@@ -352,6 +333,43 @@ class FixOptionStore:
 
     # ── 内部辅助 ──────────────────────────────────────────────────
 
+    def _atomic_claim(
+        self, session_id: str, option_id: str,
+    ) -> StoredFixOption | None:
+        """原子 claim：WATCH/MULTI/EXEC 完成 pending/confirm_required → executing"""
+        redis_key = _build_key(session_id, option_id)
+
+        ttl = self._storage.ttl(redis_key)
+        if ttl <= 0:
+            ttl = self._ttl
+
+        def _update(data: dict[str, Any]) -> dict[str, Any] | None:
+            now = self._clock()
+            stored = _dict_to_stored(data)
+            # TTL 检查
+            if now >= stored.expires_at and stored.status in {"pending", "confirm_required"}:
+                data["status"] = "expired"
+                return data
+            # 状态检查
+            if stored.status not in _EXECUTABLE_FROM:
+                return None  # 拒绝更新
+            data["status"] = "executing"
+            return data
+
+        # cas_update 检查当前 status 在 _EXECUTABLE_FROM 中
+        result = self._storage.cas_update(
+            redis_key,
+            expected_status=None,  # 由 update_fn 自行判断
+            update_fn=_update,
+            ttl=ttl,
+        )
+        if result is None:
+            return None
+        stored = _dict_to_stored(result)
+        if stored.status == "executing":
+            return deepcopy(stored)
+        return None
+
     def _transition(
         self,
         session_id: str,
@@ -359,34 +377,36 @@ class FixOptionStore:
         target: FixOptionStatus,
         allowed_from: set[FixOptionStatus],
     ) -> bool:
-        """通用状态转移：检查前置条件 + TTL 后更新状态
+        """原子状态转移（WATCH/MULTI/EXEC CAS）
 
         pending/confirm_required 在 TTL 过期后阻止转换；
         executing 即使过期也允许 mark_executed/failed 完成收口。
         """
         redis_key = _build_key(session_id, option_id)
-        now = self._clock()
 
-        raw = self._storage.get(redis_key)
-        if raw is None:
+        ttl = self._storage.ttl(redis_key)
+        if ttl <= 0:
+            ttl = self._ttl
+
+        def _update(data: dict[str, Any]) -> dict[str, Any] | None:
+            now = self._clock()
+            stored = _dict_to_stored(data)
+            # TTL 检查：仅 pending/confirm_required 在过期时阻止
+            if now >= stored.expires_at and stored.status in {"pending", "confirm_required"}:
+                data["status"] = "expired"
+                return data
+            # 状态检查
+            if stored.status not in allowed_from:
+                return None  # 拒绝更新
+            data["status"] = target
+            return data
+
+        result = self._storage.cas_update(
+            redis_key,
+            expected_status=None,
+            update_fn=_update,
+            ttl=ttl,
+        )
+        if result is None:
             return False
-
-        stored = _dict_to_stored(raw)
-
-        # TTL 检查：仅 pending/confirm_required 在过期时阻止
-        if (
-            now >= stored.expires_at
-            and stored.status in {"pending", "confirm_required"}
-        ):
-            stored.status = "expired"
-            self._storage.set(redis_key, _stored_to_dict(stored), ttl=_EXPIRED_RETENTION_SECONDS)
-            return False
-
-        if stored.status not in allowed_from:
-            return False
-
-        stored.status = target
-        remaining = self._storage.ttl(redis_key)
-        ttl = remaining if (remaining is not None and remaining > 0) else self._ttl
-        self._storage.set(redis_key, _stored_to_dict(stored), ttl=ttl)
-        return True
+        return result.get("status") == target

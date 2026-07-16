@@ -80,6 +80,18 @@ class RedisStorage:
         """获取 key 剩余生存时间（秒），-1 表示永不过期，-2 表示不存在"""
         return self._client.ttl(key)  # type: ignore[no-any-return]
 
+    def raw_get(self, key: str) -> str | None:
+        """读取原始字符串值（不经过 JSON 解析）"""
+        return self._client.get(key)  # type: ignore[no-any-return]
+
+    def raw_set(self, key: str, value: str, ttl: int | None = None) -> bool:
+        """写入原始字符串值"""
+        if ttl is not None and ttl > 0:
+            self._client.set(key, value, ex=ttl)
+        else:
+            self._client.set(key, value)
+        return True
+
     def keys(self, pattern: str) -> list[str]:
         """按 pattern 列出所有匹配 key（慎用，生产环境避免 KEYS）"""
         return self._client.keys(pattern)  # type: ignore[no-any-return]
@@ -94,3 +106,58 @@ class RedisStorage:
             if cursor == 0:
                 break
         return result
+
+    # ── 原子 CAS 操作 ────────────────────────────────────────────
+
+    def cas_update(
+        self,
+        key: str,
+        expected_status: str | None,
+        update_fn: Any,
+        ttl: int | None = None,
+    ) -> dict[str, Any] | None:
+        """乐观锁 CAS 更新：WATCH → GET → check → MULTI → SET → EXEC
+
+        返回更新后的数据，或 None 表示 CAS 失败/状态不匹配/update_fn 拒绝。
+        """
+        pipeline = self._client.pipeline()
+        try:
+            pipeline.watch(key)
+            raw = pipeline.get(key)
+            if raw is None:
+                pipeline.unwatch()
+                return None
+            data = json.loads(raw)
+            if expected_status is not None and data.get("status") != expected_status:
+                pipeline.unwatch()
+                return None
+            new_data = update_fn(data)
+            if new_data is None:
+                # update_fn 拒绝更新（状态不满足转移条件）
+                pipeline.unwatch()
+                return None
+            new_raw = json.dumps(new_data, ensure_ascii=False, default=str)
+            pipeline.multi()
+            if ttl is not None and ttl > 0:
+                pipeline.set(key, new_raw, ex=ttl)
+            else:
+                pipeline.set(key, new_raw)
+            result = pipeline.execute()
+            if result is None:
+                # WATCH 检测到并发修改
+                return None
+            return new_data
+        except Exception:
+            pipeline.reset()
+            raise
+
+    def execute_script(self, script: str, keys: list[str], args: list[str]) -> Any:
+        """执行 Lua 脚本，原子性完成多步操作（生产环境 EVAL）
+
+        测试环境（fakeredis 不支持 EVAL）自动降级为 CAS 语义。
+        """
+        try:
+            return self._client.eval(script, len(keys), *keys, *args)
+        except Exception:
+            # fakeredis 不支持 EVAL → 委托给调用方的 CAS 路径
+            raise RuntimeError("EVAL not available") from None

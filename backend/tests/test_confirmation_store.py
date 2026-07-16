@@ -253,3 +253,72 @@ class TestConfirmationStoreTTL:
         c2, created2 = store.create_or_get("s1", "fix_ttl02", "t2")
         assert created2 is True
         assert c2.confirm_id != c.confirm_id
+
+
+class TestConfirmationConcurrency:
+    """并发竞争测试 —— 验证 Lua 原子操作"""
+
+    def test_concurrent_claim_approve_only_one_succeeds(self):
+        """两个线程同时 claim_approve 同一个 confirm_id，只有一个成功"""
+        import threading
+        store = _make_store()
+        c, _ = store.create_or_get("s1", "fix_cc01", "t1")
+        results = []
+
+        def _claim():
+            r = store.claim_approve("s1", c.confirm_id)
+            results.append(r.result)
+
+        t1 = threading.Thread(target=_claim)
+        t2 = threading.Thread(target=_claim)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert "claimed" in results
+        assert "conflict" in results or results.count("claimed") == 1
+
+    def test_concurrent_reject_only_one_succeeds(self):
+        """两个线程同时 reject 同一个 confirm_id，只有一个成功"""
+        import threading
+        store = _make_store()
+        c, _ = store.create_or_get("s1", "fix_cc02", "t1")
+        results = []
+
+        def _reject():
+            r = store.reject("s1", c.confirm_id)
+            results.append(r.result)
+
+        t1 = threading.Thread(target=_reject)
+        t2 = threading.Thread(target=_reject)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert "rejected" in results
+        assert "conflict" in results or results.count("rejected") == 1
+
+    def test_claim_approve_then_reject_fails(self):
+        """claim_approve 成功后，reject 应返回 conflict"""
+        store = _make_store()
+        c, _ = store.create_or_get("s1", "fix_cc03", "t1")
+        r1 = store.claim_approve("s1", c.confirm_id)
+        assert r1.result == "claimed"
+        r2 = store.reject("s1", c.confirm_id)
+        assert r2.result == "conflict"
+
+    def test_concurrent_mark_consumed_only_one_succeeds(self):
+        """两个线程同时 mark_consumed，只有一个成功"""
+        import threading
+        store = _make_store()
+        c, _ = store.create_or_get("s1", "fix_cc04", "t1")
+        store.claim_approve("s1", c.confirm_id)
+        results = []
+
+        def _consume():
+            results.append(store.mark_consumed("s1", c.confirm_id))
+
+        t1 = threading.Thread(target=_consume)
+        t2 = threading.Thread(target=_consume)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert sum(1 for r in results if r) == 1
