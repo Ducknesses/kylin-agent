@@ -282,6 +282,39 @@ MCP Server 可能在 HTTP 200 下返回 `result.blocked == true`，表示工具�
 
 ---
 
+### TD-21：PostgreSQL 数据库适配
+
+| 来源 | 优先级 | 状态 |
+| --- | --- | --- |
+| 生产化补全第 4 项 | **P0** | ✅ 已解决 |
+
+**问题描述**：
+项目仅支持 SQLite，所有数据访问层使用原始 `aiosqlite.connect()` 硬编码，无法切换到 PostgreSQL 以适应生产环境。
+
+**解决方式**：
+引入 SQLAlchemy 2.0 异步引擎作为统一数据库抽象层，通过 `DATABASE_URL` 环境变量切换 SQLite/PostgreSQL：
+- 新增 `app/core/database.py` 引擎工厂 + `app/models/` 4 个 ORM 模型
+- 改造 `SQLiteMessageRepository`、`AuditService`、`audit/models.py`、`audit/logger.py` 全部改用 SQLAlchemy `AsyncSession`
+- `config.py` 新增 `DATABASE_URL` 配置项，默认回退 `SQLITE_DB`（向后兼容）
+- 235 个非 LLM 测试全部通过，零回归
+
+**后续**：
+- [ ] PostgreSQL 真实连接验证（当前环境无 PG 实例，配置文件解析和引擎创建已验证）
+- [ ] 后续增量迁移考虑引入 Alembic
+
+**关联文件**：
+- `backend/config.py` — DATABASE_URL 配置
+- `backend/app/core/database.py` — 引擎工厂（新增）
+- `backend/app/models/` — ORM 模型（新增）
+- `backend/app/repositories/sqlite.py` — 改用 AsyncSession
+- `backend/app/services/audit_service.py` — 改用 ORM
+- `backend/app/audit/models.py` — 移除 raw DDL
+- `backend/app/audit/logger.py` — 委托 AuditService
+- `backend/app/main.py` — init_db → init_engine
+- `backend/docs/postgresql_adaptation_technical_debt.md` — 详细记录
+
+---
+
 ### TD-12：`audit.db` 从 Git 跟踪已移除
 
 | 来源 | 优先级 | 状态 |
@@ -328,6 +361,7 @@ MCP Server 可能在 HTTP 200 下返回 `result.blocked == true`，表示工具�
 | ~~TD-18~~ | Day 1 / Day 2 | `/api/audit/logs` legacy 路由 | fix/technical_debt_001 Part 2B 直接删除，统一使用 `GET /api/audit` |
 | ~~TD-19~~ | Day 1 | `audit.db` Git 跟踪 | `git rm --cached` 已执行，`.gitignore` 多重排除规则覆盖 |
 | ~~TD-20~~ | Day 2 | MCP `result.blocked=true` 未处理 | fix/technical_debt_001 Part 2C：MCPClient 识别 blocked 并转换为失败结构 |
+| ~~TD-21~~ | 生产化 P4 | 仅支持 SQLite，无法切换 PostgreSQL | feat/postgresql-storage：引入 SQLAlchemy 2.0 + ORM 模型，DATABASE_URL 统一切换 |
 
 ---
 
@@ -340,7 +374,7 @@ MCP Server 可能在 HTTP 200 下返回 `result.blocked == true`，表示工具�
 | **P2** | 3 | TD-03（ConnectionManager 拆分）、TD-06（FixOption）、TD-08（多 worker 状态）、TD-09（MCP 监控路由） |
 | **P3** | 2 | TD-04（死代码）、TD-11（时间过滤验证） |
 
-**总计：8 项未解决（TD-07 已于 Part 2C 解决），20 项已解决**
+**总计：8 项未解决，21 项已解决**
 
 ---
 

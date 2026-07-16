@@ -1,102 +1,136 @@
-"""SQLite 消息持久化实现
+"""消息持久化实现 —— 基于 SQLAlchemy ORM
 
-使用 aiosqlite（项目已有依赖），复用 data/audit.db 文件。
-表结构通过 audit/models.py 的 INIT_SQL 统一管理。
+通过统一的 AsyncSession 访问数据库，不感知底层是 SQLite 还是 PostgreSQL。
+表结构由 app/models/chat.py 的 ORM 模型定义，应用启动时自动创建。
 """
 
 import json
 import logging
-import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-import aiosqlite
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.models.chat import ChatMessage, ChatSession
 from app.repositories.base import MessageRepository
-from config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class SQLiteMessageRepository(MessageRepository):
-    """SQLite 实现 —— MessageRepository 接口"""
+    """消息持久化仓储 —— 基于 SQLAlchemy AsyncSession
+
+    支持两种使用模式：
+    - 生产：使用全局引擎（默认），通过 DATABASE_URL 切换 SQLite/PostgreSQL
+    - 测试：传入 db_path 创建独立临时引擎，数据隔离
+    """
 
     def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or settings.SQLITE_DB
-
-    def _ensure_dir(self) -> None:
-        """确保数据库目录存在"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        """
+        参数:
+            db_path: 可选，指定 SQLite 文件路径（测试用）。
+                     为 None 时使用全局 DATABASE_URL 引擎。
+        """
+        self._owns_engine = db_path is not None
+        if db_path is not None:
+            # 测试模式：为临时文件创建独立引擎，与全局引擎完全隔离
+            url = f"sqlite+aiosqlite:///{db_path}"
+            self._engine = create_async_engine(
+                url,
+                connect_args={"check_same_thread": False},
+            )
+            self._session_factory = async_sessionmaker(
+                self._engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+        else:
+            # 生产模式：使用全局引擎
+            from app.core.database import _async_session_factory
+            self._engine = None
+            self._session_factory = _async_session_factory
 
     async def _ensure_tables(self) -> None:
-        """确保 chat 表存在（幂等，首次调用时建表）"""
-        self._ensure_dir()
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.executescript("""
-                    CREATE TABLE IF NOT EXISTS chat_sessions (
-                        id TEXT PRIMARY KEY,
-                        title TEXT NOT NULL DEFAULT '新会话',
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS chat_messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_id TEXT NOT NULL REFERENCES chat_sessions(id),
-                        trace_id TEXT,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        message_type TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        metadata TEXT
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_chat_messages_session
-                        ON chat_messages(session_id, created_at);
-                """)
-                await db.commit()
-        except Exception as e:
-            logger.warning(f"[ChatHistory] 建表失败: {e}")
+        """确保表存在（幂等）。生产模式由 init_engine() 负责，此方法作为兜底。"""
+        if self._owns_engine and self._engine is not None:
+            engine = self._engine
+        else:
+            from app.core.database import _engine
+            engine = _engine
+        async with engine.begin() as conn:
+            from app.models import Base
+            await conn.run_sync(Base.metadata.create_all)
+
+    @asynccontextmanager
+    async def _get_session(self) -> AsyncIterator[AsyncSession]:
+        """获取会话的上下文管理器（自动提交/回滚）"""
+        async with self._session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def close(self) -> None:
+        """释放测试引擎资源"""
+        if self._owns_engine and self._engine is not None:
+            await self._engine.dispose()
 
     # ── 会话 ──────────────────────────────────────────────────────
 
     async def create_session(self, session_id: str, title: str = "新会话") -> None:
+        """创建新会话记录（幂等：已存在则忽略）"""
         await self._ensure_tables()
         now = datetime.now(timezone.utc).isoformat()
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    """INSERT OR IGNORE INTO chat_sessions (id, title, created_at, updated_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (session_id, title, now, now),
-                )
-                await db.commit()
+            async with self._get_session() as session:
+                # 幂等：先检查是否存在
+                existing = await session.get(ChatSession, session_id)
+                if existing is None:
+                    cs = ChatSession(
+                        id=session_id, title=title,
+                        created_at=now, updated_at=now,
+                    )
+                    session.add(cs)
             logger.debug(f"[ChatHistory] 会话已创建: {session_id}")
         except Exception as e:
             logger.warning(f"[ChatHistory] 创建会话失败 (已忽略): {e}")
 
     async def list_sessions(self) -> list[dict]:
+        """按更新时间倒序返回所有会话"""
         await self._ensure_tables()
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    "SELECT id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC"
-                ) as cursor:
-                    return [dict(row) for row in await cursor.fetchall()]
+            async with self._get_session() as session:
+                result = await session.execute(
+                    select(ChatSession).order_by(ChatSession.updated_at.desc())
+                )
+                rows = result.scalars().all()
+                return [
+                    {
+                        "id": r.id, "title": r.title,
+                        "created_at": r.created_at, "updated_at": r.updated_at,
+                    }
+                    for r in rows
+                ]
         except Exception as e:
             logger.warning(f"[ChatHistory] 查询会话列表失败: {e}")
             return []
 
     async def get_session(self, session_id: str) -> dict | None:
+        """获取单个会话元数据，不存在返回 None"""
         await self._ensure_tables()
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    "SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = ?",
-                    (session_id,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    return dict(row) if row else None
+            async with self._get_session() as session:
+                row = await session.get(ChatSession, session_id)
+                if row is None:
+                    return None
+                return {
+                    "id": row.id, "title": row.title,
+                    "created_at": row.created_at, "updated_at": row.updated_at,
+                }
         except Exception as e:
             logger.warning(f"[ChatHistory] 查询会话失败: {e}")
             return None
@@ -117,48 +151,53 @@ class SQLiteMessageRepository(MessageRepository):
         now = datetime.now(timezone.utc).isoformat()
         meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    """INSERT INTO chat_messages
-                       (session_id, trace_id, role, content, message_type, created_at, metadata)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (session_id, trace_id, role, content, message_type, now, meta_json),
+            async with self._get_session() as session:
+                msg = ChatMessage(
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    role=role,
+                    content=content,
+                    message_type=message_type,
+                    created_at=now,
+                    meta_json=meta_json,
                 )
-                await db.commit()
+                session.add(msg)
                 # 同时更新会话 updated_at
-                await db.execute(
-                    "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-                    (now, session_id),
+                await session.execute(
+                    update(ChatSession)
+                    .where(ChatSession.id == session_id)
+                    .values(updated_at=now)
                 )
-                await db.commit()
             logger.debug(f"[ChatHistory] 消息已保存: {session_id} {role} {message_type}")
         except Exception as e:
             logger.warning(f"[ChatHistory] 保存消息失败 (已忽略): {e}")
 
     async def get_messages(self, session_id: str) -> list[dict]:
+        """按时间顺序返回指定会话的所有消息"""
         await self._ensure_tables()
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    """SELECT id, session_id, trace_id, role, content, message_type,
-                              created_at, metadata
-                       FROM chat_messages
-                       WHERE session_id = ?
-                       ORDER BY id ASC""",
-                    (session_id,),
-                ) as cursor:
-                    rows = await cursor.fetchall()
-                    result = []
-                    for row in rows:
-                        d = dict(row)
-                        if d.get("metadata"):
-                            try:
-                                d["metadata"] = json.loads(d["metadata"])
-                            except json.JSONDecodeError:
-                                pass
-                        result.append(d)
-                    return result
+            async with self._get_session() as session:
+                result = await session.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == session_id)
+                    .order_by(ChatMessage.id.asc())
+                )
+                rows = result.scalars().all()
+                msgs = []
+                for r in rows:
+                    d = {
+                        "id": r.id, "session_id": r.session_id,
+                        "trace_id": r.trace_id, "role": r.role,
+                        "content": r.content, "message_type": r.message_type,
+                        "created_at": r.created_at, "metadata": None,
+                    }
+                    if r.meta_json:
+                        try:
+                            d["metadata"] = json.loads(r.meta_json)
+                        except json.JSONDecodeError:
+                            pass
+                    msgs.append(d)
+                return msgs
         except Exception as e:
             logger.warning(f"[ChatHistory] 查询消息失败: {e}")
             return []

@@ -38,8 +38,16 @@ class Settings:
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-    # SQLite
-    SQLITE_DB: str = os.getenv("SQLITE_DB", "./data/audit.db")
+    # 数据库 —— 通过 DATABASE_URL 统一切换 SQLite / PostgreSQL
+    # 开发环境（SQLite）：sqlite+aiosqlite:///./data/app.db
+    # 生产环境（PostgreSQL）：postgresql+asyncpg://user:password@host:5432/dbname
+    # 未设置 DATABASE_URL 时回退使用 SQLITE_DB（向后兼容）
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        f"sqlite+aiosqlite:///{os.getenv('SQLITE_DB', './data/app.db')}",
+    )
+    # 保留旧配置项以兼容已有代码直接读取 SQLITE_DB 的场景（逐步废弃）
+    SQLITE_DB: str = os.getenv("SQLITE_DB", "./data/app.db")
 
     # 运行时参数
     COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "30"))
