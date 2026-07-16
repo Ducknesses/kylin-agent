@@ -24,7 +24,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INSTALL_DIR="/opt/kylin-agent"
 
 # ---- 1. 检查前端构建产物 ----
-echo "[1/4] 检查前端构建产物..."
+echo "[1/5] 检查前端构建产物..."
 if [ ! -d "$PROJECT_ROOT/frontend/dist" ]; then
     echo "[INFO] 未找到 frontend/dist/，正在执行构建..."
     cd "$PROJECT_ROOT/frontend"
@@ -44,14 +44,40 @@ echo "  ✓ 前端构建产物就绪"
 echo ""
 
 # ---- 2. 复制静态文件 ----
-echo "[2/4] 部署前端静态文件到 $INSTALL_DIR/frontend/dist ..."
+echo "[2/5] 部署前端静态文件到 $INSTALL_DIR/frontend/dist ..."
 mkdir -p "$INSTALL_DIR/frontend/dist"
 cp -r "$PROJECT_ROOT/frontend/dist"/* "$INSTALL_DIR/frontend/dist/"
 echo "  ✓ 静态文件已复制"
 echo ""
 
-# ---- 3. 检测包管理器并安装 Nginx ----
-echo "[3/4] 安装 Nginx 反向代理配置..."
+# ---- 3. 生成 SSL 证书（如不存在） ----
+echo "[3/5] 检查 SSL 证书..."
+
+CERT_DIR="/etc/nginx/certs"
+CERT_FILE="$CERT_DIR/kylin-agent.crt"
+KEY_FILE="$CERT_DIR/kylin-agent.key"
+
+if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+    echo "[INFO] SSL 证书不存在，正在生成自签名证书..."
+    mkdir -p "$CERT_DIR"
+    # 尝试获取服务器 FQDN 作为 CN，回退到 localhost
+    CERT_CN=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "localhost")
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "$KEY_FILE" \
+        -out "$CERT_FILE" \
+        -subj "/CN=${CERT_CN}" 2>/dev/null
+    chmod 600 "$KEY_FILE"
+    chmod 644 "$CERT_FILE"
+    echo "  ✓ 自签名证书已生成（CN=${CERT_CN}）"
+    echo "  [WARN] 这是自签名证书，浏览器会显示安全警告。"
+    echo "  [WARN] 生产环境请替换为正式 SSL 证书。"
+else
+    echo "  ✓ SSL 证书已存在"
+fi
+echo ""
+
+# ---- 4. 检测包管理器并安装 Nginx ----
+echo "[4/5] 安装 Nginx 反向代理配置..."
 
 # 检测包管理器类型
 if command -v apt-get &>/dev/null; then
@@ -123,8 +149,8 @@ else
 fi
 echo ""
 
-# ---- 4. 修正文件权限与 SELinux 上下文 ----
-echo "[4/4] 修正文件权限与 SELinux 上下文..."
+# ---- 5. 修正文件权限与 SELinux 上下文 ----
+echo "[5/5] 修正文件权限与 SELinux 上下文..."
 
 # 确保 nginx 用户可读所有文件
 chown -R agent-read:agent-read "$INSTALL_DIR/frontend" 2>/dev/null || true
@@ -175,10 +201,10 @@ fi
 echo "  前端访问地址:"
 if [ -n "$SERVER_IPS" ]; then
     echo "$SERVER_IPS" | while read -r ip; do
-        [ -n "$ip" ] && echo "    http://$ip"
+        [ -n "$ip" ] && echo "    https://$ip"
     done
 else
-    echo "    http://<服务器IP>（请手动执行 ip addr 查看本机IP）"
+    echo "    https://<服务器IP>（请手动执行 ip addr 查看本机IP）"
 fi
 echo ""
 echo "  静态文件路径: $INSTALL_DIR/frontend/dist"

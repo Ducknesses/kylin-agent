@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 // 自动适配：生产环境走 Nginx 代理（同源），开发环境直连 localhost:8000
-function getDefaultWsUrl() {
+export function getDefaultWsUrl() {
   if (import.meta.env.VITE_WS_BASE_URL) return import.meta.env.VITE_WS_BASE_URL
   // 生产环境：使用当前页面的 host + 协议（Nginx 已代理 /ws 路径）
   if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
@@ -12,7 +12,7 @@ function getDefaultWsUrl() {
   return 'ws://localhost:8000'
 }
 
-function getDefaultApiUrl() {
+export function getDefaultApiUrl() {
   if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL
   // 生产环境：http.js 已使用相对路径 /api，此处保持同源
   if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {

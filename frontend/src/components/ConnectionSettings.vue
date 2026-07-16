@@ -72,7 +72,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWsStore } from '@/stores/wsStore'
+import { useWsStore, getDefaultWsUrl, getDefaultApiUrl } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
 
 const props = defineProps({
@@ -106,8 +106,8 @@ watch(visible, (val) => {
 function handleSave() {
   // 保存到 store（会自动同步 localStorage）
   wsStore.setToken(localToken.value.trim())
-  wsStore.setWsBaseUrl(localWsUrl.value.trim() || 'ws://localhost:8000')
-  wsStore.setApiBaseUrl(localApiUrl.value.trim() || 'http://localhost:8000')
+  wsStore.setWsBaseUrl(localWsUrl.value.trim() || getDefaultWsUrl())
+  wsStore.setApiBaseUrl(localApiUrl.value.trim() || getDefaultApiUrl())
 
   ElMessage.success('配置已保存')
 
@@ -130,8 +130,8 @@ function handleCancel() {
 
 function handleClearAll() {
   localToken.value = ''
-  localWsUrl.value = 'ws://localhost:8000'
-  localApiUrl.value = 'http://localhost:8000'
+  localWsUrl.value = getDefaultWsUrl()
+  localApiUrl.value = getDefaultApiUrl()
   wsStore.resetToDefaults()
   ElMessage.success('已清除所有配置，恢复默认值')
 
@@ -148,8 +148,8 @@ function handleClearAll() {
 }
 
 function resetDefaults() {
-  localWsUrl.value = 'ws://localhost:8000'
-  localApiUrl.value = 'http://localhost:8000'
+  localWsUrl.value = getDefaultWsUrl()
+  localApiUrl.value = getDefaultApiUrl()
 }
 </script>
 
