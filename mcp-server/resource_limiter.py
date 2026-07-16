@@ -19,6 +19,8 @@
 """
 import logging
 import os
+import signal
+import time
 import uuid
 
 from config import config
@@ -176,7 +178,6 @@ class CgroupV2Limiter(ResourceLimiter):
         except OSError:
             return
 
-        import signal
         for pid_str in pids:
             try:
                 pid = int(pid_str)
@@ -204,7 +205,6 @@ class CgroupV2Limiter(ResourceLimiter):
         try:
             self.kill_all()
             # 等待进程退出
-            import time
             time.sleep(0.1)
 
             # 再次检查并清理残留 PID

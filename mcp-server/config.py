@@ -27,6 +27,62 @@ except Exception as _e:
     print(f"[ERROR] .env 文件加载异常: {_e}", file=sys.stderr)
 
 
+# ── 配置值校验 ──────────────────────────────────────────────────────
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    """从环境变量读取正整数，非法值启动时报错"""
+    raw = os.getenv(name, "")
+    if raw == "" or raw is None:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"配置项 {name} 的值不是有效整数: {raw!r}"
+        )
+    if val <= 0:
+        raise ValueError(
+            f"配置项 {name} 必须为正整数，当前值: {val}"
+        )
+    return val
+
+
+def _get_non_negative_int_env(name: str, default: int) -> int:
+    """从环境变量读取非负整数，非法值启动时报错"""
+    raw = os.getenv(name, "")
+    if raw == "" or raw is None:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"配置项 {name} 的值不是有效整数: {raw!r}"
+        )
+    if val < 0:
+        raise ValueError(
+            f"配置项 {name} 不能为负数，当前值: {val}"
+        )
+    return val
+
+
+def _get_non_negative_float_env(name: str, default: float) -> float:
+    """从环境变量读取非负浮点数，非法值启动时报错"""
+    raw = os.getenv(name, "")
+    if raw == "" or raw is None:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"配置项 {name} 的值不是有效数字: {raw!r}"
+        )
+    if val < 0:
+        raise ValueError(
+            f"配置项 {name} 不能为负数，当前值: {val}"
+        )
+    return val
+
+
 class Config:
     """全局配置，优先从环境变量读取。支持运行时动态更新部分字段。"""
 
@@ -59,19 +115,18 @@ class Config:
     # 总开关：false 时完全跳过 cgroups，仅保留 timeout
     CGROUP_ENABLED: bool = os.getenv("CGROUP_ENABLED", "false").lower() in ("true", "1", "yes")
     # CPU: quota（微秒/period）和 period（微秒），默认 50% CPU（50000/100000）
-    CGROUP_CPU_QUOTA: str = os.getenv("CGROUP_CPU_QUOTA", "50000")
-    CGROUP_CPU_PERIOD: str = os.getenv("CGROUP_CPU_PERIOD", "100000")
+    CGROUP_CPU_QUOTA: int = _get_positive_int_env("CGROUP_CPU_QUOTA", 50000)
+    CGROUP_CPU_PERIOD: int = _get_positive_int_env("CGROUP_CPU_PERIOD", 100000)
     # Memory: 字节，默认 256MB
-    CGROUP_MEMORY_MAX: str = os.getenv("CGROUP_MEMORY_MAX", "268435456")
-    # Memory Swap: 字节，默认 0（禁用 swap，防止写磁盘伪装内存释放）
-    CGROUP_MEMORY_SWAP_MAX: str = os.getenv("CGROUP_MEMORY_SWAP_MAX", "0")
+    CGROUP_MEMORY_MAX: int = _get_positive_int_env("CGROUP_MEMORY_MAX", 268435456)
+    # Memory Swap: 字节，默认 0（禁用 swap），允许 0
+    CGROUP_MEMORY_SWAP_MAX: int = _get_non_negative_int_env("CGROUP_MEMORY_SWAP_MAX", 0)
     # PIDs: 最大进程数，默认 64（防 fork bomb）
-    CGROUP_PIDS_MAX: str = os.getenv("CGROUP_PIDS_MAX", "64")
+    CGROUP_PIDS_MAX: int = _get_positive_int_env("CGROUP_PIDS_MAX", 64)
     # IO: io.max 格式（空=不限制），例如 "8:0 rbps=10485760 wiops=100"
-    # 注意：必须指定设备 major:minor，不写死特定机器值
     CGROUP_IO_MAX: str = os.getenv("CGROUP_IO_MAX", "")
     # cgroup 清理超时（秒）
-    CGROUP_CLEANUP_TIMEOUT: int = int(os.getenv("CGROUP_CLEANUP_TIMEOUT", "5"))
+    CGROUP_CLEANUP_TIMEOUT: float = _get_non_negative_float_env("CGROUP_CLEANUP_TIMEOUT", 5.0)
 
     # 允许以哪些用户身份执行命令
     ALLOWED_USERS: list = ["agent-read", "agent-op", "agent-admin", "agent"]

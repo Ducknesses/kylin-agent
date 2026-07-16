@@ -2,9 +2,11 @@
 import logging
 import os
 import re
+import select
 import signal
 import subprocess
 import time
+import uuid
 
 from config import config
 from resource_limiter import CgroupV2Limiter, ResourceLimitError
@@ -173,8 +175,7 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
         exec_cmd = cmd_parts
 
     # ==== 第6步：cgroups 资源限制（新增）====
-    import uuid as _uuid
-    task_id = _uuid.uuid4().hex[:12]
+    task_id = uuid.uuid4().hex[:12]
     limiter = CgroupV2Limiter()
     cgroup_active = False
 
@@ -318,20 +319,31 @@ def _kill_process_group(proc: subprocess.Popen | None) -> None:
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
+            # 回收子进程，避免僵尸进程
+            try:
+                proc.wait(timeout=1)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
     except Exception as e:
         logger.warning("[Sandbox] 进程组终止异常: %s", e)
 
 
 def _stdout_before_kill(proc: subprocess.Popen | None) -> str:
-    """尝试读取进程已有的 stdout（超时前已输出的内容）"""
+    """尝试读取进程已有的 stdout（超时前已输出的内容）。
+
+    使用 select 检查可读性 + os.read 限长读取，避免阻塞等待 EOF。
+    """
     if proc is None or proc.stdout is None:
         return ""
     try:
-        # 非阻塞读取已有的输出
-        import select
         readable, _, _ = select.select([proc.stdout], [], [], 0.1)
-        if readable:
-            return proc.stdout.read()
-    except Exception:
-        pass
-    return ""
+        if not readable:
+            return ""
+        # 使用 os.read 限长读取（4096 字节），避免 read() 等待 EOF
+        data = os.read(proc.stdout.fileno(), 4096)
+        if not data:
+            return ""
+        # text=True 时 Popen 内部是 TextIOWrapper，os.read 返回 bytes
+        return data.decode("utf-8", errors="replace")
+    except (OSError, ValueError, AttributeError):
+        return ""
