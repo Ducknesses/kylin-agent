@@ -1,11 +1,13 @@
-"""沙箱执行引擎：命令白名单校验、危险模式过滤、超时控制、用户降级"""
+"""沙箱执行引擎：命令白名单校验、危险模式过滤、超时控制、用户降级、cgroups 资源限制"""
 import logging
 import os
 import re
+import signal
 import subprocess
 import time
 
 from config import config
+from resource_limiter import CgroupV2Limiter, ResourceLimitError
 
 logger = logging.getLogger("mcp.sandbox")
 
@@ -170,23 +172,69 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
     else:
         exec_cmd = cmd_parts
 
-    # ==== 第6步：执行命令 ====
-    logger.info("[Sandbox] 执行: %s (user=%s, timeout=%ds)", command, user, actual_timeout)
+    # ==== 第6步：cgroups 资源限制（新增）====
+    import uuid as _uuid
+    task_id = _uuid.uuid4().hex[:12]
+    limiter = CgroupV2Limiter()
+    cgroup_active = False
 
     try:
-        result = subprocess.run(
+        cgroup_active = limiter.setup(task_id)
+    except ResourceLimitError as e:
+        elapsed = round(time.time() - start_time, 3)
+        logger.error("[Sandbox] cgroup 创建失败（fail-closed）: %s", e)
+        # 不继续执行：fail-closed
+        return {
+            "stdout": "",
+            "stderr": f"资源限制启用失败，拒绝执行命令。原因: {e}",
+            "returncode": -1,
+            "execution_time": elapsed,
+            "blocked": True,
+        }
+
+    # ==== 第7步：启动受限进程（使用 Popen + 新进程组）====
+    logger.info("[Sandbox] 执行: %s (user=%s, timeout=%ds, cgroup=%s)",
+                command, user, actual_timeout, task_id if cgroup_active else "disabled")
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
             exec_cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=actual_timeout,
-            # 不在shell中执行，避免注入
             shell=False,
+            # 创建新进程组：setpgid(0, 0) 使子进程成为新进程组组长
+            # 配合 os.killpg 实现完整进程树终止
+            start_new_session=True,
         )
+
+        # 将进程加入 cgroup（若启用）
+        if cgroup_active:
+            try:
+                limiter.attach(proc.pid)
+            except ResourceLimitError as e:
+                # 加入 cgroup 失败 → 终止进程，fail-closed
+                logger.error("[Sandbox] 无法将进程加入 cgroup: %s", e)
+                _kill_process_group(proc)
+                elapsed = round(time.time() - start_time, 3)
+                return {
+                    "stdout": "",
+                    "stderr": f"资源限制启用失败，拒绝执行命令",
+                    "returncode": -1,
+                    "execution_time": elapsed,
+                    "blocked": True,
+                }
+
+        # 等待进程完成或超时
+        stdout, stderr = proc.communicate(timeout=actual_timeout)
+
     except subprocess.TimeoutExpired:
         elapsed = round(time.time() - start_time, 3)
         logger.warning("[Sandbox] 命令超时: %s (%.1fs)", command, elapsed)
+        _kill_process_group(proc)
         return {
-            "stdout": "",
+            "stdout": _stdout_before_kill(proc),
             "stderr": f"命令执行超时（{actual_timeout}秒）: {command}",
             "returncode": -1,
             "execution_time": elapsed,
@@ -205,6 +253,7 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
     except Exception as e:
         elapsed = round(time.time() - start_time, 3)
         logger.exception("[Sandbox] 命令执行异常: %s", e)
+        _kill_process_group(proc)
         return {
             "stdout": "",
             "stderr": f"执行异常: {str(e)}",
@@ -212,12 +261,19 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
             "execution_time": elapsed,
             "blocked": True,
         }
+    finally:
+        # 无论如何都要清理 cgroup（包括正常/异常/timeout/OOM 等所有路径）
+        # cleanup 异常不能覆盖原始执行结果
+        try:
+            limiter.cleanup()
+        except Exception as e:
+            logger.warning("[Sandbox] cgroup 清理异常（已忽略）: %s", e)
 
     elapsed = round(time.time() - start_time, 3)
 
     # 截断输出，防止OOM
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
+    stdout = stdout or ""
+    stderr = stderr or ""
 
     if len(stdout) > config.MAX_OUTPUT_LINES * 200:
         stdout_lines = stdout.split("\n")
@@ -226,7 +282,7 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
 
     logger.info(
         "[Sandbox] 执行完成: exit=%d, stdout=%d, stderr=%d, time=%.3fs",
-        result.returncode,
+        proc.returncode if proc else -1,
         len(stdout),
         len(stderr),
         elapsed,
@@ -235,6 +291,47 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
     return {
         "stdout": stdout,
         "stderr": stderr,
-        "returncode": result.returncode,
+        "returncode": proc.returncode if proc else -1,
         "execution_time": elapsed,
     }
+
+
+# ── 进程组辅助函数 ──────────────────────────────────────────────────
+
+
+def _kill_process_group(proc: subprocess.Popen | None) -> None:
+    """终止进程及其所属进程组（SIGKILL），确保子/孙进程全部终止"""
+    if proc is None:
+        return
+    try:
+        pid = proc.pid
+        if pid is not None:
+            # 先尝试 SIGTERM（优雅终止）
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            # 等待 200ms
+            time.sleep(0.2)
+            # 再 SIGKILL（强制终止）
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+    except Exception as e:
+        logger.warning("[Sandbox] 进程组终止异常: %s", e)
+
+
+def _stdout_before_kill(proc: subprocess.Popen | None) -> str:
+    """尝试读取进程已有的 stdout（超时前已输出的内容）"""
+    if proc is None or proc.stdout is None:
+        return ""
+    try:
+        # 非阻塞读取已有的输出
+        import select
+        readable, _, _ = select.select([proc.stdout], [], [], 0.1)
+        if readable:
+            return proc.stdout.read()
+    except Exception:
+        pass
+    return ""

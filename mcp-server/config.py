@@ -55,6 +55,24 @@ class Config:
     COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "30"))
     MAX_OUTPUT_LINES: int = int(os.getenv("MAX_OUTPUT_LINES", "1000"))
 
+    # ── cgroups v2 资源限制 ──────────────────────────────────────
+    # 总开关：false 时完全跳过 cgroups，仅保留 timeout
+    CGROUP_ENABLED: bool = os.getenv("CGROUP_ENABLED", "false").lower() in ("true", "1", "yes")
+    # CPU: quota（微秒/period）和 period（微秒），默认 50% CPU（50000/100000）
+    CGROUP_CPU_QUOTA: str = os.getenv("CGROUP_CPU_QUOTA", "50000")
+    CGROUP_CPU_PERIOD: str = os.getenv("CGROUP_CPU_PERIOD", "100000")
+    # Memory: 字节，默认 256MB
+    CGROUP_MEMORY_MAX: str = os.getenv("CGROUP_MEMORY_MAX", "268435456")
+    # Memory Swap: 字节，默认 0（禁用 swap，防止写磁盘伪装内存释放）
+    CGROUP_MEMORY_SWAP_MAX: str = os.getenv("CGROUP_MEMORY_SWAP_MAX", "0")
+    # PIDs: 最大进程数，默认 64（防 fork bomb）
+    CGROUP_PIDS_MAX: str = os.getenv("CGROUP_PIDS_MAX", "64")
+    # IO: io.max 格式（空=不限制），例如 "8:0 rbps=10485760 wiops=100"
+    # 注意：必须指定设备 major:minor，不写死特定机器值
+    CGROUP_IO_MAX: str = os.getenv("CGROUP_IO_MAX", "")
+    # cgroup 清理超时（秒）
+    CGROUP_CLEANUP_TIMEOUT: int = int(os.getenv("CGROUP_CLEANUP_TIMEOUT", "5"))
+
     # 允许以哪些用户身份执行命令
     ALLOWED_USERS: list = ["agent-read", "agent-op", "agent-admin", "agent"]
 
