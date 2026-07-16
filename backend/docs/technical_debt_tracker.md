@@ -299,8 +299,9 @@ MCP Server 可能在 HTTP 200 下返回 `result.blocked == true`，表示工具�
 - 235 个非 LLM 测试全部通过，零回归
 
 **后续**：
-- [ ] PostgreSQL 真实连接验证（当前环境无 PG 实例，配置文件解析和引擎创建已验证）
-- [ ] 后续增量迁移考虑引入 Alembic
+- [ ] PostgreSQL 真实连接验证（当前环境无 PG 实例）→ 详见 **TD-22**
+- [ ] Repository 命名去 SQLite 化 → 详见 **TD-23**
+- [ ] Session Factory 公共接口封装 → 详见 **TD-24**
 
 **关联文件**：
 - `backend/config.py` — DATABASE_URL 配置
@@ -312,6 +313,60 @@ MCP Server 可能在 HTTP 200 下返回 `result.blocked == true`，表示工具�
 - `backend/app/audit/logger.py` — 委托 AuditService
 - `backend/app/main.py` — init_db → init_engine
 - `backend/docs/postgresql_adaptation_technical_debt.md` — 详细记录
+
+---
+
+### TD-22：PostgreSQL 真实环境测试缺失
+
+| 来源 | 优先级 | 状态 |
+| --- | --- | --- |
+| TD-21 子项 | **P2** | ❌ 未处理 |
+
+**问题描述**：
+数据库适配已通过 SQLAlchemy 支持 SQLite/PostgreSQL 双后端，但所有自动化测试均运行在 SQLite 临时数据库上，缺少真实 PostgreSQL 集成验证。
+
+**后续方案**：
+Docker Compose 增加 PG 测试容器 + CI 增加 PG 测试任务。
+
+**关联文件**：
+- `backend/docs/postgresql_adaptation_technical_debt.md` — 技术债 1
+
+---
+
+### TD-23：Repository 命名历史遗留
+
+| 来源 | 优先级 | 状态 |
+| --- | --- | --- |
+| TD-21 子项 | **P3** | ❌ 未处理 |
+
+**问题描述**：
+`SQLiteMessageRepository` 类名和 `sqlite.py` 文件名仍带 "SQLite"，但已通过 SQLAlchemy 支持多数据库，名称与实际抽象层次不符。
+
+**后续方案**：
+重命名为 `DatabaseMessageRepository` / `message_repository.py`。
+
+**关联文件**：
+- `backend/app/repositories/sqlite.py` / `__init__.py`
+- `backend/app/dependencies.py`
+
+---
+
+### TD-24：Session Factory 封装优化
+
+| 来源 | 优先级 | 状态 |
+| --- | --- | --- |
+| TD-21 子项 | **P3** | ❌ 未处理 |
+
+**问题描述**：
+Repository/Service 直接引用 `database.py` 的私有变量 `_async_session_factory`，降低了模块封装性。
+
+**后续方案**：
+增加 `get_session_factory()` 公共接口。
+
+**关联文件**：
+- `backend/app/core/database.py`
+- `backend/app/repositories/sqlite.py`
+- `backend/app/services/audit_service.py`
 
 ---
 
@@ -371,10 +426,10 @@ MCP Server 可能在 HTTP 200 下返回 `result.blocked == true`，表示工具�
 | --- | --- | --- |
 | **P0** | 1 | TD-01（真实 LLM/MCP 链路未接入） |
 | **P1** | 2 | TD-02（安全检测重叠）、TD-05（agent_harness 未创建） |
-| **P2** | 3 | TD-03（ConnectionManager 拆分）、TD-06（FixOption）、TD-08（多 worker 状态）、TD-09（MCP 监控路由） |
-| **P3** | 2 | TD-04（死代码）、TD-11（时间过滤验证） |
+| **P2** | 4 | TD-03（ConnectionManager 拆分）、TD-06（FixOption）、TD-08（多 worker 状态）、TD-09（MCP 监控路由）、TD-22（PG 真实测试） |
+| **P3** | 4 | TD-04（死代码）、TD-11（时间过滤验证）、TD-23（Repository 命名）、TD-24（Session Factory 封装） |
 
-**总计：8 项未解决，21 项已解决**
+**总计：11 项未解决，21 项已解决**
 
 ---
 
