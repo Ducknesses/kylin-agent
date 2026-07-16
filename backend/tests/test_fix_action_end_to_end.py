@@ -105,7 +105,7 @@ def _opt(k):
     oid, tool, params, rc = _O[k]
     from app.schemas.action import FixOption
     risk = k if k in ("low", "high") else "medium"
-    return FixOption(option_id=oid, title="t", description="d", risk_level=risk, tool=tool, params=params, requires_confirm=rc)
+    return FixOption(option_id=oid, title="t", description="d", risk_level=risk, tool=tool, params=params, requires_confirm=rc)  # type: ignore[reportArgumentType]
 
 
 class TestOrchToAction:

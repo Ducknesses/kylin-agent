@@ -1,6 +1,5 @@
 """全局配置"""
 import os
-from typing import Optional
 
 
 class Settings:
@@ -39,8 +38,16 @@ class Settings:
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-    # SQLite
-    SQLITE_DB: str = os.getenv("SQLITE_DB", "./data/audit.db")
+    # 数据库 —— 通过 DATABASE_URL 统一切换 SQLite / PostgreSQL
+    # 开发环境（SQLite）：sqlite+aiosqlite:///./data/app.db
+    # 生产环境（PostgreSQL）：postgresql+asyncpg://user:password@host:5432/dbname
+    # 未设置 DATABASE_URL 时回退使用 SQLITE_DB（向后兼容）
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        f"sqlite+aiosqlite:///{os.getenv('SQLITE_DB', './data/app.db')}",
+    )
+    # 保留旧配置项以兼容已有代码直接读取 SQLITE_DB 的场景（逐步废弃）
+    SQLITE_DB: str = os.getenv("SQLITE_DB", "./data/app.db")
 
     # 运行时参数
     COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "30"))
@@ -61,6 +68,12 @@ class Settings:
 
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    # 文件日志开关：true/1/yes → 启用，其他 → 禁用
+    LOG_TO_FILE: bool = os.getenv("LOG_TO_FILE", "true").strip().lower() in ("true", "1", "yes")
+    LOG_DIR: str = os.getenv("LOG_DIR", "./logs")
+    LOG_FILE: str = os.getenv("LOG_FILE", "backend.log")
+    # 轮转保留天数，非负整数
+    LOG_BACKUP_COUNT: str = os.getenv("LOG_BACKUP_COUNT", "14")
 
 
 settings = Settings()

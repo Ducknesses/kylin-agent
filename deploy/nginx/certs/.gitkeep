@@ -1,0 +1,12 @@
+# 证书目录 — 占位文件
+# 
+# 生产环境请将以下文件放入本目录（禁止提交到 Git）：
+#   - kylin-agent.crt  （SSL 证书，或 fullchain.pem）
+#   - kylin-agent.key  （私钥）
+#
+# 部署时复制到 /etc/nginx/certs/ 并设置权限：
+#   sudo mkdir -p /etc/nginx/certs
+#   sudo cp certs/kylin-agent.crt /etc/nginx/certs/
+#   sudo cp certs/kylin-agent.key /etc/nginx/certs/
+#   sudo chmod 600 /etc/nginx/certs/kylin-agent.key
+#   sudo chown root:root /etc/nginx/certs/*

@@ -39,10 +39,21 @@ env/
 backend/data/backup/
 backend/data/audit.db
 
+# Logs
+backend/logs/*
+!backend/logs/.gitkeep
+
 # Misc
 ws_test.py
 tmp/
 .clinerules
+
+# SSL/TLS certificates — never commit real keys
+deploy/nginx/certs/*.crt
+deploy/nginx/certs/*.key
+deploy/nginx/certs/*.pem
+deploy/nginx/certs/*.csr
+!deploy/nginx/certs/.gitkeep
 
 # Reasonix
 .reasonix/

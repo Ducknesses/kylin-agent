@@ -174,13 +174,13 @@ class TestActionExecuteRequest:
     def test_option_id_uppercase_hex_rejected(self):
         with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_ABC12345")
     def test_extra_tool_field_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", tool="fix_9dd4e461")
+        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", tool="fix_9dd4e461")  # type: ignore[reportCallIssue]
     def test_extra_params_field_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", params={})
+        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", params={})  # type: ignore[reportCallIssue]
     def test_extra_risk_level_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", risk_level="low")
+        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", risk_level="low")  # type: ignore[reportCallIssue]
     def test_extra_confirm_field_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", confirm=True)
+        with pytest.raises(ValidationError): ActionExecuteRequest(session_id="s1", option_id="fix_deadbeef", confirm=True)  # type: ignore[reportCallIssue]
     def test_whitespace_stripped(self):
         req = ActionExecuteRequest(session_id="  s1  ", option_id="fix_a1b2c3d4")
         assert req.session_id == "s1" and req.option_id == "fix_a1b2c3d4"
@@ -197,7 +197,7 @@ class TestActionExecuteResponse:
         resp = ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="blocked", risk_level="high", message="已阻断", requires_confirm=False)
         assert resp.status == "blocked"
     def test_invalid_status_rejected(self):
-        with pytest.raises(ValidationError): ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="executing", risk_level="low", message="fix_9dd4e461", requires_confirm=False)
+        with pytest.raises(ValidationError): ActionExecuteResponse(option_id="fix_a1b2c3d4", session_id="s1", trace_id="t1", status="executing", risk_level="low", message="fix_9dd4e461", requires_confirm=False)  # type: ignore[reportArgumentType]
 
 
 class TestResponseCrossValidation:

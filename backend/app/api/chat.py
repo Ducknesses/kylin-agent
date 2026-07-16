@@ -16,8 +16,9 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.audit.logger import log_chain
+from app.core.auth import AuthContext, AuthLevel
 from app.core.security import TokenStore
-from app.dependencies import fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service
+from app.dependencies import (fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository, knowledge_service)
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
 
@@ -35,6 +36,7 @@ _orchestrator = Orchestrator(
     audit_service=audit_service,
     fix_planner=fix_planner,
     fix_option_store=fix_option_store,
+    knowledge_service=knowledge_service,
 )
 
 # ── 正式接口：最新前后端 API 统一规范 v1.0 ────────────────────────
@@ -58,10 +60,14 @@ async def chat_ws(websocket: WebSocket, session_id: str):
     if not auth.is_authenticated and TokenStore.singleton().is_configured():
         return
 
+    # 从 AuthContext 解析角色字符串，贯穿后续所有操作
+    # 映射规则：ADMIN→admin, OP→operator, READ/ANONYMOUS→viewer
+    role = _resolve_role(auth)
+
     try:
         while True:
             raw = await websocket.receive_text()
-            await _handle_message(websocket, session_id, raw)
+            await _handle_message(websocket, session_id, raw, role)
     except WebSocketDisconnect:
         logger.info(f"[WebSocket] 会话断开: {session_id}")
     except Exception as e:
@@ -77,7 +83,25 @@ async def chat_ws(websocket: WebSocket, session_id: str):
 # ── 内部处理函数 ─────────────────────────────────────────────────
 
 
-async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> None:
+def _resolve_role(auth: AuthContext) -> str:
+    """将 AuthContext.level 映射为 SafetyGuard 兼容的角色字符串
+
+    映射规则（最小权限原则）：
+      ANONYMOUS / READ → "viewer"   — 只能执行 low 风险查询
+      OP               → "operator" — low 放行，medium 需确认
+      ADMIN            → "admin"    — low 放行，medium 需确认，high 仍拒绝
+
+    所有高危操作继续经过 SafetyGuard，不受角色影响。
+    """
+    if auth.level == AuthLevel.ADMIN:
+        return "admin"
+    if auth.level == AuthLevel.OP:
+        return "operator"
+    # READ / ANONYMOUS → viewer（最小权限）
+    return "viewer"
+
+
+async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role: str = "viewer") -> None:
     """按最新规范 v1.0 分发处理 WebSocket 消息
 
     协议层校验完成后，业务逻辑委托给 Orchestrator.handle_chat。
@@ -120,18 +144,30 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
             manager.pop_pending(session_id)
             await _send(websocket, "status", content="已取消该风险操作。", trace_id=pending["trace_id"])
             await _send(websocket, "done", trace_id=pending["trace_id"])
+            await message_repository.save_message(
+                session_id=session_id, role="system",
+                content="已取消该风险操作。",
+                message_type="status", trace_id=pending["trace_id"],
+            )
             return
 
         if decision == "approve":
             popped = manager.pop_pending(session_id)
             assert popped is not None
             user_input = popped.get("user_input", "")
+            trace_id = popped.get("trace_id", "")
             # 确认后走 Day5 Agent 主流程（confirmed=True，trace_id 保持连续性）
+            # 从 ConnectionManager 获取认证信息，解析真实 role（不再硬编码 viewer）
+            auth_ctx = manager.get_auth(session_id)
+            role = _resolve_role(auth_ctx) if auth_ctx else "viewer"
+            assistant_frames: list[dict[str, Any]] = []
             async for frame in _orchestrator.handle_chat(
-                session_id=session_id, user_input=user_input, role="viewer", confirmed=True,
-                trace_id=popped.get("trace_id"),
+                session_id=session_id, user_input=user_input, role=role, confirmed=True,
+                trace_id=trace_id,
             ):
                 await websocket.send_json(frame)
+                assistant_frames.append(frame)
+            await _persist_assistant_frames(session_id, trace_id, assistant_frames)
             return
 
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
@@ -150,6 +186,14 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
     user_input = content.strip()
     trace_id = str(uuid.uuid4())[:16]
 
+    # 确保会话在数据库中已注册（首次消息时自动创建）
+    await message_repository.create_session(session_id)
+    # 保存用户消息
+    await message_repository.save_message(
+        session_id=session_id, role="user", content=user_input,
+        message_type="chat", trace_id=trace_id,
+    )
+
     # SafetyGuard 检查（高危/中危由 chat 层处理，低危委托 Orchestrator）
     safety = safety_guard.analyze_user_input(user_input)
 
@@ -158,6 +202,11 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
                     original_input=user_input, trace_id=trace_id)
         await log_chain(trace_id=trace_id, user_input=user_input, risk_level=safety["risk_level"],
                         final_response=safety["reason"])
+        await message_repository.save_message(
+            session_id=session_id, role="system", content=safety["reason"],
+            message_type="risk_alert", trace_id=trace_id,
+            metadata={"level": safety["risk_level"]},
+        )
         return
 
     if safety["requires_confirm"]:
@@ -166,18 +215,78 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str) -> No
                                           "risk_level": safety["risk_level"], "confirm_id": confirm_id})
         await _send(websocket, "risk_alert", level=safety["risk_level"], reason=safety["reason"],
                     original_input=user_input, confirm_id=confirm_id, trace_id=trace_id)
+        await message_repository.save_message(
+            session_id=session_id, role="system", content=safety["reason"],
+            message_type="risk_alert", trace_id=trace_id,
+            metadata={"level": safety["risk_level"], "confirm_id": confirm_id},
+        )
         return
 
     # 低危：Day5 Agent 主流程（Orchestrator.handle_chat）
+    # role 由调用方从 AuthContext 解析传入，不再硬编码 viewer
+    assistant_frames: list[dict[str, Any]] = []
     async for frame in _orchestrator.handle_chat(
-        session_id=session_id, user_input=user_input, role="viewer", trace_id=trace_id,
+        session_id=session_id, user_input=user_input, role=role, trace_id=trace_id,
     ):
         await websocket.send_json(frame)
+        assistant_frames.append(frame)
+
+    # 持久化 assistant 关键消息帧
+    await _persist_assistant_frames(session_id, trace_id, assistant_frames)
 
 
 # ── 旧风险路径已删除 ─────────────────────────────────────────────────
 # 原有旧版编排函数（直接调用 LLM Router + MCP Executor，绕过安全层）
 # 已在 LLM-Agent 大修复中删除，所有 chat 消息统一走 Orchestrator.handle_chat。
+
+
+async def _persist_assistant_frames(
+    session_id: str, trace_id: str, frames: list[dict[str, Any]]
+) -> None:
+    """从 orchestrator 产出的帧中提取关键消息并持久化"""
+    for frame in frames:
+        ft = frame.get("type", "")
+        if ft == "status":
+            await message_repository.save_message(
+                session_id=session_id, role="assistant",
+                content=frame.get("content", frame.get("message", "")),
+                message_type="status", trace_id=trace_id,
+            )
+        elif ft == "tool_call":
+            meta = {
+                "tool": frame.get("tool"),
+                "tool_call_id": frame.get("tool_call_id"),
+                "params": frame.get("params"),
+                "ok": frame.get("ok"),
+            }
+            if frame.get("ok"):
+                meta["result"] = frame.get("result")
+            else:
+                meta["error"] = frame.get("error")
+            await message_repository.save_message(
+                session_id=session_id, role="assistant",
+                content=json.dumps(frame.get("result", frame.get("error", "")), ensure_ascii=False),
+                message_type="tool_call", trace_id=trace_id, metadata=meta,
+            )
+        elif ft == "chunk":
+            await message_repository.save_message(
+                session_id=session_id, role="assistant",
+                content=frame.get("content", ""),
+                message_type="chunk", trace_id=trace_id,
+            )
+        elif ft == "fix_options":
+            await message_repository.save_message(
+                session_id=session_id, role="assistant",
+                content=json.dumps(frame.get("options", []), ensure_ascii=False),
+                message_type="fix_options", trace_id=trace_id,
+            )
+        elif ft == "error":
+            await message_repository.save_message(
+                session_id=session_id, role="assistant",
+                content=frame.get("message", ""),
+                message_type="error", trace_id=trace_id,
+            )
+        # done / risk_alert 不需要额外保存（已在上层处理）
 
 
 async def _send(

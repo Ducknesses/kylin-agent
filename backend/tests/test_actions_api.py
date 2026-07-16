@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.schemas.action import FixOption
+from app.schemas.action import FixOption, RiskLevel
 from app.services.fix_option_store import FixOptionStore
 
 
@@ -41,7 +41,7 @@ def _clean_store():
     return store, harness
 
 
-def _opt(option_id, risk_level="low"):
+def _opt(option_id, risk_level: RiskLevel = "low"):
     return FixOption(
         option_id=option_id, title="t", description="d",
         risk_level=risk_level, tool="sys_info",

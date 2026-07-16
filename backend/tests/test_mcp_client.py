@@ -1390,14 +1390,14 @@ class TestExecutorBasic:
 
     def test_executor_has_execute_method(self):
         from app.mcp.executor import Executor
-        executor = Executor(client=FakeMCPClient())
+        executor = Executor(client=FakeMCPClient())  # type: ignore[reportArgumentType]
         assert hasattr(executor, "execute"), "Executor 缺少 execute 方法"
         assert callable(executor.execute)
 
     def test_executor_unknown_tool_returns_ok_false(self):
         from app.mcp.executor import Executor
 
-        executor = Executor(client=FakeMCPClient())
+        executor = Executor(client=FakeMCPClient())  # type: ignore[reportArgumentType]
         result = asyncio.run(executor.execute("unknown_tool", {}))
 
         assert result["ok"] is False
@@ -1409,7 +1409,7 @@ class TestExecutorBasic:
         from app.mcp.executor import Executor
 
         client = FakeMCPClient()
-        executor = Executor(client=client)
+        executor = Executor(client=client)  # type: ignore[reportArgumentType]
 
         result = asyncio.run(executor.execute("sys_info"))
 

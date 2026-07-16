@@ -10,3 +10,5 @@ websockets>=12.0
 fakeredis>=2.0.0
 psutil>=5.9.0
 pytest
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0
