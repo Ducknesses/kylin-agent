@@ -53,7 +53,8 @@ def sanitize_sensitive_data(value: object) -> object:
 _SENSITIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"sk-[a-zA-Z0-9]{20,}", re.IGNORECASE), _SENSITIVE_REPLACE),
     (re.compile(r"Bearer\s+[a-zA-Z0-9\-_\.]+", re.IGNORECASE), f"Bearer {_SENSITIVE_REPLACE}"),
-    (re.compile(r'Authorization:[redacted]"\']+', re.IGNORECASE), f"Authorization: Bearer [redacted]"),
+    (re.compile(r"Authorization:\s*Bearer\s+[^\s\"']+", re.IGNORECASE),
+     f"Authorization: Bearer {_SENSITIVE_REPLACE}"),
     (re.compile(r'(?i)deepseek_api_key[=:]\s*[^\s"\']+'), f"DEEPSEEK_API_KEY={_SENSITIVE_REPLACE}"),
     (re.compile(r'(?i)api_key[=:]\s*[^\s"\']+'), f"api_key={_SENSITIVE_REPLACE}"),
     (re.compile(r'(?i)password[=:]\s*[^\s"\']+'), f"password={_SENSITIVE_REPLACE}"),
