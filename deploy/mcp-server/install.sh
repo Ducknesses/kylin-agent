@@ -91,10 +91,33 @@ deactivate
 
 # ---- 4. 创建专用用户 ----
 echo "[4/7] 创建非 root 用户..."
-useradd -r -s /bin/false agent-read 2>/dev/null || echo "  agent-read 已存在"
-useradd -r -s /bin/false agent-op 2>/dev/null || echo "  agent-op 已存在"
 
-# 修复文件所有权
+# 检测可用的 nologin shell（麒麟 V11 可能没有 /bin/false）
+if [ -x /sbin/nologin ]; then
+    NOLOGIN="/sbin/nologin"
+elif [ -x /usr/sbin/nologin ]; then
+    NOLOGIN="/usr/sbin/nologin"
+elif [ -x /bin/false ]; then
+    NOLOGIN="/bin/false"
+elif [ -x /usr/bin/false ]; then
+    NOLOGIN="/usr/bin/false"
+else
+    echo "[ERROR] 找不到有效的 nologin shell (/sbin/nologin, /bin/false 等)"
+    exit 1
+fi
+echo "  使用 nologin shell: $NOLOGIN"
+
+for user in agent-read agent-op; do
+    if id "$user" &>/dev/null; then
+        echo "  用户 $user 已存在，跳过创建"
+    else
+        groupadd -f -r "$user"
+        useradd -r -s "$NOLOGIN" -g "$user" "$user"
+        echo "  用户 $user 已创建"
+    fi
+done
+
+# 修复文件所有权（放在用户创建后面）
 echo "  修正 $INSTALL_DIR 文件所有权为 agent-read:agent-read ..."
 chown -R agent-read:agent-read "$INSTALL_DIR"
 echo "  文件权限已修正"

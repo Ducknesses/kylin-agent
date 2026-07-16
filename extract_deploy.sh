@@ -8,14 +8,17 @@
 # 功能:
 #   提取项目正常运行/部署所需的所有文件，排除:
 #   - Git 历史 (.git)
-#   - 测试文件 (*/tests/)
-#   - 文档 (*/docs/)
-#   - Python 缓存 (__pycache__, *.pyc)
+#   - 测试文件 (tests/, test_*.py, *_test.py)
+#   - 文档 (*.md, *.docx)
+#   - Python 缓存 (__pycache__, *.pyc, .pytest_cache)
 #   - Node 模块 (node_modules/)
-#   - 前端构建产物 (dist/，应由 npm run build 生成)
+#   - 前端构建产物 (dist/)
 #   - 环境秘密 (.env，保留 .env.example)
 #   - 数据库文件 (*.db, *.sqlite*)
+#   - SSL/TLS 证书 (deploy/nginx/certs/*.crt, *.key)
 #   - IDE/编辑器配置 (.vscode, .idea)
+#   - 日志文件 (*.log)
+#   - Windows Zone.Identifier 文件
 #   - 临时/备份文件
 # ============================================================
 
@@ -42,16 +45,18 @@ echo ""
 
 # ---- 1. 清理旧目录 ----
 if [ -d "$TARGET" ]; then
-    echo "[1/4] 清理旧目录 $TARGET ..."
+    echo "[1/6] 清理旧目录 $TARGET ..."
     rm -rf "$TARGET"
+else
+    echo "[1/6] 无需清理"
 fi
 
 # ---- 2. 创建目标目录 ----
-echo "[2/4] 创建目标目录结构..."
+echo "[2/6] 创建目标目录结构..."
 mkdir -p "$TARGET"
 
 # ---- 3. 复制文件 (使用 rsync 进行高效过滤) ----
-echo "[3/4] 提取部署文件..."
+echo "[3/6] 提取部署文件..."
 
 # 定义排除模式（与 .gitignore 保持一致 + 额外排除）
 RSYNC_EXCLUDES=(
@@ -65,6 +70,7 @@ RSYNC_EXCLUDES=(
     --exclude='*.pyc'
     --exclude='*.pyo'
     --exclude='*.pyd'
+    --exclude='.pytest_cache/'
 
     # ── Python 虚拟环境 ──
     --exclude='.venv/'
@@ -95,8 +101,6 @@ RSYNC_EXCLUDES=(
     --exclude='tests/'
     --exclude='test_*.py'
     --exclude='*_test.py'
-    --exclude='__pycache__/'
-    --exclude='.pytest_cache/'
 
     # ── 文档 ──
     --exclude='docs/'
@@ -113,10 +117,18 @@ RSYNC_EXCLUDES=(
     # ── 日志 ──
     --exclude='*.log'
 
+    # ── Windows Zone.Identifier (WSL 跨文件系统产生) ──
+    --exclude='*.Identifier'
+
+    # ── SSL/TLS 证书 (部署时自行生成) ──
+    --exclude='deploy/nginx/certs/*.crt'
+    --exclude='deploy/nginx/certs/*.key'
+    --exclude='deploy/nginx/certs/*.pem'
+    --exclude='deploy/nginx/certs/*.csr'
+
     # ── 临时文件 ──
     --exclude='tmp/'
     --exclude='*.tmp'
-    --exclude='*.Identifier'
 
     # ── 项目配置 (不需要部署的) ──
     --exclude='.editorconfig'
@@ -124,13 +136,14 @@ RSYNC_EXCLUDES=(
     --exclude='.reasonix/'
     --exclude='reasonix.toml'
 
-    # ── 测试/开发用脚本 ──
+    # ── 仅开发/测试用脚本 ──
     --exclude='ws_test.py'
     --exclude='mock_server.py'
 
-    # ── 本项目提取脚本自身 ──
+    # ── 本项目提取脚本自身及输出目录 ──
     --exclude='extract_deploy.sh'
     --exclude='kylin-agent-deploy/'
+    --exclude='*.tar.gz'
 )
 
 # 使用 rsync 执行复制
@@ -143,7 +156,7 @@ rsync -a \
 echo "  ✓ 文件提取完成"
 
 # ---- 4. 生成清单报告 ----
-echo "[4/4] 生成文件清单..."
+echo "[4/6] 生成文件清单..."
 
 cat > "$PROJECT_ROOT/$TARGET/MANIFEST.txt" << 'MANIFEST_EOF'
 ============================================================
@@ -155,7 +168,11 @@ cat > "$PROJECT_ROOT/$TARGET/MANIFEST.txt" << 'MANIFEST_EOF'
   backend/            后端 FastAPI 应用 (Python)
   frontend/           前端 Vue 3 + Vite 应用
   mcp-server/         MCP Server 守护进程 (Python)
-  deploy/             一键安装/卸载脚本
+  deploy/             一键安装/卸载脚本 & 配置文件
+    ├── backend/      Backend systemd 服务 & 安装脚本
+    ├── frontend/     Frontend Nginx 配置 & 安装脚本
+    ├── mcp-server/   MCP Server systemd 服务 & 安装脚本
+    └── nginx/        Nginx 站点配置模板
 
 不包含内容:
 
@@ -166,7 +183,11 @@ cat > "$PROJECT_ROOT/$TARGET/MANIFEST.txt" << 'MANIFEST_EOF'
   docs/              文档
   __pycache__/       Python 编译缓存
   *.db               数据库文件
+  *.log              日志文件
+  *.Identifier       Windows Zone.Identifier 文件
+  deploy/nginx/certs/* SSL/TLS 证书 (部署时自行生成或放置)
   .git               Git 历史
+  .vscode/           IDE 配置
 
 部署流程:
 
@@ -176,18 +197,36 @@ cat > "$PROJECT_ROOT/$TARGET/MANIFEST.txt" << 'MANIFEST_EOF'
   2. Frontend (控制节点, Nginx):
      sudo ./deploy/frontend/install.sh
 
-  3. MCP Server (目标机, 麒麟 V11):
+  3. Nginx 配置 (控制节点):
+     sudo cp deploy/nginx/kylin-agent.conf /etc/nginx/sites-available/
+     sudo ln -s /etc/nginx/sites-available/kylin-agent.conf /etc/nginx/sites-enabled/
+     sudo nginx -t && sudo systemctl reload nginx
+
+  4. MCP Server (目标机, 麒麟 V11 / LoongArch):
      sudo ./deploy/mcp-server/install.sh
 
 提示:
 
-  - 部署前请创建并编辑 .env 配置文件 (参考 .env.example)
+  - 部署前请创建并编辑 .env 配置文件:
+      Backend:  cp backend/.env.example backend/.env
+      MCP Server: cp mcp-server/.env.example mcp-server/.env
+
   - Backend 需要 Python 3.10+
   - Frontend 构建需要 Node.js 18+
   - MCP Server 需要 Python 3.x + 麒麟 V11 环境
+
+  - SSL 证书:
+      自签名: openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+               -keyout deploy/nginx/certs/kylin-agent.key \
+               -out deploy/nginx/certs/kylin-agent.crt
+      正式证书: 将 .crt 和 .key 放入 deploy/nginx/certs/ 目录
+
+  - 数据库将在首次启动时自动创建 (backend/data/)
 MANIFEST_EOF
 
 # ---- 5. 统计信息 ----
+echo "[5/6] 统计文件..."
+
 FILE_COUNT=$(find "$PROJECT_ROOT/$TARGET" -type f | wc -l)
 DIR_COUNT=$(find "$PROJECT_ROOT/$TARGET" -type d | wc -l)
 TOTAL_SIZE=$(du -sh "$PROJECT_ROOT/$TARGET" | cut -f1)
@@ -206,6 +245,7 @@ echo "  文件清单: $TARGET/MANIFEST.txt"
 echo ""
 
 # ---- 6. (可选) 创建压缩包 ----
+echo "[6/6] 压缩选项"
 read -p "是否创建 tar.gz 压缩包? [y/N] " -r COMPRESS
 echo ""
 if [[ "$COMPRESS" =~ ^[Yy]$ ]]; then
@@ -221,8 +261,21 @@ fi
 echo ""
 echo "  后续部署步骤:"
 echo "    cd $TARGET"
+echo ""
+echo "  ── 后端 ──"
 echo "    cp backend/.env.example backend/.env    # 并编辑配置"
-echo "    sudo ./deploy/backend/install.sh       # 安装后端"
-echo "    sudo ./deploy/frontend/install.sh      # 安装前端"
-echo "    # MCP Server 复制到目标机后安装"
+echo "    sudo ./deploy/backend/install.sh"
+echo ""
+echo "  ── 前端 ──"
+echo "    sudo ./deploy/frontend/install.sh"
+echo ""
+echo "  ── Nginx ──"
+echo "    sudo cp deploy/nginx/kylin-agent.conf /etc/nginx/sites-available/"
+echo "    sudo ln -s /etc/nginx/sites-available/kylin-agent.conf /etc/nginx/sites-enabled/"
+echo "    # 如有 SSL 证书，放置到 deploy/nginx/certs/ 后 reload nginx"
+echo "    sudo nginx -t && sudo systemctl reload nginx"
+echo ""
+echo "  ── MCP Server (复制到目标机后) ──"
+echo "    cp mcp-server/.env.example mcp-server/.env  # 并编辑配置"
+echo "    sudo ./deploy/mcp-server/install.sh"
 echo ""

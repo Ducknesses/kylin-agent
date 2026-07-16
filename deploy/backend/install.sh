@@ -42,7 +42,29 @@ echo ""
 
 # ---- 2. 创建专用用户 ----
 echo "[2/6] 创建 agent-read 用户..."
-useradd -r -s /bin/false agent-read 2>/dev/null || echo "  agent-read 用户已存在"
+
+# 检测可用的 nologin shell（麒麟 V11 可能没有 /bin/false）
+if [ -x /sbin/nologin ]; then
+    NOLOGIN="/sbin/nologin"
+elif [ -x /usr/sbin/nologin ]; then
+    NOLOGIN="/usr/sbin/nologin"
+elif [ -x /bin/false ]; then
+    NOLOGIN="/bin/false"
+elif [ -x /usr/bin/false ]; then
+    NOLOGIN="/usr/bin/false"
+else
+    echo "[ERROR] 找不到有效的 nologin shell (/sbin/nologin, /bin/false 等)"
+    exit 1
+fi
+echo "  使用 nologin shell: $NOLOGIN"
+
+if id agent-read &>/dev/null; then
+    echo "  agent-read 用户已存在，跳过创建"
+else
+    groupadd -f -r agent-read
+    useradd -r -s "$NOLOGIN" -g agent-read agent-read
+    echo "  agent-read 用户已创建"
+fi
 echo ""
 
 # ---- 3. 复制后端源码 ----
