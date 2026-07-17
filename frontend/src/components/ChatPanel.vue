@@ -25,7 +25,11 @@
     </div>
 
     <div ref="msgListRef" class="message-list">
-      <div v-if="chatStore.currentMessages.length === 0 && !showConnectionBanner" class="empty-tip">
+      <div v-if="isInitializing" class="empty-tip">
+        <el-icon :size="40" color="#9ca3af" class="is-loading"><Loading /></el-icon>
+        <p>正在恢复会话...</p>
+      </div>
+      <div v-else-if="chatStore.currentMessages.length === 0 && !showConnectionBanner" class="empty-tip">
         <el-icon :size="40" color="#9ca3af"><ChatLineRound /></el-icon>
         <p>请输入运维问题，例如：查看CPU使用率</p>
       </div>
@@ -106,7 +110,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { WarningFilled } from '@element-plus/icons-vue'
+import { WarningFilled, Loading } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chatStore'
 import { useWsStore } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
@@ -119,6 +123,7 @@ const wsStore = useWsStore()
 
 const inputText = ref('')
 const isStreaming = ref(false)
+const isInitializing = ref(true)
 const msgListRef = ref(null)
 const riskDialogVisible = ref(false)
 const settingsVisible = ref(false)
@@ -166,12 +171,19 @@ function openSettings() {
 
 // 初始化会话与连接：优先恢复最近会话，没有才创建新会话
 onMounted(async () => {
-  const sessionId = await chatStore.loadLatestSession()
-  wsClient.connect(sessionId)
-  wsClient.on('risk_alert', onRiskAlert)
-  wsClient.on('pending_confirmation', onToolPending)
-  wsClient.on('done', () => { isStreaming.value = false })
-  wsClient.on('error', () => { isStreaming.value = false })
+  try {
+    isInitializing.value = true
+    const sessionId = await chatStore.loadLatestSession()
+    wsClient.connect(sessionId)
+    wsClient.on('risk_alert', onRiskAlert)
+    wsClient.on('pending_confirmation', onToolPending)
+    wsClient.on('done', () => { isStreaming.value = false })
+    wsClient.on('error', () => { isStreaming.value = false })
+  } catch (e) {
+    console.error('[ChatPanel] 会话初始化失败:', e)
+  } finally {
+    isInitializing.value = false
+  }
 })
 
 onUnmounted(() => {

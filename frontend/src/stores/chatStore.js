@@ -42,7 +42,8 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const { data } = await http.get('/sessions')
       if (data && data.length > 0) {
-        const latest = data[0]
+        const sorted = [...data].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        const latest = sorted[0]
         currentSessionId.value = latest.id
         // 确保会话列表中包含最近会话
         if (!sessions.value.find(s => s.id === latest.id)) {

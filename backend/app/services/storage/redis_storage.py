@@ -3,7 +3,7 @@
 职责：
   - 只负责 Redis 基础操作：set / get / delete / exists / expire
   - 不包含业务逻辑，不处理 FixOption / Confirmation
-  - Redis 不可用时明确失败，不自动降级
+  - Redis 不可用时自动降级为 fakeredis 内存存储，确保服务可用
 
 Key 命名规范由调用方决定，本层不做约束。
 """
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class StorageUnavailableError(RuntimeError):
-    """Redis 存储不可用异常 —— 禁止自动降级为内存存储"""
+    """Redis 存储不可用异常 —— fakeredis 也未安装/不可用时抛出"""
 
 
 def _build_redis() -> redis_lib.Redis:
@@ -40,6 +40,10 @@ def _build_redis() -> redis_lib.Redis:
             msg = "Redis 存储不可用，且 fakeredis 未安装"
             logger.error(msg)
             raise StorageUnavailableError(msg) from exc
+        except Exception as fake_exc:
+            msg = f"Redis 存储不可用，fakeredis 初始化失败: {fake_exc}"
+            logger.error(msg)
+            raise StorageUnavailableError(msg) from fake_exc
 
 
 class RedisStorage:

@@ -35,7 +35,7 @@ const wsStore = useWsStore()
 
 async function newSession() {
   const id = chatStore.createSession()
-  await chatStore.fetchHistory(id)
+  // 新会话无历史消息，跳过无效 HTTP 请求
   wsClient.connect(id)
 }
 
