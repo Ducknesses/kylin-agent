@@ -1,8 +1,9 @@
 /**
- * 统一 HTTP 客户端 —— 自动携带认证 token
+ * 统一 HTTP 客户端 —— 自动携带认证 token 并动态适配连接地址
  *
  * 所有前端 API 调用应通过此模块发起，
- * 自动从 wsStore 读取 api_token 并注入 Authorization: Bearer 头。
+ * 自动从 wsStore 读取 api_token 并注入 Authorization: Bearer 头，
+ * 同时根据面板配置的 apiBaseUrl 动态设置 baseURL。
  *
  * 使用方式：
  *   import http from '@/api/http'
@@ -13,13 +14,22 @@ import axios from 'axios'
 import { useWsStore } from '@/stores/wsStore'
 
 const http = axios.create({
-  baseURL: '/api',
   timeout: 10000,
 })
 
-// 请求拦截器：自动附加 Bearer token
+// 请求拦截器：自动附加 Bearer token + 动态设置 baseURL
 http.interceptors.request.use((config) => {
   const wsStore = useWsStore()
+
+  // 动态设置 baseURL：面板配置优先，否则使用相对路径 /api（走 Vite proxy 或 Nginx）
+  if (wsStore.apiBaseUrl) {
+    // 确保 apiBaseUrl 末尾不带斜杠，避免拼接出双斜杠
+    const base = wsStore.apiBaseUrl.replace(/\/+$/, '')
+    config.baseURL = base + (base.endsWith('/api') ? '' : '/api')
+  } else {
+    config.baseURL = '/api'
+  }
+
   if (wsStore.token) {
     config.headers.Authorization = `Bearer ${wsStore.token}`
   }
