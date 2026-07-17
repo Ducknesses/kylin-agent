@@ -6,13 +6,13 @@
 
 ```
 ┌─ 用户浏览器 ──────────────────────────────────────────┐
-│  前端: Vue 3 + Vite (端口 5173 dev / Nginx :80 prod)   │
+│  前端: Vue 3 + Vite (端口 5173 dev / Nginx :443 prod)  │
 └──────────────────────┬────────────────────────────────┘
-                       │ HTTP / WebSocket
+                       │ HTTPS / WSS
 ┌─ 控制节点 ───────────────────────────────────────────┐
-│  Nginx :80 → 静态文件 + API 反向代理 + WebSocket 升级  │
+│  Nginx :443 → 静态文件 + API 反向代理 + WSS 升级       │
 │  Backend :8000 → FastAPI + 多 Agent 编排 + LLM 路由    │
-│  Redis :6379 → 会话缓存 + 确认状态存储                 │
+│  Redis :6379 → 会话缓存 + 确认状态存储 + 任务持久化    │
 │  SQLite → 审计日志 (哈希链防篡改)                      │
 └──────────────────────┬────────────────────────────────┘
                        │ HTTPS + Bearer Token
@@ -57,13 +57,15 @@ kylin-agent/
 │       │   ├── reporter_agent.py    # 报告生成 Agent
 │       │   ├── safety_guard.py      # 输入安全护栏
 │       │   ├── action_service.py    # 修复动作服务
+│       │   ├── knowledge_service.py # 知识库匹配模块
 │       │   └── ...                  # 连接管理 / 状态存储 / LLM 客户端等
 │       ├── core/                # 安全与基础组件
 │       │   ├── security.py      # 风险分级 (reject/confirm/allow)
 │       │   ├── prompt_guard.py  # Prompt 注入检测 (五层)
 │       │   ├── rbac.py          # 三级权限白名单 + 危险模式拦截
 │       │   ├── auth.py          # Token 认证 (多 token 分级)
-│       │   └── redis_client.py  # Redis 封装 (fakeredis fallback)
+│       │   ├── redis_client.py  # Redis 封装 (fakeredis fallback)
+│       │   └── database.py      # 数据库引擎 (SQLite/PostgreSQL)
 │       ├── mcp/                 # MCP 客户端
 │       │   ├── client.py        # JSON-RPC 2.0 客户端
 │       │   ├── executor.py      # 工具白名单 + RBAC 校验 → 转发
@@ -79,6 +81,8 @@ kylin-agent/
 ├── mcp-server/                  # MCP Server (部署在麒麟目标机)
 │   ├── server.py                # MCP 服务入口
 │   ├── config.py                # MCP Server 配置
+│   ├── sandbox.py               # 命令执行沙箱 (cgroups 资源隔离)
+│   ├── resource_limiter.py      # cgroups v2 资源限制器
 │   ├── requirements.txt         # Python 依赖 (psutil, python-dotenv)
 │   ├── kylin-wizard.sh          # 配置向导 (端口/Token/防火墙)
 │   └── plugins/
@@ -314,7 +318,13 @@ sudo ./deploy/mcp-server/uninstall.sh
   ├─ agent-read: 只读 (sys_info, log_reader, net_monitor)
   └─ agent-op: sudo 白名单 (systemctl status/start/stop/restart/reload)
        ↓
-第6层: 审计记录 (哈希链防篡改)
+第6层: cgroup 资源隔离 (mcp-server/sandbox.py)
+  ├─ CPU 配额限制 (默认 50%)
+  ├─ 内存上限 (默认 256MB)
+  ├─ PID 数量限制 (防 fork bomb)
+  └─ 可通过 .env 配置: CGROUP_ENABLED=true
+       ↓
+第7层: 审计记录 (哈希链防篡改)
   ├─ SQLite audit_chain 表
   └─ SHA256 链式哈希: hash(prev_hash + current_data)
 ```
