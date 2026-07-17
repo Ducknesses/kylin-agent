@@ -35,6 +35,7 @@ env/
 
 # Build
 /frontend/dist/
+kylin-agent-deploy/
 
 # Data
 backend/data/backup/
