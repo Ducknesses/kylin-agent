@@ -32,7 +32,7 @@ if [ ! -d "$PROJECT_ROOT/frontend/dist" ]; then
         echo "[ERROR] npm 未安装！请先安装 Node.js >= 18"
         exit 1
     fi
-    npm install --silent
+    npm install --loglevel=error
     npm run build
     cd "$PROJECT_ROOT"
     if [ ! -d "$PROJECT_ROOT/frontend/dist" ]; then

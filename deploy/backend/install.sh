@@ -70,7 +70,20 @@ echo ""
 # ---- 3. 复制后端源码 ----
 echo "[3/6] 部署后端源码到 $INSTALL_DIR/backend ..."
 mkdir -p "$INSTALL_DIR"
-cp -r "$PROJECT_ROOT/backend" "$INSTALL_DIR/backend"
+
+# 使用 rsync 排除非运行时文件（开发测试、日志、缓存等）
+if command -v rsync &>/dev/null; then
+    rsync -a --exclude='tests/' --exclude='logs/' --exclude='__pycache__/' \
+        --exclude='*.pyc' --exclude='*.pyo' --exclude='.pytest_cache/' \
+        --exclude='.git/' --exclude='venv/' --exclude='*.egg-info/' \
+        "$PROJECT_ROOT/backend/" "$INSTALL_DIR/backend/"
+else
+    # 回退到 cp（兼容没有 rsync 的极简系统）
+    cp -r "$PROJECT_ROOT/backend" "$INSTALL_DIR/backend"
+    rm -rf "$INSTALL_DIR/backend/tests" "$INSTALL_DIR/backend/logs" 2>/dev/null || true
+    find "$INSTALL_DIR/backend" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+    find "$INSTALL_DIR/backend" -type f -name '*.pyc' -delete 2>/dev/null || true
+fi
 
 # 复制 .env（如果存在）
 if [ -f "$PROJECT_ROOT/backend/.env" ]; then

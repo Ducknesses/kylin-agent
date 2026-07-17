@@ -166,7 +166,27 @@ def check_dependencies() -> dict:
             _record(False)
 
     print(f"\n  已安装: {len(installed)}, 缺失: {len(missing)}")
+
+    # 可选高性能依赖检测（uvloop / httptools，非阻塞）
+    _check_optional_performance_deps()
+
     return {"ok": len(missing) == 0, "installed": installed, "missing": missing}
+
+
+def _check_optional_performance_deps() -> None:
+    """检测可选高性能依赖（uvloop / httptools），非阻塞性提示"""
+    print(f"\n  {BOLD}可选高性能依赖{RESET}（uvicorn 性能优化）:")
+    deps = [
+        ("uvloop", "u w z l o o p"),
+        ("httptools", "h t t p t o o l s"),
+    ]
+    for pkg, display in deps:
+        ok, ver = _check_package(pkg)
+        if ok:
+            print(f"    {CHECK} {display} {'(' + ver + ')' if ver else ''} 已安装")
+        else:
+            print(f"    {WARN} {display} 未安装（非必须，但可提升高并发性能）")
+            _print_suggestion(f"pip install {pkg}")
 
 
 # ═══════════════════════════════════════════════════════════════════

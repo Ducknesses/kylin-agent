@@ -9,7 +9,7 @@ Type=simple
 User=agent-read
 Group=agent-read
 WorkingDirectory=/opt/kylin-agent/backend
-ExecStart=/opt/kylin-agent/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/kylin-agent/backend/venv/bin/uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
@@ -18,6 +18,9 @@ StandardError=journal
 SyslogIdentifier=kylin-agent
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/kylin-agent/backend
+EnvironmentFile=/opt/kylin-agent/backend/.env
+Environment=APP_HOST=127.0.0.1
+Environment=APP_PORT=8000
 
 # 安全加固
 NoNewPrivileges=yes

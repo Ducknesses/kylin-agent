@@ -18,7 +18,7 @@ StandardError=journal
 SyslogIdentifier=mcp-server
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/mcp-server
-Environment=MCP_HOST=127.0.0.1
+Environment=MCP_HOST=0.0.0.0
 Environment=MCP_PORT=8001
 Environment=LOG_FILE=/opt/mcp-server/mcp-server.log
 Environment=METRICS_DB_PATH=/opt/mcp-server/metrics.db

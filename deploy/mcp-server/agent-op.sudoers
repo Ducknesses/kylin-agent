@@ -2,4 +2,7 @@
 # 安装路径: /etc/sudoers.d/agent-op
 # 权限: chmod 440, chown root:root
 
-agent-op ALL=(ALL) NOPASSWD: /usr/bin/systemctl status *, /usr/bin/systemctl start *, /usr/bin/systemctl stop *, /usr/bin/systemctl restart *, /usr/bin/systemctl reload *
+# 注意：通配符 [a-zA-Z0-9@._-]* 限制了合法 systemd 单元名称，
+# 避免操作 sshd/firewalld 等安全关键服务。
+# 如果环境中服务名包含非标准字符，请根据实际情况调整正则表达式。
+agent-op ALL=(ALL) NOPASSWD: /usr/bin/systemctl status [a-zA-Z0-9@._-]*, /usr/bin/systemctl start [a-zA-Z0-9@._-]*, /usr/bin/systemctl stop [a-zA-Z0-9@._-]*, /usr/bin/systemctl restart [a-zA-Z0-9@._-]*, /usr/bin/systemctl reload [a-zA-Z0-9@._-]*
