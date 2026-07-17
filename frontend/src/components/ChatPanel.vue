@@ -164,11 +164,9 @@ function openSettings() {
   settingsVisible.value = true
 }
 
-// 初始化会话与连接
+// 初始化会话与连接：优先恢复最近会话，没有才创建新会话
 onMounted(async () => {
-  const sessionId = chatStore.createSession()
-  // 尝试从后端加载历史消息
-  await chatStore.fetchHistory(sessionId)
+  const sessionId = await chatStore.loadLatestSession()
   wsClient.connect(sessionId)
   wsClient.on('risk_alert', onRiskAlert)
   wsClient.on('pending_confirmation', onToolPending)

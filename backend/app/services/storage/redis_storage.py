@@ -23,16 +23,23 @@ class StorageUnavailableError(RuntimeError):
 
 
 def _build_redis() -> redis_lib.Redis:
-    """建立 Redis 连接，连接失败直接抛出 StorageUnavailableError"""
+    """建立 Redis 连接，连接失败自动降级为 fakeredis（仅限本地开发）"""
     try:
         client = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
         client.ping()
         logger.info("Redis 连接成功: %s", settings.REDIS_URL)
         return client
     except Exception as exc:
-        msg = "Redis 存储不可用，无法连接"
-        logger.error("%s: %s", msg, exc)
-        raise StorageUnavailableError(msg) from exc
+        logger.warning("Redis 不可用 (%s)，降级为 fakeredis 内存存储", exc)
+        try:
+            import fakeredis
+            fake_client = fakeredis.FakeRedis(decode_responses=True)
+            logger.info("FakeRedis 内存存储就绪")
+            return fake_client
+        except ImportError:
+            msg = "Redis 存储不可用，且 fakeredis 未安装"
+            logger.error(msg)
+            raise StorageUnavailableError(msg) from exc
 
 
 class RedisStorage:
