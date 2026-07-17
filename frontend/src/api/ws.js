@@ -34,6 +34,8 @@ class WsClient {
     if (this.sessionId === sessionId && this.ws && this.ws.readyState === WebSocket.OPEN) {
       return
     }
+    // 防止旧连接的 onclose 异步触发 tryReconnect 连接到新 sessionId
+    this.skipReconnect = true
     this.close(false)
     this.sessionId = sessionId
     this._closeCode = null
@@ -44,6 +46,7 @@ class WsClient {
 
     this.ws.onopen = () => {
       console.log('WebSocket 已连接')
+      this.skipReconnect = false
       const wsStore = useWsStore()
       wsStore.setConnected(true)
       wsStore.setReconnectCount(0)

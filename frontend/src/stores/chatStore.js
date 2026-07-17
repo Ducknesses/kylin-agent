@@ -24,17 +24,32 @@ export const useChatStore = defineStore('chat', () => {
     return messagesMap.value.get(currentSessionId.value) || []
   })
 
-  // 创建新会话
-  function createSession() {
-    const id = generateId()
-    currentSessionId.value = id
-    sessions.value.unshift({
-      id,
-      title: `新会话 ${sessions.value.length + 1}`,
-      createdAt: Date.now()
-    })
-    messagesMap.value.set(id, [])
-    return id
+  // 创建新会话：优先在后端创建，失败时回退到本地临时 ID
+  async function createSession() {
+    const fallbackTitle = `新会话 ${sessions.value.length + 1}`
+    try {
+      const { data } = await http.post('/sessions', { title: fallbackTitle })
+      const id = data.id
+      currentSessionId.value = id
+      sessions.value.unshift({
+        id,
+        title: data.title || fallbackTitle,
+        createdAt: new Date(data.created_at).getTime() || Date.now()
+      })
+      messagesMap.value.set(id, [])
+      return id
+    } catch (e) {
+      console.error('[ChatStore] 创建后端会话失败，回退到本地会话:', e)
+      const id = generateId()
+      currentSessionId.value = id
+      sessions.value.unshift({
+        id,
+        title: fallbackTitle,
+        createdAt: Date.now()
+      })
+      messagesMap.value.set(id, [])
+      return id
+    }
   }
 
   // 加载最近会话（刷新后恢复），没有则创建新会话
@@ -42,17 +57,15 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const { data } = await http.get('/sessions')
       if (data && data.length > 0) {
-        const sorted = [...data].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-        const latest = sorted[0]
+        // 后端已按 updated_at 倒序返回，data[0] 即最近使用的会话；
+        // 不能再按 created_at 重排，否则会错误恢复到最新创建（通常为空）的会话
+        sessions.value = data.map(s => ({
+          id: s.id,
+          title: s.title || `会话 ${s.id.slice(-6)}`,
+          createdAt: new Date(s.created_at).getTime() || Date.now()
+        }))
+        const latest = data[0]
         currentSessionId.value = latest.id
-        // 确保会话列表中包含最近会话
-        if (!sessions.value.find(s => s.id === latest.id)) {
-          sessions.value.unshift({
-            id: latest.id,
-            title: latest.title || `会话 ${latest.id.slice(-6)}`,
-            createdAt: new Date(latest.created_at).getTime() || Date.now()
-          })
-        }
         await fetchHistory(latest.id)
         return latest.id
       }
@@ -60,12 +73,13 @@ export const useChatStore = defineStore('chat', () => {
       console.warn('[ChatStore] 加载最近会话失败:', e)
     }
     // 没有任何会话时创建新会话
-    return createSession()
+    return await createSession()
   }
 
   // 从后端加载会话历史消息
   async function fetchHistory(sessionId) {
     if (historyLoaded.value.has(sessionId)) return
+    historyLoaded.value.add(sessionId)
     try {
       const { data } = await http.get(`/sessions/${sessionId}/messages`)
       if (data.messages && data.messages.length > 0) {
@@ -77,11 +91,18 @@ export const useChatStore = defineStore('chat', () => {
           tool_calls: m.tool_calls || undefined,
         }))
         messagesMap.value.set(sessionId, msgs)
+      } else {
+        // 确保空消息列表被初始化，避免 currentMessages 返回 undefined
+        if (!messagesMap.value.has(sessionId)) {
+          messagesMap.value.set(sessionId, [])
+        }
       }
-      historyLoaded.value.add(sessionId)
     } catch (e) {
-      // 会话不存在或无消息时静默
-      console.debug('[ChatStore] 历史加载: 无已有消息或会话不存在', sessionId)
+      console.error('[ChatStore] 加载历史消息失败:', sessionId, e)
+      // 确保空消息列表被初始化，避免界面卡在加载状态
+      if (!messagesMap.value.has(sessionId)) {
+        messagesMap.value.set(sessionId, [])
+      }
     }
   }
 
