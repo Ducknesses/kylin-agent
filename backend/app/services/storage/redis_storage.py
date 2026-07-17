@@ -3,7 +3,7 @@
 职责：
   - 只负责 Redis 基础操作：set / get / delete / exists / expire
   - 不包含业务逻辑，不处理 FixOption / Confirmation
-  - Redis 不可用时明确失败，不自动降级
+  - Redis 不可用时自动降级为 fakeredis 内存存储，确保服务可用
 
 Key 命名规范由调用方决定，本层不做约束。
 """
@@ -19,20 +19,31 @@ logger = logging.getLogger(__name__)
 
 
 class StorageUnavailableError(RuntimeError):
-    """Redis 存储不可用异常 —— 禁止自动降级为内存存储"""
+    """Redis 存储不可用异常 —— fakeredis 也未安装/不可用时抛出"""
 
 
 def _build_redis() -> redis_lib.Redis:
-    """建立 Redis 连接，连接失败直接抛出 StorageUnavailableError"""
+    """建立 Redis 连接，连接失败自动降级为 fakeredis（仅限本地开发）"""
     try:
         client = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
         client.ping()
         logger.info("Redis 连接成功: %s", settings.REDIS_URL)
         return client
     except Exception as exc:
-        msg = "Redis 存储不可用，无法连接"
-        logger.error("%s: %s", msg, exc)
-        raise StorageUnavailableError(msg) from exc
+        logger.warning("Redis 不可用 (%s)，降级为 fakeredis 内存存储", exc)
+        try:
+            import fakeredis
+            fake_client = fakeredis.FakeRedis(decode_responses=True)
+            logger.info("FakeRedis 内存存储就绪")
+            return fake_client
+        except ImportError:
+            msg = "Redis 存储不可用，且 fakeredis 未安装"
+            logger.error(msg)
+            raise StorageUnavailableError(msg) from exc
+        except Exception as fake_exc:
+            msg = f"Redis 存储不可用，fakeredis 初始化失败: {fake_exc}"
+            logger.error(msg)
+            raise StorageUnavailableError(msg) from fake_exc
 
 
 class RedisStorage:

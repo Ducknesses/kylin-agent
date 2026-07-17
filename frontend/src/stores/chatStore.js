@@ -37,6 +37,32 @@ export const useChatStore = defineStore('chat', () => {
     return id
   }
 
+  // 加载最近会话（刷新后恢复），没有则创建新会话
+  async function loadLatestSession() {
+    try {
+      const { data } = await http.get('/sessions')
+      if (data && data.length > 0) {
+        const sorted = [...data].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        const latest = sorted[0]
+        currentSessionId.value = latest.id
+        // 确保会话列表中包含最近会话
+        if (!sessions.value.find(s => s.id === latest.id)) {
+          sessions.value.unshift({
+            id: latest.id,
+            title: latest.title || `会话 ${latest.id.slice(-6)}`,
+            createdAt: new Date(latest.created_at).getTime() || Date.now()
+          })
+        }
+        await fetchHistory(latest.id)
+        return latest.id
+      }
+    } catch (e) {
+      console.warn('[ChatStore] 加载最近会话失败:', e)
+    }
+    // 没有任何会话时创建新会话
+    return createSession()
+  }
+
   // 从后端加载会话历史消息
   async function fetchHistory(sessionId) {
     if (historyLoaded.value.has(sessionId)) return
@@ -109,6 +135,7 @@ export const useChatStore = defineStore('chat', () => {
     currentSessionId,
     currentMessages,
     createSession,
+    loadLatestSession,
     fetchHistory,
     switchSession,
     addMessage,

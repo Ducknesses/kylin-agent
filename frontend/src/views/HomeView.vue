@@ -33,13 +33,15 @@ import ChatPanel from '@/components/ChatPanel.vue'
 const chatStore = useChatStore()
 const wsStore = useWsStore()
 
-function newSession() {
+async function newSession() {
   const id = chatStore.createSession()
+  // 新会话无历史消息，跳过无效 HTTP 请求
   wsClient.connect(id)
 }
 
-function switchSession(id) {
+async function switchSession(id) {
   chatStore.switchSession(id)
+  await chatStore.fetchHistory(id)
   wsClient.connect(id)
 }
 </script>
