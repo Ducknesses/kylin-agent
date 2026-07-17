@@ -15,6 +15,7 @@ __pycache__/
 .env
 .env.*
 !backend/.env.example
+frontend/.env.development
 frontend/.env.development.local
 frontend/.env.production
 backend/.env
@@ -47,6 +48,15 @@ backend/logs/*
 ws_test.py
 tmp/
 .clinerules
+mock_server.py
+extract_deploy.sh
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # SSL/TLS certificates — never commit real keys
 deploy/nginx/certs/*.crt
