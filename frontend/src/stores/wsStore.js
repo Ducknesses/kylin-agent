@@ -1,8 +1,29 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-const DEFAULT_WS_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8000'
-const DEFAULT_API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+// 自动适配：生产环境走 Nginx 代理（同源），开发环境直连 localhost:8000
+export function getDefaultWsUrl() {
+  if (import.meta.env.VITE_WS_BASE_URL) return import.meta.env.VITE_WS_BASE_URL
+  // 生产环境：使用当前页面的 host + 协议（Nginx 已代理 /ws 路径）
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}`
+  }
+  return 'ws://localhost:8000'
+}
+
+export function getDefaultApiUrl() {
+  if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL
+  // 生产环境：http.js 已使用相对路径 /api，此处保持同源
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    const protocol = window.location.protocol || 'http:'
+    return `${protocol}//${window.location.host}`
+  }
+  return 'http://localhost:8000'
+}
+
+const DEFAULT_WS_URL = getDefaultWsUrl()
+const DEFAULT_API_URL = getDefaultApiUrl()
 
 export const useWsStore = defineStore('ws', () => {
   // 连接状态

@@ -43,12 +43,30 @@
               v-model="localWsUrl"
               placeholder="ws://localhost:8000"
             />
+            <div class="protocol-hint">
+              <el-tag v-if="localWsUrl.startsWith('wss://')" type="warning" size="small">
+                wss:// 需要后端已启用 SSL/TLS（如经过 Nginx HTTPS 代理）
+              </el-tag>
+              <el-tag v-else-if="localWsUrl.startsWith('ws://') || !localWsUrl" type="success" size="small">
+                ws:// 适用于后端直连（无 SSL），生产环境建议通过 Nginx 代理使用 wss://
+              </el-tag>
+              <el-tag v-else type="danger" size="small">地址格式不正确，应以 ws:// 或 wss:// 开头</el-tag>
+            </div>
           </el-form-item>
           <el-form-item label="HTTP API 地址">
             <el-input
               v-model="localApiUrl"
               placeholder="http://localhost:8000"
             />
+            <div class="protocol-hint">
+              <el-tag v-if="localApiUrl.startsWith('https://')" type="warning" size="small">
+                https:// 需要后端已启用 SSL/TLS（如经过 Nginx HTTPS 代理）
+              </el-tag>
+              <el-tag v-else-if="localApiUrl.startsWith('http://') || !localApiUrl" type="success" size="small">
+                http:// 适用于后端直连（无 SSL）
+              </el-tag>
+              <el-tag v-else type="danger" size="small">地址格式不正确，应以 http:// 或 https:// 开头</el-tag>
+            </div>
           </el-form-item>
           <el-form-item>
             <el-button size="small" type="warning" plain @click="resetDefaults">
@@ -72,7 +90,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWsStore } from '@/stores/wsStore'
+import { useWsStore, getDefaultWsUrl, getDefaultApiUrl } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
 
 const props = defineProps({
@@ -106,8 +124,8 @@ watch(visible, (val) => {
 function handleSave() {
   // 保存到 store（会自动同步 localStorage）
   wsStore.setToken(localToken.value.trim())
-  wsStore.setWsBaseUrl(localWsUrl.value.trim() || 'ws://localhost:8000')
-  wsStore.setApiBaseUrl(localApiUrl.value.trim() || 'http://localhost:8000')
+  wsStore.setWsBaseUrl(localWsUrl.value.trim() || getDefaultWsUrl())
+  wsStore.setApiBaseUrl(localApiUrl.value.trim() || getDefaultApiUrl())
 
   ElMessage.success('配置已保存')
 
@@ -130,8 +148,8 @@ function handleCancel() {
 
 function handleClearAll() {
   localToken.value = ''
-  localWsUrl.value = 'ws://localhost:8000'
-  localApiUrl.value = 'http://localhost:8000'
+  localWsUrl.value = getDefaultWsUrl()
+  localApiUrl.value = getDefaultApiUrl()
   wsStore.resetToDefaults()
   ElMessage.success('已清除所有配置，恢复默认值')
 
@@ -148,8 +166,8 @@ function handleClearAll() {
 }
 
 function resetDefaults() {
-  localWsUrl.value = 'ws://localhost:8000'
-  localApiUrl.value = 'http://localhost:8000'
+  localWsUrl.value = getDefaultWsUrl()
+  localApiUrl.value = getDefaultApiUrl()
 }
 </script>
 
@@ -168,6 +186,10 @@ function resetDefaults() {
 .hint {
   font-size: 12px;
   color: #9ca3af;
+}
+.protocol-hint {
+  margin-top: 6px;
+  line-height: 1.4;
 }
 .dialog-footer {
   display: flex;

@@ -1,12 +1,8 @@
 #!/bin/bash
-# DEPRECATED: 此脚本已迁移到 deploy/mcp-server/uninstall.sh
-# 请使用: sudo ./deploy/mcp-server/uninstall.sh
-# 本文件保留仅用于向后兼容，后续版本将移除。
 # ============================================================
-# MCP Server 一键卸载脚本
+# MCP Server 一键卸载脚本（麒麟 V11 + LoongArch 目标机）
 # ============================================================
-# 用法: sudo ./kylin-uninstall.sh
-# 功能: 停止服务、移除文件、清理防火墙规则、删除用户和 sudoers
+# 用法: sudo ./uninstall.sh
 # ============================================================
 set -e
 
@@ -15,9 +11,9 @@ echo "  MCP Server for Kylin OS Agent 卸载脚本"
 echo "=============================================="
 echo ""
 
-# ---- 检查是否为 root ----
+# ---- 检查 root ----
 if [ "$(id -u)" -ne 0 ]; then
-    echo "[ERROR] 请使用 sudo 运行此脚本: sudo ./kylin-uninstall.sh"
+    echo "[ERROR] 请使用 sudo 运行此脚本: sudo ./deploy/mcp-server/uninstall.sh"
     exit 1
 fi
 
@@ -87,7 +83,6 @@ elif command -v iptables &>/dev/null; then
     if iptables -C INPUT -p tcp --dport "${MCP_PORT}" -j ACCEPT &>/dev/null 2>&1; then
         iptables -D INPUT -p tcp --dport "${MCP_PORT}" -j ACCEPT
         echo "  ✓ iptables 规则已移除"
-        # 持久化
         if command -v iptables-save &>/dev/null; then
             if [ -d /etc/iptables ]; then
                 iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
