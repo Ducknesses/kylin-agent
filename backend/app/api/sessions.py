@@ -90,6 +90,7 @@ async def get_session_messages(
             role=role,
             content=content,
             timestamp=created_at,
+            message_type=raw.get("message_type"),
             tool_calls=tool_calls,
         ))
 

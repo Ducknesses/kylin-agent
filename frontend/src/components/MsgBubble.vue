@@ -16,6 +16,7 @@
       </div>
       <div v-else-if="props.msg.type === 'error'" class="error-body">{{ props.msg.content }}</div>
       <ToolCallCard v-else-if="props.msg.role === 'tool'" :data="props.msg" />
+      <FixOptionsCard v-else-if="props.msg.type === 'fix_options'" :data="props.msg" />
       <div v-else class="assistant-text" v-html="renderMarkdown(props.msg.content)" />
     </div>
   </div>
@@ -26,6 +27,7 @@ import { computed } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import ToolCallCard from './ToolCallCard.vue'
+import FixOptionsCard from './FixOptionsCard.vue'
 import 'highlight.js/lib/common'
 
 const props = defineProps({

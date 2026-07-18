@@ -39,6 +39,16 @@ class MessageRepository(ABC):
         ...
 
     @abstractmethod
+    async def append_chunk(self, session_id: str, trace_id: str, content: str) -> None:
+        """追加式保存 chunk：同 session + trace_id 的连续 chunk 合并为一行。
+
+        如果该 session + trace_id 的 chunk 行已存在，则将新内容追加到末尾；
+        否则新增一行（role='assistant', message_type='chunk'）。
+        异常时静默失败，不中断业务流程。
+        """
+        ...
+
+    @abstractmethod
     async def get_messages(self, session_id: str) -> list[dict]:
         """按时间顺序返回指定会话的所有消息"""
         ...

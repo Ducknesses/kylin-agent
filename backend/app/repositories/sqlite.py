@@ -172,6 +172,47 @@ class SQLiteMessageRepository(MessageRepository):
         except Exception as e:
             logger.warning(f"[ChatHistory] 保存消息失败 (已忽略): {e}")
 
+    async def append_chunk(self, session_id: str, trace_id: str, content: str) -> None:
+        """追加式保存 chunk：同 session + trace_id 合并为一行，不存在则新增。"""
+        await self._ensure_tables()
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            async with self._get_session() as session:
+                result = await session.execute(
+                    select(ChatMessage)
+                    .where(
+                        ChatMessage.session_id == session_id,
+                        ChatMessage.trace_id == trace_id,
+                        ChatMessage.message_type == "chunk",
+                    )
+                    .order_by(ChatMessage.id.desc())
+                    .limit(1)
+                )
+                existing = result.scalars().first()
+                if existing is not None:
+                    # 追加合并到已有行
+                    existing.content = (existing.content or "") + content
+                else:
+                    # 首次插入 chunk 行
+                    msg = ChatMessage(
+                        session_id=session_id,
+                        trace_id=trace_id,
+                        role="assistant",
+                        content=content,
+                        message_type="chunk",
+                        created_at=now,
+                    )
+                    session.add(msg)
+                # 更新会话 updated_at
+                await session.execute(
+                    update(ChatSession)
+                    .where(ChatSession.id == session_id)
+                    .values(updated_at=now)
+                )
+            logger.debug(f"[ChatHistory] chunk 已追加: {session_id} {trace_id}")
+        except Exception as e:
+            logger.warning(f"[ChatHistory] 追加 chunk 失败 (已忽略): {e}")
+
     async def get_messages(self, session_id: str) -> list[dict]:
         """按时间顺序返回指定会话的所有消息"""
         await self._ensure_tables()

@@ -160,14 +160,9 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
             # 从 ConnectionManager 获取认证信息，解析真实 role（不再硬编码 viewer）
             auth_ctx = manager.get_auth(session_id)
             role = _resolve_role(auth_ctx) if auth_ctx else "viewer"
-            assistant_frames: list[dict[str, Any]] = []
-            async for frame in _orchestrator.handle_chat(
-                session_id=session_id, user_input=user_input, role=role, confirmed=True,
-                trace_id=trace_id,
-            ):
-                await websocket.send_json(frame)
-                assistant_frames.append(frame)
-            await _persist_assistant_frames(session_id, trace_id, assistant_frames)
+            await _run_agent_flow(
+                websocket, session_id, user_input, role, confirmed=True, trace_id=trace_id,
+            )
             return
 
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
@@ -224,15 +219,7 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
 
     # 低危：Day5 Agent 主流程（Orchestrator.handle_chat）
     # role 由调用方从 AuthContext 解析传入，不再硬编码 viewer
-    assistant_frames: list[dict[str, Any]] = []
-    async for frame in _orchestrator.handle_chat(
-        session_id=session_id, user_input=user_input, role=role, trace_id=trace_id,
-    ):
-        await websocket.send_json(frame)
-        assistant_frames.append(frame)
-
-    # 持久化 assistant 关键消息帧
-    await _persist_assistant_frames(session_id, trace_id, assistant_frames)
+    await _run_agent_flow(websocket, session_id, user_input, role, trace_id=trace_id)
 
 
 # ── 旧风险路径已删除 ─────────────────────────────────────────────────
@@ -240,11 +227,47 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
 # 已在 LLM-Agent 大修复中删除，所有 chat 消息统一走 Orchestrator.handle_chat。
 
 
-async def _persist_assistant_frames(
-    session_id: str, trace_id: str, frames: list[dict[str, Any]]
+async def _run_agent_flow(
+    websocket: WebSocket,
+    session_id: str,
+    user_input: str,
+    role: str,
+    confirmed: bool = False,
+    trace_id: str | None = None,
 ) -> None:
-    """从 orchestrator 产出的帧中提取关键消息并持久化"""
-    for frame in frames:
+    """执行 Orchestrator 主流程：逐帧发送到 WebSocket，并逐帧持久化。
+
+    与旧版"先全部发送、结束统一持久化"的区别：
+    1. chunk 帧按 trace_id 追加合并落库（同 trace_id 的多段 chunk 合并为一行），
+       其余帧（status / tool_call / fix_options / error）逐条落库。
+    2. 发送失败容错：客户端断开后继续 send 会触发 RuntimeError
+       （ASGI: send after websocket.close）。此时停止发送，但继续消费并
+       持久化剩余帧 —— 流程不再崩溃，用户刷新后仍能找回完整回答。
+    """
+    alive = True
+    effective_trace_id = trace_id or ""
+    agen = _orchestrator.handle_chat(
+        session_id=session_id, user_input=user_input, role=role,
+        confirmed=confirmed, trace_id=trace_id,
+    )
+    try:
+        async for frame in agen:
+            if alive:
+                try:
+                    await websocket.send_json(frame)
+                except (WebSocketDisconnect, RuntimeError) as e:
+                    alive = False
+                    logger.warning(
+                        f"[WebSocket] 连接已关闭，后续帧仅落库不再发送: session={session_id}, {e}"
+                    )
+            await _persist_frame(session_id, frame.get("trace_id") or effective_trace_id, frame)
+    finally:
+        await agen.aclose()
+
+
+async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) -> None:
+    """持久化单条 assistant 关键帧；写库失败仅记录日志，不中断主流程"""
+    try:
         ft = frame.get("type", "")
         if ft == "status":
             await message_repository.save_message(
@@ -269,11 +292,17 @@ async def _persist_assistant_frames(
                 message_type="tool_call", trace_id=trace_id, metadata=meta,
             )
         elif ft == "chunk":
-            await message_repository.save_message(
-                session_id=session_id, role="assistant",
-                content=frame.get("content", ""),
-                message_type="chunk", trace_id=trace_id,
-            )
+            if trace_id:
+                await message_repository.append_chunk(
+                    session_id=session_id, trace_id=trace_id,
+                    content=frame.get("content", ""),
+                )
+            else:
+                await message_repository.save_message(
+                    session_id=session_id, role="assistant",
+                    content=frame.get("content", ""),
+                    message_type="chunk",
+                )
         elif ft == "fix_options":
             await message_repository.save_message(
                 session_id=session_id, role="assistant",
@@ -287,6 +316,8 @@ async def _persist_assistant_frames(
                 message_type="error", trace_id=trace_id,
             )
         # done / risk_alert 不需要额外保存（已在上层处理）
+    except Exception:
+        logger.warning("[WebSocket] assistant 帧持久化失败（已忽略）", exc_info=True)
 
 
 async def _send(
