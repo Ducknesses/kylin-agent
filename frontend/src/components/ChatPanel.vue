@@ -179,6 +179,7 @@ onMounted(async () => {
     wsClient.on('pending_confirmation', onToolPending)
     wsClient.on('done', () => { isStreaming.value = false })
     wsClient.on('error', () => { isStreaming.value = false })
+    wsClient.on('close', onWsClose)
   } catch (e) {
     console.error('[ChatPanel] 会话初始化失败:', e)
   } finally {
@@ -219,6 +220,17 @@ function sendMessage() {
   wsClient.sendChat(text)
   inputText.value = ''
   scrollToBottom()
+}
+
+// WebSocket 断开时中断流式状态，避免界面卡在"正在输出"
+function onWsClose() {
+  if (!isStreaming.value) return
+  isStreaming.value = false
+  chatStore.addMessage(chatStore.currentSessionId, {
+    role: 'system',
+    type: 'status',
+    content: '连接已断开，本次回答中断。恢复连接后可刷新会话，查看已保存的记录。'
+  })
 }
 
 function onRiskAlert(data) {
