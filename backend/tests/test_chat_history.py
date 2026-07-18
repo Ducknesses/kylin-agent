@@ -187,6 +187,37 @@ class TestSessionsAPI:
         resp = client.get("/api/sessions/nonexistent-12345/messages")
         assert resp.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_get_session_messages_returns_message_type(self, client):
+        """历史消息接口应返回 message_type，前端据此还原 fix_options 卡片"""
+        from app.dependencies import message_repository
+
+        create_resp = client.post("/api/sessions", json={"title": "类型测试"})
+        sid = create_resp.json()["id"]
+
+        options = [{
+            "option_id": "fix_1234abcd",
+            "title": "查看内存使用率历史趋势",
+            "description": "通过 metrics_history 获取趋势",
+            "risk_level": "low",
+            "tool": "metrics_history",
+            "params": {"metric_type": "memory", "duration": "1h"},
+            "requires_confirm": False,
+            "rollback": "无需回滚",
+        }]
+        await message_repository.save_message(
+            session_id=sid, role="assistant",
+            content=json.dumps(options, ensure_ascii=False),
+            message_type="fix_options", trace_id="trace-mt-001",
+        )
+
+        resp = client.get(f"/api/sessions/{sid}/messages")
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert len(msgs) == 1
+        assert msgs[0]["message_type"] == "fix_options"
+        assert json.loads(msgs[0]["content"]) == options
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 异常安全性

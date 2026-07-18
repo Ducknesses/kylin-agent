@@ -153,6 +153,18 @@ class WsClient {
         chatStore.addOrUpdateToolCall(this.sessionId, data)
         this.emit('tool_call', data)
         break
+      case 'fix_options':
+        // 一键修复选项卡片；content 置空字符串是为了避免后续 chunk
+        // 追加到该消息时出现 undefined 拼接
+        chatStore.addMessage(this.sessionId, {
+          role: 'assistant',
+          type: 'fix_options',
+          content: '',
+          options: Array.isArray(data.options) ? data.options : [],
+          traceId: data.trace_id
+        })
+        this.emit('fix_options', data)
+        break
       case 'risk_alert':
         chatStore.addMessage(this.sessionId, {
           role: 'system',

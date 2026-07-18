@@ -126,8 +126,10 @@ python3 -c "import fastapi; import uvicorn; print(f'  fastapi={fastapi.__version
     deactivate
     exit 1
 }
-python3 -c "import websockets; import wsproto" || {
-    echo "[ERROR] WebSocket 支持库未安装，请检查 pip install 'uvicorn[standard]' 或 requirements.txt 中的 websockets/wsproto"
+# 注意：新版 uvicorn 的 [standard] extras 已不含 wsproto（WebSocket 默认由 websockets 实现），
+# 因此此处只校验 websockets，不再把 wsproto 作为硬性依赖。
+python3 -c "import websockets" || {
+    echo "[ERROR] WebSocket 支持库未安装，请检查 pip install 'uvicorn[standard]' 或 requirements.txt 中的 websockets"
     deactivate
     exit 1
 }

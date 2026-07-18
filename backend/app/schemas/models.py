@@ -21,6 +21,9 @@ class SessionMessage(BaseModel):
     role: str  # "user" | "assistant"
     content: str
     timestamp: str
+    # 消息类型（chat/chunk/tool_call/fix_options/status 等），
+    # 前端据此还原特殊消息的渲染（如 fix_options 选择卡片）
+    message_type: str | None = None
     tool_calls: list[dict] | None = None
 
 

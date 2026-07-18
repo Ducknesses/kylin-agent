@@ -83,13 +83,46 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const { data } = await http.get(`/sessions/${sessionId}/messages`)
       if (data.messages && data.messages.length > 0) {
-        const msgs = data.messages.map(m => ({
-          role: m.role,
-          type: m.tool_calls ? 'tool_call' : 'text',
-          content: m.content,
-          timestamp: m.timestamp,
-          tool_calls: m.tool_calls || undefined,
-        }))
+        // 历史 tool_call 消息归一化为与实时 WS 一致的扁平结构，
+        // 否则 MsgBubble 按 role === 'tool' 判断不命中，会把 content（JSON 字符串）当普通文本渲染
+        const msgs = data.messages.map(m => {
+          if (m.tool_calls && m.tool_calls.length > 0) {
+            const tc = m.tool_calls[0]
+            return {
+              role: 'tool',
+              type: 'tool_call',
+              toolCallId: tc.tool_call_id || tc.tool,
+              tool: tc.tool,
+              params: tc.params,
+              result: tc.ok ? tc.result : (tc.error ?? tc.result),
+              timestamp: m.timestamp,
+            }
+          }
+          // fix_options 历史消息的 content 是选项数组的 JSON 字符串，
+          // 解析失败时降级为空选项卡片，避免把原始 JSON 当文本渲染
+          if (m.message_type === 'fix_options') {
+            let options = []
+            try {
+              const parsed = JSON.parse(m.content)
+              if (Array.isArray(parsed)) options = parsed
+            } catch (e) {
+              console.warn('[ChatStore] fix_options 历史消息解析失败:', e)
+            }
+            return {
+              role: 'assistant',
+              type: 'fix_options',
+              content: '',
+              options,
+              timestamp: m.timestamp,
+            }
+          }
+          return {
+            role: m.role,
+            type: 'text',
+            content: m.content,
+            timestamp: m.timestamp,
+          }
+        })
         messagesMap.value.set(sessionId, msgs)
       } else {
         // 确保空消息列表被初始化，避免 currentMessages 返回 undefined
