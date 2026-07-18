@@ -181,6 +181,7 @@ class Orchestrator:
             else:
                 intent_result = self.intent_agent.detect(user_input)
             ctx.intent = intent_result.get("intent")
+            ctx.intent_result = intent_result
             # 保存 intent_result 供后续 FixPlanner 使用
             intent = ctx.intent or "unknown"
             target_service = intent_result.get("target_service")
@@ -209,10 +210,28 @@ class Orchestrator:
                 tool_name = plan_item["tool"]
                 params = plan_item["params"]
                 result = await self.agent_harness.run_tool(ctx, tool_name, params)
+
                 # 对前端帧脱敏 params，不影响真实执行
                 safe_params = self._safe_params_for_display(params)
                 tool_call_record = ctx.tool_calls[-1] if ctx.tool_calls else {}
                 tool_call_id = tool_call_record.get("tool_call_id") or f"tc_{str(uuid.uuid4())[:8]}"
+
+                # 中危工具需要二次确认：发送 pending_confirmation 帧并暂停当前回合
+                if result.get("requires_confirm"):
+                    yield {
+                        "type": "status", "trace_id": trace_id,
+                        "content": "该工具操作存在风险，正在等待用户确认...",
+                    }
+                    yield {
+                        "type": "pending_confirmation", "trace_id": trace_id,
+                        "tool": tool_name, "params": safe_params,
+                        "tool_confirm_id": result.get("tool_confirm_id"),
+                        "reason": result.get("reason"),
+                        "risk_level": result.get("risk_level", "medium"),
+                        "context": ctx.__dict__,
+                    }
+                    return
+
                 frame: dict[str, Any] = {
                     "type": "tool_call", "trace_id": trace_id,
                     "tool": tool_name, "params": safe_params,
@@ -240,6 +259,7 @@ class Orchestrator:
             ctx.final_response = report
 
             # ── 7. FixPlannerAgent → FixOptionStore → fix_options 帧 ──
+            yield {"type": "status", "trace_id": trace_id, "content": "正在分析诊断结果，生成修复建议..."}
             if settings.LLM_ENABLED:
                 fix_options = await self.fix_planner.plan_with_llm(
                     intent=intent,

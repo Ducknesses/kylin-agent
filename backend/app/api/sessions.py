@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import AuthContext, AuthLevel
 from app.dependencies import message_repository, require_auth
+from app.repositories.base import MessageRepository
 from app.schemas.models import SessionCreate, SessionMessage, SessionMessagesOut, SessionOut
 
 logger = logging.getLogger(__name__)
@@ -95,3 +96,16 @@ async def get_session_messages(
         ))
 
     return SessionMessagesOut(session_id=session_id, messages=messages)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: str,
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
+) -> None:
+    """删除会话及其所有关联消息（需要 READ 权限）"""
+    repo: MessageRepository = message_repository
+    deleted = await repo.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    logger.info(f"[Session] 删除会话: {session_id} (by {auth.token_hash})")

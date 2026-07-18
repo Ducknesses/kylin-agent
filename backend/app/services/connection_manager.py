@@ -24,6 +24,7 @@ class ConnectionManager:
         self._connections: Dict[str, WebSocket] = {}
         self._sessions_auth: Dict[str, AuthContext] = {}
         self._pending_confirm: Dict[str, dict] = {}
+        self._pending_tool: Dict[str, dict] = {}
 
     # ── 连接管理 ──
 
@@ -69,6 +70,7 @@ class ConnectionManager:
         self._connections.pop(session_id, None)
         self._sessions_auth.pop(session_id, None)
         self._pending_confirm.pop(session_id, None)
+        self._pending_tool.pop(session_id, None)
         logger.info(f"[Connection] 会话断开: {session_id}")
 
     def is_connected(self, session_id: str) -> bool:
@@ -113,3 +115,21 @@ class ConnectionManager:
     def has_pending(self, session_id: str) -> bool:
         """是否存在待确认操作"""
         return session_id in self._pending_confirm
+
+    # ── 挂起工具调用（中危工具二次确认） ──
+
+    def set_pending_tool(self, session_id: str, request: dict) -> None:
+        """设置待确认的中危工具调用"""
+        self._pending_tool[session_id] = request
+
+    def get_pending_tool(self, session_id: str) -> dict | None:
+        """读取待确认的工具调用（不删除）"""
+        return self._pending_tool.get(session_id)
+
+    def pop_pending_tool(self, session_id: str) -> dict | None:
+        """取出并删除待确认的工具调用"""
+        return self._pending_tool.pop(session_id, None)
+
+    def has_pending_tool(self, session_id: str) -> bool:
+        """是否存在待确认的工具调用"""
+        return session_id in self._pending_tool

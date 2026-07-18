@@ -70,8 +70,13 @@ async def query_audit(
     start_date: str | None = None,
     end_date: str | None = None,
 ):
-    """查询审计日志（委托 AuditService.list_records）"""
-    return await _service.list_records(
+    """查询审计日志（委托 AuditService.list_records）
+
+    向后兼容：内部调用 list_records 返回 (records, total)，
+    但本函数仅返回 records 数组（调用方可单独使用 count_audit 获取 total）。
+    """
+    records, _ = await _service.list_records(
         limit=limit, offset=offset,
         start_date=start_date, end_date=end_date,
     )
+    return records

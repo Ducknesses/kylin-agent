@@ -1,8 +1,8 @@
 """WebSocket 聊天接口
 
 正式接口：WS /ws/chat/{session_id}（最新前后端 API 统一规范 v1.0）
-前端消息类型：chat / confirm / ping
-后端消息类型：status / chunk / risk_alert / tool_call / error / done / pong
+前端消息类型：chat / confirm / tool_confirm / ping
+后端消息类型：status / chunk / risk_alert / tool_call / pending_confirmation / error / done / pong
 
 业务逻辑通过 Day5 Orchestrator.handle_chat 串起 IntentAgent → DiagnoseAgent →
 AgentHarness → ReporterAgent → AuditService 全链路。
@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.audit.logger import log_chain
 from app.core.auth import AuthContext, AuthLevel
 from app.core.security import TokenStore
-from app.dependencies import (fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository, knowledge_service)
+from app.dependencies import (fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository, knowledge_service, confirmation_store)
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
 
@@ -168,9 +168,101 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
         return
 
+    # ── tool_confirm：中危工具调用确认/拒绝 ──
+    if msg_type == "tool_confirm":
+        tool_confirm_id = msg.get("tool_confirm_id", "")
+        decision = msg.get("decision", "")
+
+        # 兼容旧版前端可能发送的 approved boolean
+        if not decision and "approved" in msg:
+            decision = "approve" if msg.get("approved") in (True, "approve") else "reject"
+
+        if not tool_confirm_id:
+            await _send(websocket, "error", message="tool_confirm 缺少 tool_confirm_id")
+            return
+
+        if decision not in ("approve", "reject"):
+            await _send(websocket, "error", message=f"tool_confirm 决策无效: {decision}，可用: approve / reject")
+            return
+
+        # 从 ConnectionManager 查找待确认的工具调用
+        pending_tool = manager.pop_pending_tool(session_id)
+        if pending_tool is None or pending_tool.get("tool_confirm_id") != tool_confirm_id:
+            await _send(websocket, "error", message=f"未找到待确认的工具调用: {tool_confirm_id}")
+            return
+
+        trace_id = pending_tool.get("trace_id", "")
+
+        if decision == "reject":
+            await _send(websocket, "status", content="已拒绝该工具调用。", trace_id=trace_id)
+            await _send(websocket, "done", trace_id=trace_id)
+            await message_repository.save_message(
+                session_id=session_id, role="system",
+                content=f"已拒绝工具调用: {pending_tool.get('tool', '')}",
+                message_type="tool_confirm", trace_id=trace_id,
+            )
+            logger.info(f"[tool_confirm] 用户拒绝: session={session_id}, tool_confirm_id={tool_confirm_id}")
+            return
+
+        # decision == "approve"：恢复上下文并执行工具
+        from app.services.agent_context import AgentContext
+        ctx = AgentContext(**pending_tool["context"])
+        tool = pending_tool["tool"]
+        params = pending_tool.get("params", {})
+
+        await _send(websocket, "status", content="工具调用已批准，正在执行...", trace_id=trace_id)
+        logger.info(f"[tool_confirm] 用户批准: session={session_id}, tool_confirm_id={tool_confirm_id}, tool={tool}")
+
+        try:
+            result = await agent_harness.run_tool(ctx, tool, params, confirmed=True)
+        except Exception as e:
+            logger.exception(f"[tool_confirm] 工具执行异常: {e}")
+            await _send(websocket, "error", message="工具执行异常，请稍后重试", trace_id=trace_id)
+            await _send(websocket, "done", trace_id=trace_id)
+            return
+
+        # 发送 tool_call 结果帧
+        tool_frame = {
+            "type": "tool_call", "trace_id": trace_id,
+            "tool": tool, "params": _orchestrator._safe_params_for_display(params),
+            "tool_call_id": tool_confirm_id,
+            "ok": result.get("ok", False),
+        }
+        if result.get("ok"):
+            tool_frame["result"] = result.get("result")
+        else:
+            tool_frame["error"] = result.get("error") or "工具调用失败"
+        await websocket.send_json(tool_frame)
+        await _persist_frame(session_id, trace_id, tool_frame)
+
+        # 继续生成诊断报告
+        try:
+            report = await _orchestrator._generate_report(
+                ctx.intent_result, ctx.observations, ctx.user_input, ctx.knowledge_result,
+            )
+        except Exception as e:
+            logger.exception(f"[tool_confirm] 生成报告异常: {e}")
+            report = "工具执行完成，但生成报告时发生异常。"
+
+        for i in range(0, len(report), 500):
+            await _send(websocket, "chunk", content=report[i:i + 500], trace_id=trace_id)
+
+        await _send(websocket, "done", trace_id=trace_id, session_id=session_id)
+        await message_repository.save_message(
+            session_id=session_id, role="assistant",
+            content=report,
+            message_type="chat", trace_id=trace_id,
+        )
+        # 审计
+        try:
+            await audit_service.save_context(ctx, event_type="chat_done")
+        except Exception:
+            logger.warning("[tool_confirm] 审计写入失败（已忽略）", exc_info=True)
+        return
+
     # ── chat：核心对话流程 ──
     if msg_type != "chat":
-        await _send(websocket, "error", message=f"不支持的消息类型: {msg_type}，可用类型: chat / confirm / ping")
+        await _send(websocket, "error", message=f"不支持的消息类型: {msg_type}，可用类型: chat / confirm / tool_confirm / ping")
         return
 
     content = msg.get("content", "")
@@ -254,6 +346,17 @@ async def _run_agent_flow(
         async for frame in agen:
             if alive:
                 try:
+                    # 中危工具确认帧：把上下文暂存到 ConnectionManager，便于 tool_confirm 恢复执行
+                    if frame.get("type") == "pending_confirmation":
+                        manager.set_pending_tool(session_id, {
+                            "tool_confirm_id": frame.get("tool_confirm_id"),
+                            "tool": frame.get("tool"),
+                            "params": frame.get("params"),
+                            "trace_id": frame.get("trace_id"),
+                            "context": frame.get("context", {}),
+                        })
+                        # 前端不需要 context 字段，移除后再发送
+                        frame = {k: v for k, v in frame.items() if k != "context"}
                     await websocket.send_json(frame)
                 except (WebSocketDisconnect, RuntimeError) as e:
                     alive = False
@@ -309,6 +412,18 @@ async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) 
                 content=json.dumps(frame.get("options", []), ensure_ascii=False),
                 message_type="fix_options", trace_id=trace_id,
             )
+        elif ft == "pending_confirmation":
+            await message_repository.save_message(
+                session_id=session_id, role="assistant",
+                content=frame.get("reason", ""),
+                message_type="pending_confirmation", trace_id=trace_id,
+                metadata={
+                    "tool": frame.get("tool"),
+                    "params": frame.get("params"),
+                    "tool_confirm_id": frame.get("tool_confirm_id"),
+                    "risk_level": frame.get("risk_level"),
+                },
+            )
         elif ft == "error":
             await message_repository.save_message(
                 session_id=session_id, role="assistant",
@@ -330,8 +445,10 @@ async def _send(
     original_input: str | None = None,
     confirm_id: str | None = None,
     trace_id: str | None = None,
+    session_id: str | None = None,
     tool: str | None = None,
     tool_call_id: str | None = None,
+    tool_confirm_id: str | None = None,
     params: dict[str, Any] | None = None,
     result: Any = None,
 ) -> None:
@@ -368,9 +485,25 @@ async def _send(
         if trace_id is not None:
             payload["trace_id"] = trace_id
 
+    elif msg_type == "pending_confirmation":
+        if tool is not None:
+            payload["tool"] = tool
+        if params is not None:
+            payload["params"] = params
+        if tool_confirm_id is not None:
+            payload["tool_confirm_id"] = tool_confirm_id
+        if reason is not None:
+            payload["reason"] = reason
+        if confirm_id is not None:
+            payload["confirm_id"] = confirm_id
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
     elif msg_type == "done":
         if trace_id is not None:
             payload["trace_id"] = trace_id
+        if session_id is not None:
+            payload["session_id"] = session_id
 
     elif msg_type == "error":
         if message is not None:

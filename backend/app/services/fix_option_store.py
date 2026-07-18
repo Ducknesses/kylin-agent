@@ -30,6 +30,8 @@ FixOptionStatus = Literal[
     "confirm_required",
     "executing",
     "executed",
+    "rolling_back",
+    "rolled_back",
     "blocked",
     "failed",
     "expired",
@@ -50,9 +52,15 @@ _BLOCKED_FROM: set[FixOptionStatus] = {"pending", "confirm_required"}
 # mark_confirm_required 允许从 pending
 _CONFIRM_REQUIRED_FROM: set[FixOptionStatus] = {"pending"}
 
+# claim_for_rollback 只允许从 executed
+_ROLLING_BACK_FROM: set[FixOptionStatus] = {"executed"}
+
+# mark_rolled_back 只允许从 rolling_back
+_ROLLED_BACK_FROM: set[FixOptionStatus] = {"rolling_back"}
+
 # 已终态集合
 _TERMINAL_STATUSES: set[FixOptionStatus] = {
-    "executed", "blocked", "failed", "expired",
+    "executed", "rolled_back", "blocked", "failed", "expired",
 }
 
 # Redis Key 前缀
@@ -74,6 +82,7 @@ class StoredFixOption:
     created_at: datetime
     expires_at: datetime
     executed_at: datetime | None = None
+    pre_snapshot: dict[str, Any] | None = None  # 操作前状态快照 {tool, params}
 
 
 # ── 序列化辅助 ────────────────────────────────────────────────────────
@@ -88,6 +97,7 @@ def _stored_to_dict(s: StoredFixOption) -> dict[str, Any]:
         "created_at": s.created_at.isoformat(),
         "expires_at": s.expires_at.isoformat(),
         "executed_at": s.executed_at.isoformat() if s.executed_at else None,
+        "pre_snapshot": s.pre_snapshot,
     }
 
 
@@ -101,6 +111,7 @@ def _dict_to_stored(d: dict[str, Any]) -> StoredFixOption:
         created_at=datetime.fromisoformat(d["created_at"]),
         expires_at=datetime.fromisoformat(d["expires_at"]),
         executed_at=datetime.fromisoformat(d["executed_at"]) if d.get("executed_at") else None,
+        pre_snapshot=d.get("pre_snapshot"),
     )
 
 
@@ -306,6 +317,88 @@ class FixOptionStore:
     ) -> bool:
         """executing → failed"""
         return self._transition(session_id, option_id, "failed", _FAILED_FROM)
+
+    # ── 回滚状态流转 ────────────────────────────────────────────
+
+    def claim_for_rollback(
+        self,
+        session_id: str,
+        option_id: str,
+    ) -> StoredFixOption | None:
+        """原子领取回滚权：executed → rolling_back（Lua CAS）
+
+        与 claim_for_execution 逻辑同等：
+          - 只有 executed 状态可领取回滚权
+          - 两个并发 worker 同时 claim 时，只有一个成功
+          - 返回深拷贝或 None
+        """
+        redis_key = _build_key(session_id, option_id)
+
+        ttl = self._storage.ttl(redis_key)
+        if ttl <= 0:
+            ttl = self._ttl
+
+        def _update(data: dict[str, Any]) -> dict[str, Any] | None:
+            now = self._clock()
+            stored = _dict_to_stored(data)
+            # TTL 检查
+            if now >= stored.expires_at:
+                return None
+            # 状态检查：仅 executed 可进入 rolling_back
+            if stored.status not in {"executed"}:
+                return None
+            data["status"] = "rolling_back"
+            return data
+
+        result = self._storage.cas_update(
+            redis_key,
+            expected_status=None,
+            update_fn=_update,
+            ttl=ttl,
+        )
+        if result is None:
+            return None
+        stored = _dict_to_stored(result)
+        if stored.status == "rolling_back":
+            return deepcopy(stored)
+        return None
+
+    def mark_rolled_back(
+        self,
+        session_id: str,
+        option_id: str,
+    ) -> bool:
+        """rolling_back → rolled_back"""
+        return self._transition(session_id, option_id, "rolled_back", _ROLLED_BACK_FROM)
+
+    # ── 快照 ────────────────────────────────────────────────────
+
+    def set_pre_snapshot(
+        self,
+        session_id: str,
+        option_id: str,
+        snapshot: dict[str, Any],
+    ) -> bool:
+        """写入操作前状态快照（仅 executing 状态可写）"""
+        redis_key = _build_key(session_id, option_id)
+
+        ttl = self._storage.ttl(redis_key)
+        if ttl <= 0:
+            ttl = self._ttl
+
+        def _update(data: dict[str, Any]) -> dict[str, Any] | None:
+            if data.get("status") != "executing":
+                return None
+            data["pre_snapshot"] = snapshot
+            return data
+
+        result = self._storage.cas_update(
+            redis_key,
+            expected_status=None,
+            update_fn=_update,
+            ttl=ttl,
+        )
+        return result is not None
 
     # ── 清理 ──────────────────────────────────────────────────────
 

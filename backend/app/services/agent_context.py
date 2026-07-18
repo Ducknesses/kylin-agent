@@ -32,6 +32,9 @@ class AgentContext:
     intent: str | None = None
     risk_level: str | None = None
 
+    # ── 完整的意图识别结果（用于中危工具确认后恢复报告生成） ──
+    intent_result: dict | None = None
+
     # ── 工具调用记录，每条为 {"tool": str, "params": dict, "result": dict|None} ──
     # 使用 default_factory 避免可变默认值污染
     tool_calls: list[dict] = field(default_factory=list)

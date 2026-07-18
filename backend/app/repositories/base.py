@@ -49,6 +49,11 @@ class MessageRepository(ABC):
         ...
 
     @abstractmethod
+    async def delete_session(self, session_id: str) -> bool:
+        """删除会话及其所有关联消息，返回是否成功删除"""
+        ...
+
+    @abstractmethod
     async def get_messages(self, session_id: str) -> list[dict]:
         """按时间顺序返回指定会话的所有消息"""
         ...

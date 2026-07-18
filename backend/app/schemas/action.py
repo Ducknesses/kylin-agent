@@ -138,3 +138,27 @@ class ActionConfirmResponse(BaseModel):
     status: ActionConfirmStatus
     message: str
     result_summary: str | None = None
+
+
+# ── Rollback API 模型 ────────────────────────────────────────────────
+
+
+class ActionRollbackRequest(BaseModel):
+    session_id: str
+    option_id: str
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("session_id", "option_id")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("不能为空或仅包含空白字符")
+        return stripped
+
+    @field_validator("option_id")
+    @classmethod
+    def _valid_option_id(cls, v: str) -> str:
+        if not _OPTION_ID_RE.fullmatch(v):
+            raise ValueError("option_id 格式无效，需为 fix_{8位十六进制}")
+        return v

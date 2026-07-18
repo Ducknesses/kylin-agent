@@ -14,6 +14,7 @@
 
 import logging
 import re
+import uuid
 from typing import Any
 
 from app.audit.logger import log_chain
@@ -84,7 +85,8 @@ class AgentHarness:
     # ── 主入口 ──────────────────────────────────────────────────────
 
     async def run_tool(
-        self, ctx: AgentContext, tool_name: str, params: dict | None = None
+        self, ctx: AgentContext, tool_name: str, params: dict | None = None,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
         """统一工具调用入口
 
@@ -98,6 +100,9 @@ class AgentHarness:
           7. 写审计日志
 
         返回结构统一为 {"ok": bool, ...}，具体字段按场景不同。
+
+        参数:
+            confirmed: 仅用于中危工具调用。True 表示用户已二次确认，跳过确认等待直接执行。
         """
         params = params or {}
 
@@ -140,32 +145,28 @@ class AgentHarness:
                 blocked=True, status="blocked", safety=safety,
             )
 
-        # ── 中危需确认：不调用 MCPClient ──
-        if safety.get("requires_confirm", False):
+        # ── 中危需确认：不调用 MCPClient（用户已确认时直接放行） ──
+        if safety.get("requires_confirm", False) and not confirmed:
+            tool_confirm_id = f"tc_{uuid.uuid4().hex[:8]}"
             result = {
                 "ok": False, "requires_confirm": True,
                 "tool": tool_name, "params": params,
                 "reason": safety.get("reason", "需要二次确认"),
                 "risk_level": safety.get("risk_level", "medium"),
+                "tool_confirm_id": tool_confirm_id,
             }
             if "confirm_id" in safety:
                 result["confirm_id"] = safety["confirm_id"]
             ctx.add_tool_call(tool_name, params, None)
             ctx.tool_calls[-1]["status"] = "requires_confirm"
+            ctx.tool_calls[-1]["tool_confirm_id"] = tool_confirm_id
             ctx.tool_calls[-1]["safety"] = {
                 "risk_level": safety.get("risk_level"),
                 "reason": safety.get("reason"),
             }
-            ctx.add_observation({
-                "tool": tool_name,
-                "params": _sanitize_observation(params),
-                "ok": False,
-                "requires_confirm": True,
-                "reason": safety.get("reason", "需要二次确认"),
-            })
             return result
 
-        # ── 4. 记录 tool_call（放行时） ──
+        # ── 4. 记录 tool_call（放行或已确认时） ──
         ctx.add_tool_call(tool_name, params, None)
         ctx.tool_calls[-1]["status"] = "executing"
         ctx.tool_calls[-1]["safety"] = {
@@ -179,6 +180,23 @@ class AgentHarness:
         except Exception as e:
             logger.exception(f"[AgentHarness] MCPClient 异常: {e}")
             mcp_result = {"ok": False, "result": None, "error": "MCP 工具调用异常"}
+
+        # ── 5.5 MCP 级别二次确认检测 ──
+        mcp_result_data = mcp_result.get("result") if isinstance(mcp_result.get("result"), dict) else {}
+        if mcp_result.get("ok") and mcp_result_data.get("_pending_confirmation"):
+            confirm_id = mcp_result_data.get("confirm_id", "unknown")
+            logger.info(
+                f"[AgentHarness] MCP 返回 pending，自动重试: "
+                f"tool={tool_name}, confirm_id={confirm_id}"
+            )
+            retry_params = dict(params)
+            retry_params["_skip_pending"] = True
+            retry_params["skip_pending"] = True  # 兼容 cmd_exec.py 的参数名
+            try:
+                mcp_result = await self.mcp_client.call_tool(tool_name, arguments=retry_params)
+            except Exception as e:
+                logger.exception(f"[AgentHarness] MCP pending 重试异常: {e}")
+                mcp_result = {"ok": False, "result": None, "error": "MCP 二次确认重试异常"}
 
         ctx.tool_calls[-1]["result"] = mcp_result.get("result") if mcp_result.get("ok") else None
         ctx.tool_calls[-1]["status"] = "done" if mcp_result.get("ok") else "mcp_error"

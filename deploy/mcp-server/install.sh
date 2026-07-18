@@ -56,27 +56,47 @@ echo "  文件已复制到 $INSTALL_DIR/"
 
 # ---- 3. 创建虚拟环境并安装依赖 ----
 echo "[3/7] 创建 Python 虚拟环境..."
+
+# pip 镜像源：可通过 PIP_INDEX_URL 环境变量覆盖（注意：sudo 默认不传递环境变量，需要用 sudo -E 或写入 pip.conf）
+PIP_INDEX="${PIP_INDEX_URL:-https://pypi.org/simple}"
+
+# 写入全局 pip.conf 确保 pip 使用正确的镜像源（解决 sudo 不传递环境变量的问题）
+mkdir -p /etc/pip.conf.d 2>/dev/null || true
+cat > /etc/pip.conf << PIPCONF
+[global]
+index-url = ${PIP_INDEX}
+timeout = 120
+retries = 3
+PIPCONF
+echo "  已写入 /etc/pip.conf，pip 源: $PIP_INDEX"
+
+# 创建虚拟环境并配置 pip
 cd "$INSTALL_DIR"
 python3 -m venv venv
 source venv/bin/activate
+
+# 虚拟环境内也配置 pip.conf（双保险）
+mkdir -p "$VIRTUAL_ENV/pip.conf.d" 2>/dev/null || true
+cat > "$VIRTUAL_ENV/pip.conf" << PIPCONF
+[global]
+index-url = ${PIP_INDEX}
+timeout = 120
+retries = 3
+PIPCONF
+
 echo "[3/7] 安装依赖..."
-
-# pip 镜像源：可通过 PIP_INDEX_URL 环境变量覆盖
-PIP_INDEX="${PIP_INDEX_URL:-https://pypi.org/simple}"
-echo "  使用 pip 源: $PIP_INDEX"
-PIP_OPTS="--index-url $PIP_INDEX --timeout 120 --retries 3"
-
-pip install $PIP_OPTS --upgrade pip || {
+pip install --upgrade pip || {
     echo "[ERROR] pip 升级失败，请检查网络连接"
-    echo "  提示: 可设置 PIP_INDEX_URL 使用国内镜像"
-    echo "  例如: PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple sudo ./deploy/mcp-server/install.sh"
+    echo "  当前 pip 源: $PIP_INDEX"
+    echo "  提示: 可设置 PIP_INDEX_URL 使用国内镜像，例如："
+    echo "    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple sudo -E ./deploy/mcp-server/install.sh"
     deactivate
     exit 1
 }
 if [ -f "$INSTALL_DIR/requirements.txt" ]; then
-    pip install $PIP_OPTS -r requirements.txt
+    pip install -r requirements.txt
 else
-    pip install $PIP_OPTS psutil>=5.9.0 python-dotenv>=1.0.0
+    pip install psutil>=5.9.0 python-dotenv>=1.0.0
 fi
 echo "  依赖安装完成"
 

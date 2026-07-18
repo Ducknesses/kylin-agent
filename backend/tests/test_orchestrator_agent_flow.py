@@ -1039,3 +1039,81 @@ class TestDependencyAssembly:
         from app import dependencies
         from app.api.chat import _orchestrator
         assert _orchestrator.fix_option_store is dependencies.fix_option_store
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 中危工具调用确认帧测试
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestToolConfirmFrame:
+    """验证中危工具调用（如 service_mgr restart nginx）会产生 pending_confirmation 帧而非错误"""
+
+    def test_service_mgr_restart_generates_pending_confirmation(self):
+        """operator 角色下，restart nginx 计划应触发 pending_confirmation 并暂停"""
+        from app.dependencies import safety_guard, tool_registry, mcp_client, agent_harness, audit_service, knowledge_service
+        from app.services.orchestrator import Orchestrator
+        orch = Orchestrator(
+            safety_guard=safety_guard,
+            tool_registry=tool_registry,
+            mcp_client=mcp_client,
+            agent_harness=agent_harness,
+            audit_service=audit_service,
+            knowledge_service=knowledge_service,
+        )
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-tool-confirm", "nginx 无法访问，帮我重启", role="operator")
+        ))
+        pending_frames = [m for m in items if m["type"] == "pending_confirmation"]
+        assert len(pending_frames) == 1, f"应产生 1 个 pending_confirmation 帧，实际: {pending_frames}"
+        frame = pending_frames[0]
+        assert frame["tool"] == "service_mgr"
+        assert frame["params"] == {"action": "restart", "service": "nginx"}
+        assert frame["tool_confirm_id"].startswith("tc_")
+        assert "reason" in frame
+
+        # 验证 generator 暂停：pending_confirmation 后没有 done 帧
+        assert not any(m["type"] == "done" for m in items)
+
+    def test_pending_confirmation_includes_context_for_recovery(self):
+        """pending_confirmation 帧应携带可恢复执行的上下文"""
+        from app.dependencies import safety_guard, tool_registry, mcp_client, agent_harness, audit_service, knowledge_service
+        from app.services.orchestrator import Orchestrator
+        orch = Orchestrator(
+            safety_guard=safety_guard,
+            tool_registry=tool_registry,
+            mcp_client=mcp_client,
+            agent_harness=agent_harness,
+            audit_service=audit_service,
+            knowledge_service=knowledge_service,
+        )
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-tool-ctx", "nginx 无法访问，帮我重启", role="operator")
+        ))
+        frame = [m for m in items if m["type"] == "pending_confirmation"][0]
+        ctx = frame["context"]
+        assert ctx["session_id"] == "s-tool-ctx"
+        assert ctx["role"] == "operator"
+        assert ctx["intent_result"]["target_service"] == "nginx"
+        assert ctx["tool_calls"][0]["tool"] == "service_mgr"
+
+    def test_viewer_restart_is_blocked_no_pending_confirmation(self):
+        """viewer 角色对 restart 工具应直接拒绝，不产生 pending_confirmation"""
+        from app.dependencies import safety_guard, tool_registry, mcp_client, agent_harness, audit_service, knowledge_service
+        from app.services.orchestrator import Orchestrator
+        orch = Orchestrator(
+            safety_guard=safety_guard,
+            tool_registry=tool_registry,
+            mcp_client=mcp_client,
+            agent_harness=agent_harness,
+            audit_service=audit_service,
+            knowledge_service=knowledge_service,
+        )
+        items = asyncio.run(_collect(
+            orch.handle_chat("s-tool-viewer", "nginx 无法访问，帮我重启", role="viewer")
+        ))
+        assert not any(m["type"] == "pending_confirmation" for m in items)
+        tool_call_frames = [m for m in items if m["type"] == "tool_call"]
+        assert len(tool_call_frames) == 1
+        assert tool_call_frames[0]["ok"] is False
+        assert "无权" in (tool_call_frames[0].get("error") or "")

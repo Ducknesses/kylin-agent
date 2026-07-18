@@ -223,6 +223,32 @@ export const useChatStore = defineStore('chat', () => {
     messagesMap.value.set(sessionId, [...list])
   }
 
+  // 删除会话
+  async function deleteSession(sessionId) {
+    try {
+      await http.delete(`/sessions/${sessionId}`)
+    } catch (e) {
+      console.error('[ChatStore] 删除后端会话失败:', e)
+      throw e
+    }
+    // 从本地列表中移除
+    const idx = sessions.value.findIndex(s => s.id === sessionId)
+    if (idx !== -1) {
+      sessions.value.splice(idx, 1)
+    }
+    // 清理消息缓存
+    messagesMap.value.delete(sessionId)
+    historyLoaded.value.delete(sessionId)
+    // 如果删除的是当前会话，切换到第一个剩余会话（或创建新会话）
+    if (currentSessionId.value === sessionId) {
+      if (sessions.value.length > 0) {
+        currentSessionId.value = sessions.value[0].id
+      } else {
+        await createSession()
+      }
+    }
+  }
+
   return {
     sessions,
     currentSessionId,
@@ -233,6 +259,7 @@ export const useChatStore = defineStore('chat', () => {
     switchSession,
     addMessage,
     appendToLastAssistant,
-    addOrUpdateToolCall
+    addOrUpdateToolCall,
+    deleteSession
   }
 })
