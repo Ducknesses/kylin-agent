@@ -2,17 +2,9 @@
 import logging
 import uuid
 
-from sandbox import execute as sandbox_execute
+from sandbox import execute as sandbox_execute, _match_command_pattern
 
 logger = logging.getLogger("mcp.cmd_exec")
-
-# 只读命令白名单（无需确认直接执行）
-READ_ONLY_COMMANDS = {
-    "df -h", "free -m", "uptime", "whoami", "uname -a",
-    "ps aux", "top -bn1", "ls -la", "ss -tlnp",
-    "netstat -tlnp", "ip addr", "hostname", "id",
-    "lscpu", "lsblk", "cat /proc/loadavg", "cat /proc/meminfo",
-}
 
 
 def handle(arguments: dict) -> dict:
@@ -53,8 +45,9 @@ def handle(arguments: dict) -> dict:
     skip_pending = arguments.get("_skip_pending", False)
     normalized = command.strip()
 
-    # 只读命令白名单 → 直接执行（不触发 pending）
-    if normalized in READ_ONLY_COMMANDS:
+    # 白名单命令 → 直接执行（不触发 pending）
+    matched_pattern = _match_command_pattern(normalized)
+    if matched_pattern:
         result = sandbox_execute(command=command, timeout=timeout, user=user)
         if result.get("blocked"):
             return {
@@ -62,7 +55,7 @@ def handle(arguments: dict) -> dict:
                 "command": command,
                 "reason": result.get("stderr", "命令被安全策略拦截"),
             }
-        logger.info("[CmdExec] 只读命令直接执行: '%s'", command)
+        logger.info("[CmdExec] 白名单命令直接执行: '%s' (匹配规则: %s)", command, matched_pattern)
         return result
 
     # skip_pending → 用户已确认，执行命令
