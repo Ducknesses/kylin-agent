@@ -112,6 +112,7 @@ _WHITELIST_DEFAULTS = {
         "tail -n {lines} {filepath}",
         "ls -la", "ls -l",
         "ls -la {dirpath}", "ls -l {dirpath}",
+        "ls {dirpath}",
     ],
     "danger_patterns": [
         ";", "&&", "||", "|", "$(", "`", "${", ">>", ">", "<", "<<<", "&",

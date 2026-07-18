@@ -402,25 +402,36 @@ class SafetyGuard:
         # 非法 action
         return self._deny("medium", f"非法的 service_mgr action: {action}")
 
+    # 只读诊断命令前缀：不修改系统状态，委托 sandbox 做最终路径校验
+    _READONLY_CMD_PREFIXES: tuple[str, ...] = (
+        "ls ", "lsblk", "lscpu", "lspci", "lsusb",
+        "cat ", "head ", "tail ", "df ", "du ",
+        "free ", "ps ", "top ", "uptime", "whoami",
+        "hostname", "id", "uname ", "hostnamectl",
+        "timedatectl", "mount", "findmnt",
+        "ss ", "ip ", "ping ", "netstat ", "dmesg ",
+        "journalctl ", "file ", "stat ", "wc ",
+    )
+
     def _check_cmd_exec(self, params: dict) -> dict[str, Any]:
-        """cmd_exec 工具检查：复用 analyze_user_input + 白名单"""
+        """cmd_exec 工具检查：高危拦截 → 精确白名单 → 只读前缀放行（sandbox 兜底）"""
         command = (params.get("command") or "").strip()
         if not command:
             return self._deny("high", "命令为空")
 
-        # 复用用户输入检查做高危检测
+        # 1. 高危检测（shell 注入、破坏性命令、安全绕过等）
         risk = self.analyze_user_input(command)
         if risk["risk_level"] == "high":
             return self._deny("high", f"高危命令: {risk['reason']}")
 
         normalized_cmd = command.lower().strip()
 
-        # 低风险白名单命令 —— 直接放行
+        # 2. 精确白名单命令 —— 直接放行（保留原有精确匹配逻辑）
         for allowed in _CMD_EXEC_WHITELIST:
             if normalized_cmd == allowed.lower():
                 return self._allow("low", f"白名单命令: {command}")
 
-        # 中危白名单命令 —— 需二次确认
+        # 3. 中危白名单命令 —— 需二次确认（service restart/stop 等）
         for allowed in _CMD_EXEC_MEDIUM_WHITELIST:
             if normalized_cmd == allowed.lower():
                 return self._result(
@@ -429,7 +440,12 @@ class SafetyGuard:
                     requires_confirm=True,
                 )
 
-        # 不在任何白名单但未命中高危
+        # 4. 只读诊断命令前缀 —— 低风险放行，由 sandbox 做最终路径/字符校验
+        for prefix in self._READONLY_CMD_PREFIXES:
+            if normalized_cmd.startswith(prefix) or normalized_cmd == prefix:
+                return self._allow("low", f"只读诊断命令（sandbox 最终裁决）: {command[:60]}")
+
+        # 5. 其余命令拒绝
         return self._deny("medium", f"命令不在白名单中: {command[:60]}")
 
     def _check_file_guard(self, params: dict, role: str) -> dict[str, Any]:
