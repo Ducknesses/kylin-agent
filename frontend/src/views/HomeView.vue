@@ -14,6 +14,7 @@
         >
           <el-icon><ChatLineRound /></el-icon>
           <span class="session-title">{{ s.title }}</span>
+          <el-icon class="session-delete" @click.stop="confirmDelete(s)"><Close /></el-icon>
         </div>
       </div>
     </div>
@@ -24,7 +25,8 @@
 </template>
 
 <script setup>
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Close } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chatStore'
 import { useWsStore } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
@@ -43,6 +45,23 @@ async function switchSession(id) {
   chatStore.switchSession(id)
   await chatStore.fetchHistory(id)
   wsClient.connect(id)
+}
+
+async function confirmDelete(s) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除会话「${s.title}」？删除后不可恢复。`,
+      '删除确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return // 用户取消
+  }
+  try {
+    await chatStore.deleteSession(s.id)
+  } catch (e) {
+    ElMessageBox.alert('删除失败，请稍后重试', '错误', { type: 'error' })
+  }
 }
 </script>
 
@@ -93,10 +112,29 @@ async function switchSession(id) {
   background-color: #eff6ff;
   color: #2563eb;
 }
+.session-item {
+  position: relative;
+}
 .session-title {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.session-delete {
+  flex-shrink: 0;
+  opacity: 0;
+  color: #ef4444;
+  font-size: 16px;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+.session-item:hover .session-delete {
+  opacity: 1;
+}
+.session-delete:hover {
+  color: #dc2626;
+  transform: scale(1.15);
 }
 .chat-area {
   flex: 1;
