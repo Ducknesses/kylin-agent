@@ -238,7 +238,8 @@ async def _run_agent_flow(
     """执行 Orchestrator 主流程：逐帧发送到 WebSocket，并逐帧持久化。
 
     与旧版"先全部发送、结束统一持久化"的区别：
-    1. 逐帧持久化：长耗时流程（如 LLM 调用超时 20s）中途异常时，已产出的帧不丢失；
+    1. chunk 帧按 trace_id 追加合并落库（同 trace_id 的多段 chunk 合并为一行），
+       其余帧（status / tool_call / fix_options / error）逐条落库。
     2. 发送失败容错：客户端断开后继续 send 会触发 RuntimeError
        （ASGI: send after websocket.close）。此时停止发送，但继续消费并
        持久化剩余帧 —— 流程不再崩溃，用户刷新后仍能找回完整回答。
@@ -290,11 +291,17 @@ async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) 
                 message_type="tool_call", trace_id=trace_id, metadata=meta,
             )
         elif ft == "chunk":
-            await message_repository.save_message(
-                session_id=session_id, role="assistant",
-                content=frame.get("content", ""),
-                message_type="chunk", trace_id=trace_id,
-            )
+            if trace_id:
+                await message_repository.append_chunk(
+                    session_id=session_id, trace_id=trace_id,
+                    content=frame.get("content", ""),
+                )
+            else:
+                await message_repository.save_message(
+                    session_id=session_id, role="assistant",
+                    content=frame.get("content", ""),
+                    message_type="chunk",
+                )
         elif ft == "fix_options":
             await message_repository.save_message(
                 session_id=session_id, role="assistant",

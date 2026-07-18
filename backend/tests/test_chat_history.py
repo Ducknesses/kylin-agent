@@ -220,6 +220,85 @@ class TestSessionsAPI:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# append_chunk 追加合并
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestAppendChunk:
+    """append_chunk：同 trace_id 连续 chunk 合并为一行"""
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_creates_row(self, repo):
+        """首次调用 append_chunk 应新增一个 chunk 行"""
+        await repo.create_session("s1")
+        await repo.append_chunk("s1", "t1", "第一部分。")
+        msgs = await repo.get_messages("s1")
+        assert len(msgs) == 1
+        assert msgs[0]["message_type"] == "chunk"
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[0]["content"] == "第一部分。"
+        assert msgs[0]["trace_id"] == "t1"
+
+    @pytest.mark.asyncio
+    async def test_second_chunk_appends_to_same_row(self, repo):
+        """同一 session + trace_id 的第二次 append 应追加到已有行"""
+        await repo.create_session("s1")
+        await repo.append_chunk("s1", "t1", "第一部分。")
+        await repo.append_chunk("s1", "t1", "第二部分。")
+        msgs = await repo.get_messages("s1")
+        assert len(msgs) == 1  # 仍然是一行
+        assert msgs[0]["content"] == "第一部分。第二部分。"
+
+    @pytest.mark.asyncio
+    async def test_different_trace_ids_isolated(self, repo):
+        """不同 trace_id 的 chunk 互不干扰，各自合并"""
+        await repo.create_session("s1")
+        await repo.append_chunk("s1", "t1", "A1")
+        await repo.append_chunk("s1", "t2", "B1")
+        await repo.append_chunk("s1", "t1", "A2")
+        await repo.append_chunk("s1", "t2", "B2")
+        msgs = [m for m in await repo.get_messages("s1") if m["message_type"] == "chunk"]
+        assert len(msgs) == 2
+        contents = {m["content"] for m in msgs}
+        assert contents == {"A1A2", "B1B2"}
+
+    @pytest.mark.asyncio
+    async def test_different_sessions_isolated(self, repo):
+        """不同 session 的 chunk 完全隔离"""
+        await repo.create_session("sa")
+        await repo.create_session("sb")
+        await repo.append_chunk("sa", "t1", "SessionA")
+        await repo.append_chunk("sb", "t1", "SessionB")
+        a_msgs = [m for m in await repo.get_messages("sa") if m["message_type"] == "chunk"]
+        b_msgs = [m for m in await repo.get_messages("sb") if m["message_type"] == "chunk"]
+        assert len(a_msgs) == 1
+        assert len(b_msgs) == 1
+        assert a_msgs[0]["content"] == "SessionA"
+        assert b_msgs[0]["content"] == "SessionB"
+
+    @pytest.mark.asyncio
+    async def test_append_order_preserved(self, repo):
+        """追加顺序与最终内容一致"""
+        await repo.create_session("s1")
+        chunks = ["第1段", "第2段", "第3段"]
+        for c in chunks:
+            await repo.append_chunk("s1", "t1", c)
+        msgs = await repo.get_messages("s1")
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == "第1段第2段第3段"
+
+    @pytest.mark.asyncio
+    async def test_append_chunk_updates_session_updated_at(self, repo):
+        """追加 chunk 应更新会话 updated_at"""
+        await repo.create_session("s1", "测试会话")
+        session_before = await repo.get_session("s1")
+        await repo.append_chunk("s1", "t1", "内容")
+        session_after = await repo.get_session("s1")
+        assert session_before is not None
+        assert session_after is not None
+        assert session_after["updated_at"] >= session_before["updated_at"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 异常安全性
 # ═══════════════════════════════════════════════════════════════════════
 

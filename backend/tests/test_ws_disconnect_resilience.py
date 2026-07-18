@@ -43,13 +43,23 @@ class _FakeWebSocket:
 
 
 class _RecordingRepo:
-    """记录 save_message 调用的假仓储"""
+    """记录 save_message / append_chunk 调用的假仓储"""
 
     def __init__(self):
         self.saved = []
 
     async def save_message(self, **kwargs):
         self.saved.append(kwargs)
+
+    async def append_chunk(self, session_id: str, trace_id: str, content: str) -> None:
+        """记录 chunk 追加调用，语义上只记录一条 chunk 消息。"""
+        self.saved.append({
+            "session_id": session_id,
+            "role": "assistant",
+            "content": content,
+            "message_type": "chunk",
+            "trace_id": trace_id,
+        })
 
 
 _FRAMES = [
