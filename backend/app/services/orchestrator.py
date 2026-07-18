@@ -259,6 +259,7 @@ class Orchestrator:
             ctx.final_response = report
 
             # ── 7. FixPlannerAgent → FixOptionStore → fix_options 帧 ──
+            yield {"type": "status", "trace_id": trace_id, "content": "正在分析诊断结果，生成修复建议..."}
             if settings.LLM_ENABLED:
                 fix_options = await self.fix_planner.plan_with_llm(
                     intent=intent,
