@@ -18,7 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.audit.logger import log_chain
 from app.core.auth import AuthContext, AuthLevel
 from app.core.security import TokenStore
-from app.dependencies import (fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository, knowledge_service)
+from app.dependencies import (fix_option_store, fix_planner, tool_registry, safety_guard, mcp_client, agent_harness, audit_service, message_repository, knowledge_service, confirmation_store)
 from app.services.connection_manager import ConnectionManager
 from app.services.orchestrator import Orchestrator
 
@@ -168,9 +168,59 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
         await _send(websocket, "error", message=f"未知的 confirm 决策: {decision}")
         return
 
+    # ── tool_confirm：工具调用确认/拒绝 ──
+    if msg_type == "tool_confirm":
+        tool_call_id = msg.get("tool_call_id", "")
+        decision = msg.get("decision", "")
+
+        if not tool_call_id:
+            await _send(websocket, "error", message="tool_confirm 缺少 tool_call_id")
+            return
+
+        if decision not in ("approve", "reject"):
+            await _send(websocket, "error", message=f"tool_confirm 决策无效: {decision}，可用: approve / reject")
+            return
+
+        # 从 ConfirmationStore 查找待确认的工具调用
+        cfm = confirmation_store.get(session_id, tool_call_id)
+        if cfm is None:
+            await _send(websocket, "error", message=f"未找到待确认的工具调用: {tool_call_id}")
+            return
+
+        if cfm.status != "pending":
+            await _send(websocket, "error", message=f"工具确认已处理（状态: {cfm.status}）")
+            return
+
+        if decision == "reject":
+            result = confirmation_store.reject(session_id, tool_call_id)
+            await _send(websocket, "status", content="已拒绝该工具调用。", trace_id=cfm.trace_id)
+            await _send(websocket, "done", trace_id=cfm.trace_id)
+            await message_repository.save_message(
+                session_id=session_id, role="system",
+                content=f"已拒绝工具调用: {cfm.option_id}",
+                message_type="tool_confirm", trace_id=cfm.trace_id,
+            )
+            logger.info(f"[tool_confirm] 用户拒绝: session={session_id}, confirm_id={tool_call_id}")
+            return
+
+        # decision == "approve"
+        result = confirmation_store.claim_approve(session_id, tool_call_id)
+        if result.result != "claimed":
+            await _send(websocket, "error", message=f"工具确认批准失败: {result.result}")
+            return
+
+        await _send(websocket, "status", content="工具调用已批准，正在执行...", trace_id=cfm.trace_id)
+        await message_repository.save_message(
+            session_id=session_id, role="system",
+            content=f"已批准工具调用: {cfm.option_id}",
+            message_type="tool_confirm", trace_id=cfm.trace_id,
+        )
+        logger.info(f"[tool_confirm] 用户批准: session={session_id}, confirm_id={tool_call_id}")
+        return
+
     # ── chat：核心对话流程 ──
     if msg_type != "chat":
-        await _send(websocket, "error", message=f"不支持的消息类型: {msg_type}，可用类型: chat / confirm / ping")
+        await _send(websocket, "error", message=f"不支持的消息类型: {msg_type}，可用类型: chat / confirm / tool_confirm / ping")
         return
 
     content = msg.get("content", "")

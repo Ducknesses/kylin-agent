@@ -2,6 +2,7 @@
 
 POST /api/actions/execute  — 执行/预检（需要 OP 权限）
 POST /api/actions/confirm  — approve/reject 确认（需要 OP 权限）
+POST /api/actions/rollback — 回滚已执行操作（需要 OP 权限）
 """
 import logging
 
@@ -14,6 +15,7 @@ from app.schemas.action import (
     ActionConfirmResponse,
     ActionExecuteRequest,
     ActionExecuteResponse,
+    ActionRollbackRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,4 +67,25 @@ async def confirm_action(
         session_id=req.session_id, trace_id=result.trace_id or "",
         decision=req.decision, status=result.result,  # type: ignore[arg-type]
         message=result.message, result_summary=result.result_summary,
+    )
+
+
+@router.post("/actions/rollback", response_model=ActionExecuteResponse)
+async def rollback_action(
+    req: ActionRollbackRequest,
+    auth: AuthContext = Depends(require_auth(AuthLevel.OP)),
+):
+    """回滚已执行的操作
+
+    基于 FixOption.rollback 逆向指令执行回滚。
+    仅 status == "executed" 的操作可回滚。
+    """
+    result = await action_service.rollback(req.session_id, req.option_id)
+    _raise_for_result(result)
+
+    return ActionExecuteResponse(
+        option_id=result.option_id, session_id=result.session_id,
+        trace_id=result.trace_id, status=result.result, risk_level=result.risk_level,  # type: ignore[arg-type]
+        message=result.message, requires_confirm=False,
+        result_summary=result.result_summary, confirm_id=None,
     )

@@ -2,7 +2,7 @@
 
 职责：
   - 统一审计写入入口（save_event / save_context）
-  - 查询审计列表（list_records）
+  - 查询审计列表（list_records），支持多维筛选并返回 total
   - 敏感信息过滤
   - 通过统一数据库入口支持不同部署环境切换，避免业务层依赖具体数据库。
 
@@ -95,7 +95,7 @@ class AuditService:
     使用方式：
         service = AuditService()
         await service.save_event(trace_id="...", risk_level="low", ...)
-        records = await service.list_records(limit=50)
+        records, total = await service.list_records(limit=50)
 
     支持两种模式：
     - 生产：使用全局引擎（默认），通过 DATABASE_URL 切换 SQLite/PostgreSQL
@@ -296,6 +296,35 @@ class AuditService:
             event_type=event_type,
         )
 
+    # ── 私有：构建筛选条件 ────────────────────────────────────────────
+
+    def _build_where_clauses(
+        self,
+        stmt: Any,
+        user: str | None = None,
+        role: str | None = None,
+        action_type: str | None = None,
+        risk_level: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> Any:
+        """为查询语句附加 WHERE 条件（参数化查询，防 SQL 注入）"""
+        if start_date:
+            stmt = stmt.where(AuditChain.timestamp >= start_date)
+        if end_date:
+            stmt = stmt.where(AuditChain.timestamp <= end_date)
+        if risk_level:
+            stmt = stmt.where(AuditChain.risk_level == risk_level)
+        if action_type:
+            stmt = stmt.where(AuditChain.event_type == action_type)
+        if user:
+            # 按 user_input 模糊匹配（LIKE）
+            stmt = stmt.where(AuditChain.user_input.contains(user))
+        if role:
+            # AuditChain 无独立 role 列，暂时按 intent 字段匹配角色关键词
+            stmt = stmt.where(AuditChain.intent.contains(role))
+        return stmt
+
     # ── 查询方法 ──────────────────────────────────────────────────────
 
     async def list_records(
@@ -304,22 +333,55 @@ class AuditService:
         offset: int = 0,
         start_date: str | None = None,
         end_date: str | None = None,
-    ) -> list[dict]:
-        """分页查询审计记录，返回数组"""
+        user: str | None = None,
+        role: str | None = None,
+        action_type: str | None = None,
+        risk_level: str | None = None,
+    ) -> tuple[list[dict], int]:
+        """分页查询审计记录，支持多维筛选，返回 (记录列表, 总条数)
+
+        筛选维度：
+          - user: 按 user_input 模糊匹配
+          - role: 按 intent 字段模糊匹配角色关键词
+          - action_type: 按 event_type 精确匹配（如 tool_call / chat / fix_action）
+          - risk_level: 按风险等级精确匹配（low / medium / high）
+          - start_date / end_date: 时间范围过滤
+        """
         await self._ensure_db()
         try:
             async with self._session_factory() as session:
-                stmt = select(AuditChain)
-                if start_date:
-                    stmt = stmt.where(AuditChain.timestamp >= start_date)
-                if end_date:
-                    stmt = stmt.where(AuditChain.timestamp <= end_date)
-                stmt = stmt.order_by(AuditChain.id.desc()).limit(limit).offset(offset)
+                # 构建基础查询
+                base_stmt = select(AuditChain)
+                base_stmt = self._build_where_clauses(
+                    base_stmt,
+                    user=user,
+                    role=role,
+                    action_type=action_type,
+                    risk_level=risk_level,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
 
-                result = await session.execute(stmt)
+                # COUNT 查询（相同筛选条件）
+                count_stmt = select(func.count()).select_from(AuditChain)
+                count_stmt = self._build_where_clauses(
+                    count_stmt,
+                    user=user,
+                    role=role,
+                    action_type=action_type,
+                    risk_level=risk_level,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                count_result = await session.execute(count_stmt)
+                total = count_result.scalar_one()
+
+                # 分页数据查询
+                data_stmt = base_stmt.order_by(AuditChain.id.desc()).limit(limit).offset(offset)
+                result = await session.execute(data_stmt)
                 rows = result.scalars().all()
 
-                return [
+                records = [
                     {
                         "id": r.id,
                         "trace_id": r.trace_id,
@@ -341,9 +403,10 @@ class AuditService:
                     }
                     for r in rows
                 ]
+                return records, total
         except Exception as e:
             logger.error(f"[AuditService] 查询失败: {e}")
-            return []
+            return [], 0
 
     async def count_records(
         self,
