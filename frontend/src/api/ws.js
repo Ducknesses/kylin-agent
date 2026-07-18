@@ -101,7 +101,8 @@ class WsClient {
 
   // 发送工具确认
   sendToolConfirm(toolConfirmId, approved = true) {
-    this.send({ type: 'tool_confirm', tool_confirm_id: toolConfirmId, approved })
+    const decision = approved === true || approved === 'approve' ? 'approve' : 'reject'
+    this.send({ type: 'tool_confirm', tool_confirm_id: toolConfirmId, decision })
   }
 
   send(payload) {
