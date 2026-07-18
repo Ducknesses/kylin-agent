@@ -135,6 +135,28 @@ class SQLiteMessageRepository(MessageRepository):
             logger.warning(f"[ChatHistory] 查询会话失败: {e}")
             return None
 
+    async def delete_session(self, session_id: str) -> bool:
+        """删除会话及其所有关联消息（先删消息再删会话，保证外键约束）"""
+        await self._ensure_tables()
+        try:
+            async with self._get_session() as session:
+                # 先查是否存在
+                existing = await session.get(ChatSession, session_id)
+                if existing is None:
+                    return False
+                # 级联删除消息
+                from sqlalchemy import delete
+                await session.execute(
+                    delete(ChatMessage).where(ChatMessage.session_id == session_id)
+                )
+                # 删除会话
+                await session.delete(existing)
+            logger.info(f"[ChatHistory] 会话已删除: {session_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"[ChatHistory] 删除会话失败: {e}")
+            return False
+
     # ── 消息 ──────────────────────────────────────────────────────
 
     async def save_message(
