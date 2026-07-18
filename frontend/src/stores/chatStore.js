@@ -80,12 +80,49 @@ export const useChatStore = defineStore('chat', () => {
   async function fetchHistory(sessionId) {
     if (historyLoaded.value.has(sessionId)) return
     historyLoaded.value.add(sessionId)
+
+    // 辅助：后端流式报告按 500 字切片持久化，同一篇报告会被存为多行 chunk；
+    // 刷新后把相邻的 chunk 行合并成一条，恢复 Markdown 上下文，与实时 WS 拼接行为一致。
+    function mergeAdjacentChunks(messages) {
+      const out = []
+      let buffer = []
+      let head = null
+      for (const m of messages) {
+        if (m.message_type === 'chunk') {
+          if (buffer.length === 0) {
+            head = { ...m }
+          }
+          buffer.push(m.content || '')
+          continue
+        }
+        if (buffer.length > 0) {
+          out.push({
+            ...head,
+            message_type: 'chunk',
+            content: buffer.join('')
+          })
+          buffer = []
+          head = null
+        }
+        out.push(m)
+      }
+      if (buffer.length > 0) {
+        out.push({
+          ...head,
+          message_type: 'chunk',
+          content: buffer.join('')
+        })
+      }
+      return out
+    }
+
     try {
       const { data } = await http.get(`/sessions/${sessionId}/messages`)
       if (data.messages && data.messages.length > 0) {
+        const mergedMessages = mergeAdjacentChunks(data.messages)
         // 历史 tool_call 消息归一化为与实时 WS 一致的扁平结构，
         // 否则 MsgBubble 按 role === 'tool' 判断不命中，会把 content（JSON 字符串）当普通文本渲染
-        const msgs = data.messages.map(m => {
+        const msgs = mergedMessages.map(m => {
           if (m.tool_calls && m.tool_calls.length > 0) {
             const tc = m.tool_calls[0]
             return {
