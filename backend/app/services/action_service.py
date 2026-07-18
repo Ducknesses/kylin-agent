@@ -222,11 +222,17 @@ class ActionService:
                 await self._safe_audit(ctx, "action_confirm_required")
                 return await self._execute_medium(session_id, option_id)
 
+        # 操作前状态快照：保存当前 tool + params，供回滚/审计参考
+        pre_snapshot = {"tool": tool, "params": dict(params)}
+
         claimed = self._store.claim_for_execution(session_id, option_id)
         if claimed is None:
             return ActionPrecheck(result="conflict", option_id=stored.option.option_id,
                                   session_id=session_id, trace_id=stored.trace_id,
                                   message="操作已被其他请求执行或状态冲突")
+
+        # 将操作前快照写入 Store（claim_for_execution 返回的 StoredFixOption 已更新）
+        self._store.set_pre_snapshot(session_id, option_id, pre_snapshot)
 
         try:
             result = await self._harness.run_tool(ctx, tool, dict(params))
@@ -360,9 +366,10 @@ class ActionService:
 
         流程：
           1. 读取 FixOption，检查 status == "executed"
-          2. 读取 option.rollback 逆向指令
-          3. 执行回滚命令（通过 agent_harness）
-          4. 记录回滚审计日志
+          2. 原子领取回滚权（executed → rolling_back），防并发重复回滚
+          3. 读取 option.rollback 逆向指令
+          4. 执行回滚命令（通过 agent_harness）
+          5. 记录回滚审计日志，更新状态为 rolled_back / failed
         """
         stored = self._store.get_option(session_id, option_id)
         if stored is None:
@@ -378,8 +385,21 @@ class ActionService:
                 message=f"仅已执行的操作可回滚（当前状态: {stored.status}）",
             )
 
+        # 原子领取回滚权：executed → rolling_back，防并发重复回滚
+        claimed = self._store.claim_for_rollback(session_id, option_id)
+        if claimed is None:
+            return ActionPrecheck(
+                result="conflict",
+                option_id=stored.option.option_id,
+                session_id=session_id,
+                trace_id=stored.trace_id,
+                risk_level=stored.option.risk_level,
+                message="操作正在回滚中或已被回滚",
+            )
+
         rollback_cmd = stored.option.rollback
         if not rollback_cmd or not rollback_cmd.strip():
+            self._store.mark_failed(session_id, option_id)
             return ActionPrecheck(
                 result="error",
                 option_id=stored.option.option_id,
@@ -389,22 +409,27 @@ class ActionService:
                 message="该操作未提供回滚命令，无法自动回滚",
             )
 
+        # 动态取 tool（不再硬编码 "cmd_exec"）
+        tool_name = stored.option.tool
+        rollback_params = {"command": rollback_cmd}
+
         # 构建回滚审计上下文
         ctx = AgentContext(session_id=session_id, user_input="action_rollback", role="viewer")
         ctx.trace_id = stored.trace_id
         ctx.intent = "action_rollback"
         ctx.risk_level = stored.option.risk_level
-        meta = self._tool_registry.build_audit_metadata("cmd_exec", {"command": rollback_cmd})
+        meta = self._tool_registry.build_audit_metadata(tool_name, rollback_params)
         meta["option_id"] = stored.option.option_id
         meta["rollback"] = True
-        ctx.add_tool_call("cmd_exec", dict(meta), None)
+        ctx.add_tool_call(tool_name, dict(meta), None)
 
-        # 安全校验
+        # 安全校验（动态 tool）
         if self._safety_guard is not None:
             safety = self._safety_guard.analyze_tool_call(
-                tool="cmd_exec", params={"command": rollback_cmd}, role="viewer",
+                tool=tool_name, params=rollback_params, role="viewer",
             )
             if not safety.get("allowed", False):
+                self._store.mark_failed(session_id, option_id)
                 await self._safe_audit(ctx, "action_rollback_blocked")
                 return ActionPrecheck(
                     result="blocked",
@@ -415,11 +440,12 @@ class ActionService:
                     message=f"回滚安全检查未通过: {safety.get('reason', '')}",
                 )
 
-        # 执行回滚
+        # 执行回滚（动态 tool）
         try:
-            result = await self._harness.run_tool(ctx, "cmd_exec", {"command": rollback_cmd})
+            result = await self._harness.run_tool(ctx, tool_name, rollback_params)
         except Exception:
             logger.exception("[ActionService] 回滚执行异常")
+            self._store.mark_failed(session_id, option_id)
             await self._safe_audit(ctx, "action_rollback_failed")
             return ActionPrecheck(
                 result="failed",
@@ -431,6 +457,7 @@ class ActionService:
             )
 
         if result.get("ok"):
+            self._store.mark_rolled_back(session_id, option_id)
             await self._safe_audit(ctx, "action_rollback_executed")
             raw = result.get("result")
             safe = sanitize_sensitive_data(raw) if raw is not None else None
@@ -445,6 +472,7 @@ class ActionService:
                 result_summary=summary,
             )
         else:
+            self._store.mark_failed(session_id, option_id)
             await self._safe_audit(ctx, "action_rollback_failed")
             return ActionPrecheck(
                 result="failed",
