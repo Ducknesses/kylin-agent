@@ -223,7 +223,8 @@ function sendMessage() {
 }
 
 // WebSocket 断开时中断流式状态，避免界面卡在"正在输出"
-function onWsClose() {
+function onWsClose(data) {
+  if (data && data.clean) return  // 正常关闭，不打断用户
   if (!isStreaming.value) return
   isStreaming.value = false
   chatStore.addMessage(chatStore.currentSessionId, {

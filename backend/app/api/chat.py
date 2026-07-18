@@ -245,6 +245,7 @@ async def _run_agent_flow(
        持久化剩余帧 —— 流程不再崩溃，用户刷新后仍能找回完整回答。
     """
     alive = True
+    effective_trace_id = trace_id or ""
     agen = _orchestrator.handle_chat(
         session_id=session_id, user_input=user_input, role=role,
         confirmed=confirmed, trace_id=trace_id,
@@ -259,7 +260,7 @@ async def _run_agent_flow(
                     logger.warning(
                         f"[WebSocket] 连接已关闭，后续帧仅落库不再发送: session={session_id}, {e}"
                     )
-            await _persist_frame(session_id, frame.get("trace_id") or trace_id or "", frame)
+            await _persist_frame(session_id, frame.get("trace_id") or effective_trace_id, frame)
     finally:
         await agen.aclose()
 

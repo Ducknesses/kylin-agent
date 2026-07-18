@@ -169,6 +169,8 @@ export const useChatStore = defineStore('chat', () => {
       }
     } catch (e) {
       console.error('[ChatStore] 加载历史消息失败:', sessionId, e)
+      // 清除已加载标记，允许下次重试
+      historyLoaded.value.delete(sessionId)
       // 确保空消息列表被初始化，避免界面卡在加载状态
       if (!messagesMap.value.has(sessionId)) {
         messagesMap.value.set(sessionId, [])

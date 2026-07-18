@@ -165,6 +165,12 @@ def _load_whitelist_rules() -> dict:
                 "[Config] 白名单规则文件 %s 解析失败: %s，使用内置默认值",
                 rules_path, e,
             )
+            print(
+                f"\n[WARNING] whitelist_rules.json 解析失败: {e}\n"
+                f"  文件路径: {rules_path}\n"
+                f"  已回退到内置默认值。请检查 JSON 格式并重启服务。\n",
+                file=sys.stderr,
+            )
     else:
         _logger.info(
             "[Config] 白名单规则文件 %s 不存在，使用内置默认值", rules_path

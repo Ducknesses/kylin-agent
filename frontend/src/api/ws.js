@@ -66,7 +66,7 @@ class WsClient {
       wsStore.setConnected(false)
       this.stopHeartbeat()
       // 通知上层连接已断开，便于中断"正在输出"等悬挂状态
-      this.emit('close', { code: event.code, reason: event.reason })
+      this.emit("close", { code: event.code, reason: event.reason, clean: event.wasClean })
 
       // 认证失败（4001）不重连，直接标记并通知用户配置 Token
       if (event.code === 4001 || event.reason === 'auth_failed') {
