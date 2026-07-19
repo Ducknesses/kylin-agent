@@ -33,12 +33,12 @@
       <div class="option-actions">
         <el-button
           size="small"
-          type="primary"
+          :type="buttonType(opt)"
           :loading="stateOf(opt).loading"
-          :disabled="stateOf(opt).done"
+          :disabled="isButtonDisabled(opt)"
           @click="execute(opt)"
         >
-          {{ stateOf(opt).done ? '已执行' : '执行' }}
+          {{ buttonText(opt) }}
         </el-button>
       </div>
     </div>
@@ -46,7 +46,7 @@
 </template>
 
 <script setup>
-import { computed, reactive } from 'vue'
+import { computed, watch, reactive } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import http from '@/api/http'
 import { useChatStore } from '@/stores/chatStore'
@@ -91,6 +91,80 @@ function errMsg(e) {
   return e.response?.data?.detail || e.message || '请求失败'
 }
 
+// ── 从后端拉取选项状态并同步到本地 states ────────────────────────
+
+const fetchedSessions = reactive(new Set())  // 已拉取过状态的 session，避免重复请求
+
+async function fetchStatus() {
+  const sid = chatStore.currentSessionId
+  if (!sid) return
+  if (fetchedSessions.has(sid)) return       // 同一 session 不重复拉取
+  fetchedSessions.add(sid)
+
+  try {
+    const { data } = await http.get(`/actions/status/${sid}`)
+    const remoteOptions = data.options || []
+    for (const remote of remoteOptions) {
+      // 只处理本卡片中存在的 option_id
+      if (!options.value.find(o => o.option_id === remote.option_id)) continue
+
+      // 如果本地已有终态状态（用户刚执行完），不覆盖，避免后台请求把成功消息冲掉
+      const local = states[remote.option_id]
+      if (local && local.done) continue
+
+      let patch = {}
+      if (remote.status === 'executed') {
+        patch = { loading: false, done: true, ok: true, message: remote.message || '执行成功', summary: '' }
+      } else if (remote.status === 'failed') {
+        patch = { loading: false, done: true, ok: false, message: remote.message || '执行失败', summary: '' }
+      } else if (remote.status === 'blocked') {
+        patch = { loading: false, done: true, ok: false, message: remote.message || '已被阻断', summary: '' }
+      } else if (remote.status === 'rolled_back') {
+        patch = { loading: false, done: true, ok: true, message: remote.message || '已回滚', summary: '' }
+      } else if (remote.status === 'expired') {
+        patch = { loading: false, done: true, ok: false, message: remote.message || '已过期', summary: '' }
+      } else {
+        // pending / confirm_required / executing → 可操作
+        patch = { loading: false, done: false, ok: false, message: '', summary: '' }
+      }
+      setState({ option_id: remote.option_id }, patch)
+    }
+  } catch (e) {
+    console.warn('[FixOptionsCard] 拉取修复状态失败:', e.response?.status, e.response?.data?.detail || e.message)
+  }
+}
+
+// 当 options 列表就绪时自动拉取状态（支持页面刷新、历史消息加载、异步数据更新）
+watch(options, (newOpts) => {
+  if (newOpts.length > 0) {
+    fetchStatus()
+  }
+}, { immediate: true })
+
+// ── 按钮禁用逻辑 ───────────────────────────────────────────────
+
+function isButtonDisabled(opt) {
+  const s = stateOf(opt)
+  // 终态：已执行 / 失败 / 阻断 / 已回滚 / 已过期
+  return s.done
+}
+
+function buttonText(opt) {
+  const s = stateOf(opt)
+  if (!s.done) return '执行'
+  if (s.ok) return '已执行'
+  return '执行失败'
+}
+
+function buttonType(opt) {
+  const s = stateOf(opt)
+  if (!s.done) return 'primary'
+  if (s.ok) return 'success'
+  return 'danger'
+}
+
+// ── 执行逻辑 ───────────────────────────────────────────────────
+
 async function execute(opt) {
   setState(opt, { loading: true, message: '', summary: '' })
   try {
@@ -102,16 +176,17 @@ async function execute(opt) {
       setState(opt, { loading: false })
       await confirmAndRun(opt, data)
     } else {
+      const isDone = data.status === 'executed' || data.status === 'failed'
       setState(opt, {
         loading: false,
-        done: data.status === 'executed',
-        ok: true,
-        message: data.message || '执行完成',
+        done: isDone,
+        ok: data.status === 'executed',
+        message: data.message || (data.status === 'executed' ? '执行完成' : '执行失败'),
         summary: data.result_summary || ''
       })
     }
   } catch (e) {
-    setState(opt, { loading: false, ok: false, message: errMsg(e) })
+    setState(opt, { loading: false, done: true, ok: false, message: errMsg(e) })
   }
 }
 
@@ -136,15 +211,16 @@ async function confirmAndRun(opt, executeData) {
       confirm_id: executeData.confirm_id,
       decision: approved ? 'approve' : 'reject'
     })
+    const isDone = data.status === 'executed' || data.status === 'failed' || data.status === 'rejected'
     setState(opt, {
       loading: false,
-      done: data.status === 'executed',
+      done: isDone,
       ok: data.status === 'executed',
       message: data.message || (approved ? '执行完成' : '已取消'),
       summary: data.result_summary || ''
     })
   } catch (e) {
-    setState(opt, { loading: false, ok: false, message: errMsg(e) })
+    setState(opt, { loading: false, done: true, ok: false, message: errMsg(e) })
   }
 }
 </script>
