@@ -58,6 +58,14 @@ echo "[4/7] 创建非 root 用户..."
 useradd -r -s /bin/false agent-read 2>/dev/null || echo "  agent-read 已存在"
 useradd -r -s /bin/false agent-op 2>/dev/null || echo "  agent-op 已存在"
 
+# 允许 agent-read 读取 systemd journal（journalctl 需要 systemd-journal/adm/wheel 组权限）
+if getent group systemd-journal >/dev/null 2>&1; then
+    usermod -a -G systemd-journal agent-read
+    echo "  agent-read 已加入 systemd-journal 组"
+else
+    echo "  [WARN] systemd-journal 组不存在，跳过加入；如使用 adm 组，请手动加入"
+fi
+
 # 修复文件所有权：确保 agent-read 可以读取 /opt/mcp-server 下所有文件
 echo "  修正 /opt/mcp-server 文件所有权为 agent-read:agent-read ..."
 chown -R agent-read:agent-read /opt/mcp-server
