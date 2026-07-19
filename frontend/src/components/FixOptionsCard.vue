@@ -17,7 +17,29 @@
         <el-tag size="small" type="info">{{ opt.tool }}</el-tag>
         <span v-if="opt.requires_confirm" class="confirm-tip">执行前需二次确认</span>
       </div>
-      <pre v-if="opt.params && Object.keys(opt.params).length > 0" class="code-block">{{ JSON.stringify(opt.params, null, 2) }}</pre>
+      <!-- 输入参数：超长默认折叠 -->
+      <template v-if="opt.params && Object.keys(opt.params).length > 0">
+        <div class="code-section">
+          <div class="code-label">
+            <span class="label-text">输入参数</span>
+            <el-button
+              v-if="needsCollapse(paramsStr(opt))"
+              link
+              size="small"
+              @click="toggleExpand(opt.option_id, 'params')"
+            >
+              {{ isExpanded(opt.option_id, 'params') ? '收起 ▲' : '展开 ▼' }}
+            </el-button>
+          </div>
+          <pre
+            class="code-block"
+            :class="{
+              'code-collapsed': needsCollapse(paramsStr(opt)) && !isExpanded(opt.option_id, 'params'),
+              'code-expanded': isExpanded(opt.option_id, 'params')
+            }"
+          >{{ paramsStr(opt) }}</pre>
+        </div>
+      </template>
       <div v-if="opt.rollback" class="rollback">回滚：{{ opt.rollback }}</div>
 
       <el-alert
@@ -28,7 +50,29 @@
         show-icon
         class="result-alert"
       />
-      <pre v-if="stateOf(opt).summary" class="code-block result">{{ stateOf(opt).summary }}</pre>
+      <!-- 执行结果：超长默认折叠 -->
+      <template v-if="stateOf(opt).summary">
+        <div class="code-section">
+          <div class="code-label">
+            <span class="label-text">执行结果</span>
+            <el-button
+              v-if="needsCollapse(stateOf(opt).summary)"
+              link
+              size="small"
+              @click="toggleExpand(opt.option_id, 'summary')"
+            >
+              {{ isExpanded(opt.option_id, 'summary') ? '收起 ▲' : '展开 ▼' }}
+            </el-button>
+          </div>
+          <pre
+            class="code-block result"
+            :class="{
+              'code-collapsed': needsCollapse(stateOf(opt).summary) && !isExpanded(opt.option_id, 'summary'),
+              'code-expanded': isExpanded(opt.option_id, 'summary')
+            }"
+          >{{ stateOf(opt).summary }}</pre>
+        </div>
+      </template>
 
       <div class="option-actions">
         <el-button
@@ -68,6 +112,37 @@ const options = computed(() => {
 
 // 每个选项的执行状态：{ loading, done, ok, message, summary }
 const states = reactive({})
+
+// ── 代码块展开/收起状态 ─────────────────────────────────────────
+// key: "{option_id}:params" 或 "{option_id}:summary"，value: true=展开
+const expandState = reactive({})
+
+function expandKey(optionId, section) {
+  return `${optionId}:${section}`
+}
+
+function isExpanded(optionId, section) {
+  return !!expandState[expandKey(optionId, section)]
+}
+
+function toggleExpand(optionId, section) {
+  const key = expandKey(optionId, section)
+  expandState[key] = !expandState[key]
+}
+
+// 行数超过阈值或总长度超过阈值时启用折叠
+const COLLAPSE_LINES = 6
+const COLLAPSE_CHARS = 300
+
+function needsCollapse(text) {
+  if (!text) return false
+  const lines = text.split('\n').length
+  return lines > COLLAPSE_LINES || text.length > COLLAPSE_CHARS
+}
+
+function paramsStr(opt) {
+  return JSON.stringify(opt.params, null, 2)
+}
 
 function stateOf(opt) {
   return states[opt.option_id] || { loading: false, done: false, ok: false, message: '', summary: '' }
@@ -114,13 +189,13 @@ async function fetchStatus() {
 
       let patch = {}
       if (remote.status === 'executed') {
-        patch = { loading: false, done: true, ok: true, message: remote.message || '执行成功', summary: '' }
+        patch = { loading: false, done: true, ok: true, message: remote.message || '执行成功', summary: remote.result_summary || '' }
       } else if (remote.status === 'failed') {
-        patch = { loading: false, done: true, ok: false, message: remote.message || '执行失败', summary: '' }
+        patch = { loading: false, done: true, ok: false, message: remote.message || '执行失败', summary: remote.result_summary || '' }
       } else if (remote.status === 'blocked') {
         patch = { loading: false, done: true, ok: false, message: remote.message || '已被阻断', summary: '' }
       } else if (remote.status === 'rolled_back') {
-        patch = { loading: false, done: true, ok: true, message: remote.message || '已回滚', summary: '' }
+        patch = { loading: false, done: true, ok: true, message: remote.message || '已回滚', summary: remote.result_summary || '' }
       } else if (remote.status === 'expired') {
         patch = { loading: false, done: true, ok: false, message: remote.message || '已过期', summary: '' }
       } else {
@@ -279,6 +354,21 @@ async function confirmAndRun(opt, executeData) {
   font-size: 12px;
   color: #d97706;
 }
+.code-section {
+  margin-bottom: 6px;
+}
+.code-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  padding: 0 2px;
+}
+.label-text {
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 500;
+}
 .code-block {
   background-color: #1f2937;
   color: #e5e7eb;
@@ -288,10 +378,31 @@ async function confirmAndRun(opt, executeData) {
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  margin: 0 0 6px 0;
+  margin: 0 0 2px 0;
 }
 .code-block.result {
   background-color: #111827;
+}
+.code-block.code-collapsed {
+  max-height: 120px;
+  overflow: hidden;
+  position: relative;
+}
+.code-block.code-collapsed::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: linear-gradient(transparent, #1f2937);
+  border-radius: 0 0 6px 6px;
+}
+.code-block.result.code-collapsed::after {
+  background: linear-gradient(transparent, #111827);
+}
+.code-block.code-expanded {
+  max-height: none;
 }
 .rollback {
   font-size: 12px;

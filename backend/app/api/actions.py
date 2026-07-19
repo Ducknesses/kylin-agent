@@ -76,7 +76,8 @@ async def get_actions_status(
             item.message = "等待二次确认"
         elif stored.status == "executing":
             item.message = "正在执行中..."
-        # 保持 result_summary 为空（已执行的结果在前端执行时本地保存）
+        # 从持久化存储中读取已保存的执行结果
+        item.result_summary = stored.result_summary
         items.append(item)
     return OptionStatusResponse(session_id=session_id, options=items)
 
