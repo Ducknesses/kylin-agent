@@ -409,11 +409,8 @@ async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) 
     try:
         ft = frame.get("type", "")
         if ft == "status":
-            await message_repository.save_message(
-                session_id=session_id, role="assistant",
-                content=frame.get("content", frame.get("message", "")),
-                message_type="status", trace_id=trace_id,
-            )
+            # status 帧仅为前端实时进度提示，不持久化到对话记录
+            pass
         elif ft == "tool_call":
             meta = {
                 "tool": frame.get("tool"),

@@ -120,9 +120,11 @@ export const useChatStore = defineStore('chat', () => {
       const { data } = await http.get(`/sessions/${sessionId}/messages`)
       if (data.messages && data.messages.length > 0) {
         const mergedMessages = mergeAdjacentChunks(data.messages)
+        // 过滤掉 status 帧（现为纯实时进度提示，不保存到记录中）
+        const filteredMessages = mergedMessages.filter(m => m.message_type !== 'status')
         // 历史 tool_call 消息归一化为与实时 WS 一致的扁平结构，
         // 否则 MsgBubble 按 role === 'tool' 判断不命中，会把 content（JSON 字符串）当普通文本渲染
-        const msgs = mergedMessages.map(m => {
+        const msgs = filteredMessages.map(m => {
           if (m.tool_calls && m.tool_calls.length > 0) {
             const tc = m.tool_calls[0]
             return {

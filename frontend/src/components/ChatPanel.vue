@@ -24,22 +24,28 @@
       </el-alert>
     </div>
 
+    <!-- 后端处理中加载条 -->
+    <div v-if="wsStore.processing" class="processing-bar">
+      <el-icon class="is-loading"><Loading /></el-icon>
+      <span>{{ wsStore.processingText || '处理中...' }}</span>
+    </div>
+
     <div ref="msgListRef" class="message-list">
       <div v-if="isInitializing" class="empty-tip">
         <el-icon :size="40" color="#9ca3af" class="is-loading"><Loading /></el-icon>
         <p>正在恢复会话...</p>
       </div>
-      <div v-else-if="chatStore.currentMessages.length === 0 && !showConnectionBanner" class="empty-tip">
+      <div v-else-if="displayMessages.length === 0 && !showConnectionBanner" class="empty-tip">
         <el-icon :size="40" color="#9ca3af"><ChatLineRound /></el-icon>
         <p>请输入运维问题，例如：查看CPU使用率</p>
       </div>
-      <div v-else-if="chatStore.currentMessages.length === 0 && showConnectionBanner" class="empty-tip">
+      <div v-else-if="displayMessages.length === 0 && showConnectionBanner" class="empty-tip">
         <el-icon :size="40" color="#f59e0b"><WarningFilled /></el-icon>
         <p class="tip-warning">无法连接到后端服务器</p>
         <p class="tip-sub">请检查连接地址和 Token 配置</p>
       </div>
       <MsgBubble
-        v-for="(msg, index) in chatStore.currentMessages"
+        v-for="(msg, index) in displayMessages"
         :key="index"
         :msg="msg"
       />
@@ -131,6 +137,14 @@ const currentRisk = ref({ level: 'high', reason: '', originalInput: '', confirmI
 const toolPendingVisible = ref(false)
 const toolPending = ref({ tool: '', toolConfirmId: '', reason: '', params: {}, confirmId: '' })
 
+// 显示消息列表：过滤掉用作流式追加锚点的空 assistant 消息
+const displayMessages = computed(() => {
+  return chatStore.currentMessages.filter(m => {
+    if (m.role === 'assistant' && m.type === 'text' && !m.content) return false
+    return true
+  })
+})
+
 const canSend = computed(() => {
   return inputText.value.trim().length > 0 && wsStore.isConnected && !isStreaming.value
 })
@@ -177,8 +191,16 @@ onMounted(async () => {
     wsClient.connect(sessionId)
     wsClient.on('risk_alert', onRiskAlert)
     wsClient.on('pending_confirmation', onToolPending)
-    wsClient.on('done', () => { isStreaming.value = false })
-    wsClient.on('error', () => { isStreaming.value = false })
+    wsClient.on('done', () => {
+      isStreaming.value = false
+      wsStore.processing = false
+      wsStore.processingText = ''
+    })
+    wsClient.on('error', () => {
+      isStreaming.value = false
+      wsStore.processing = false
+      wsStore.processingText = ''
+    })
     wsClient.on('close', onWsClose)
   } catch (e) {
     console.error('[ChatPanel] 会话初始化失败:', e)
@@ -224,6 +246,8 @@ function sendMessage() {
 
 // WebSocket 断开时中断流式状态，避免界面卡在"正在输出"
 function onWsClose(data) {
+  wsStore.processing = false
+  wsStore.processingText = ''
   if (data && data.clean) return  // 正常关闭，不打断用户
   if (!isStreaming.value) return
   isStreaming.value = false
@@ -349,6 +373,23 @@ function scrollToBottom() {
   padding: 8px 16px;
   background-color: #fffbeb;
   border-bottom: 1px solid #fde68a;
+}
+.processing-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  background-color: #eff6ff;
+  border-bottom: 1px solid #bfdbfe;
+  font-size: 13px;
+  color: #2563eb;
+}
+.processing-bar .is-loading {
+  animation: rotating 1.5s linear infinite;
+}
+@keyframes rotating {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 .tip-warning {
   color: #f59e0b;

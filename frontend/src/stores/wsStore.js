@@ -46,6 +46,10 @@ export const useWsStore = defineStore('ws', () => {
   const authError = ref(false)
   // 是否因连接被拒/超时导致断连
   const connectionRefused = ref(false)
+  // 当前是否正在处理后端任务（显示转圈效果）
+  const processing = ref(false)
+  // 当前处理状态文案
+  const processingText = ref('')
 
   function setConnected(val) {
     isConnected.value = val
@@ -108,6 +112,8 @@ export const useWsStore = defineStore('ws', () => {
     apiBaseUrl,
     authError,
     connectionRefused,
+    processing,
+    processingText,
     setConnected,
     setReconnectCount,
     setActiveSessionId,

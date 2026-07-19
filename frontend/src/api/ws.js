@@ -138,14 +138,13 @@ class WsClient {
     }
 
     const chatStore = useChatStore()
+    const wsStore = useWsStore()
 
     switch (data.type) {
       case 'status':
-        chatStore.addMessage(this.sessionId, {
-          role: 'system',
-          type: 'status',
-          content: data.content || '处理中...'
-        })
+        // 不写入消息列表，仅通过 wsStore 驱动顶部转圈加载条
+        wsStore.processing = true
+        wsStore.processingText = data.content || '处理中...'
         this.emit('status', data)
         break
       case 'chunk':
