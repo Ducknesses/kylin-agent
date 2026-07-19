@@ -24,21 +24,27 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化数据库并预加载白名单配置"""
+    db_ready = False
+
     logger.info("正在初始化数据库...")
     try:
         await init_engine()
         logger.info("数据库初始化完成")
+        db_ready = True
     except Exception as e:
-        logger.error(f"数据库初始化失败: {e}")
+        logger.error(f"数据库初始化失败（白名单配置将使用默认值）: {e}")
 
-    # 预加载白名单配置到内存缓存（避免首次请求才懒加载）
-    logger.info("正在预加载白名单配置...")
-    try:
-        from app.api.config import preload_config
-        await preload_config()
-        logger.info("白名单配置预加载完成")
-    except Exception as e:
-        logger.error(f"白名单配置预加载失败: {e}")
+    # 预加载白名单配置到内存缓存（依赖数据库，仅在 DB 就绪时执行）
+    if db_ready:
+        logger.info("正在预加载白名单配置...")
+        try:
+            from app.api.config import preload_config
+            await preload_config()
+            logger.info("白名单配置预加载完成")
+        except Exception as e:
+            logger.error(f"白名单配置预加载失败: {e}")
+    else:
+        logger.warning("数据库未就绪，跳过白名单配置预加载（使用内置默认值）")
 
     yield
     logger.info("应用关闭")

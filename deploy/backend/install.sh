@@ -169,7 +169,9 @@ echo ""
 # ---- 5. 创建数据目录 ----
 echo "[5/6] 创建数据目录..."
 mkdir -p "$INSTALL_DIR/backend/data"
+mkdir -p "$INSTALL_DIR/backend/logs"
 echo "  ✓ data/ 目录已创建"
+echo "  ✓ logs/ 目录已创建"
 echo ""
 
 # ---- 6. 安装 systemd 服务 + 修正权限 ----
@@ -180,6 +182,8 @@ systemctl enable kylin-agent
 
 echo "  修正文件所有权为 agent-read:agent-read ..."
 chown -R agent-read:agent-read "$INSTALL_DIR/backend"
+# data/ 和 logs/ 目录设为 g+w，方便运维人员手动测试时写入
+chmod 775 "$INSTALL_DIR/backend/data" "$INSTALL_DIR/backend/logs"
 echo "  ✓ 权限已修正"
 echo "  ✓ kylin-agent.service 已安装并设为开机自启"
 echo ""
@@ -224,7 +228,7 @@ echo ""
 echo "  安装路径:    $INSTALL_DIR/backend"
 echo "  配置文件:    $INSTALL_DIR/backend/.env"
 echo "  服务名称:    kylin-agent"
-echo "  监听地址:    127.0.0.1:8000"
+echo "  监听地址:    由 .env 中 APP_HOST/APP_PORT 控制（默认 127.0.0.1:8000）"
 echo ""
 echo "  提示: Frontend + Nginx 请用 deploy/frontend/install.sh 单独安装"
 echo ""

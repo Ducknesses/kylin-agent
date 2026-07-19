@@ -268,7 +268,7 @@ def setup_logging(
                     backupCount=backup_count,
                     encoding="utf-8",
                     utc=False,
-                    delay=True,
+                    delay=False,
                 )
                 file_handler.setLevel(level)
                 file_fmt = _SafeFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)

@@ -9,7 +9,7 @@ Type=simple
 User=agent-read
 Group=agent-read
 WorkingDirectory=/opt/kylin-agent/backend
-ExecStart=/opt/kylin-agent/backend/venv/bin/python -m uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}
+ExecStart=/opt/kylin-agent/backend/venv/bin/python run.py
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
@@ -27,8 +27,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes
-ReadWritePaths=/opt/kylin-agent/backend/data
-ReadOnlyPaths=/opt/kylin-agent/backend
+ReadWritePaths=/opt/kylin-agent/backend/data /opt/kylin-agent/backend/logs
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 [Install]
