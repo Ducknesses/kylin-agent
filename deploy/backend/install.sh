@@ -146,21 +146,23 @@ python3 -c "import fastapi; import uvicorn; print(f'  fastapi={fastapi.__version
     deactivate
     exit 1
 }
-# 注意：新版 uvicorn 的 [standard] extras 已不含 wsproto（WebSocket 默认由 websockets 实现），
-# 因此此处只校验 websockets，不再把 wsproto 作为硬性依赖。
+# 注意：麒麟系统 uvloop 编译依赖 maturin 可能版本过旧导致崩溃，
+# 因此 requirements.txt 已移除 uvicorn[standard]，改用 uvicorn + httptools 显式依赖。
+# WebSocket 由独立的 websockets 包提供。
 python3 -c "import websockets" || {
-    echo "[ERROR] WebSocket 支持库未安装，请检查 pip install 'uvicorn[standard]' 或 requirements.txt 中的 websockets"
+    echo "[ERROR] WebSocket 支持库未安装，请检查 pip install uvicorn 或 requirements.txt 中的 websockets"
     deactivate
     exit 1
 }
-if [ ! -x "$INSTALL_DIR/backend/venv/bin/uvicorn" ]; then
-    echo "[ERROR] uvicorn 可执行文件不存在: $INSTALL_DIR/backend/venv/bin/uvicorn"
+# 验证 uvicorn 模块可用（使用 python -m 方式，避免依赖 venv/bin/uvicorn 入口点）
+if ! python3 -c "import uvicorn; print(f'  uvicorn={uvicorn.__version__}')" 2>/dev/null; then
+    echo "[ERROR] uvicorn 模块导入失败"
     echo "  请检查 pip install 是否成功，或手动执行:"
-    echo "    cd $INSTALL_DIR/backend && source venv/bin/activate && pip install uvicorn[standard]"
+    echo "    cd $INSTALL_DIR/backend && source venv/bin/activate && pip install uvicorn httptools"
     deactivate
     exit 1
 fi
-echo "  ✓ uvicorn 可执行文件验证通过"
+echo "  ✓ uvicorn 模块验证通过"
 deactivate
 echo ""
 
