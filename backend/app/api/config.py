@@ -3,6 +3,8 @@
 正式接口（最新前后端 API 统一规范 v1.0）：
   GET  /api/config/whitelist  → {commands, blocked_patterns}（需要 ADMIN 权限）
   PUT  /api/config/whitelist  → {message, saved_commands, saved_blocked_patterns}（需要 ADMIN 权限）
+
+默认白名单数据来自 app.core.security_rules（旧版 RBAC 常量）。
 """
 import json
 import logging
@@ -11,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.audit.models import load_config, save_config
 from app.core.auth import AuthContext, AuthLevel
-from app.core.rbac import COMMAND_WHITELIST, DANGEROUS_PATTERNS, Permission
+from app.core.security_rules import COMMAND_WHITELIST, DANGEROUS_PATTERNS, Permission
 from app.dependencies import require_auth
 from app.schemas.models import WhitelistUpdate
 

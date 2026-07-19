@@ -62,13 +62,12 @@ kylin-agent/
 │       ├── core/                # 安全与基础组件
 │       │   ├── security.py      # 风险分级 (reject/confirm/allow)
 │       │   ├── prompt_guard.py  # Prompt 注入检测 (五层)
-│       │   ├── rbac.py          # 三级权限白名单 + 危险模式拦截
+│       │   ├── security_rules.py# 安全规则数据唯一来源（含旧版 RBAC 默认白名单）
 │       │   ├── auth.py          # Token 认证 (多 token 分级)
 │       │   ├── redis_client.py  # Redis 封装 (fakeredis fallback)
 │       │   └── database.py      # 数据库引擎 (SQLite/PostgreSQL)
 │       ├── mcp/                 # MCP 客户端
 │       │   ├── client.py        # JSON-RPC 2.0 客户端
-│       │   ├── executor.py      # 工具白名单 + RBAC 校验 → 转发
 │       │   └── tools.py         # 6 个工具定义 + JSON Schema
 │       ├── llm/                 # LLM 模块
 │       │   ├── deepseek.py      # DeepSeek API (流式/非流式)
@@ -309,10 +308,10 @@ sudo ./deploy/mcp-server/uninstall.sh
   └─ ReporterAgent → 报告生成
        ↓ 修复动作
   ↓
-第4层: RBAC 校验 (rbac.py)
-  ├─ 工具名白名单
+第4层: 工具调用安全裁决 (safety_guard.py + security_rules.py)
+  ├─ 工具分发检查 + 高危模式拦截
   ├─ 危险模式拦截 (;, &&, |, `, $() 等)
-  └─ 三级权限: READ → OP → ADMIN
+  └─ 角色分级: viewer → operator → admin（medium 需确认，high 恒拒绝）
        ↓
 第5层: MCP Server 执行 (麒麟目标机)
   ├─ agent-read: 只读 (sys_info, log_reader, net_monitor)
