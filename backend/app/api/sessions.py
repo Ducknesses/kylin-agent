@@ -98,6 +98,28 @@ async def get_session_messages(
     return SessionMessagesOut(session_id=session_id, messages=messages)
 
 
+@router.get("/sessions/{session_id}/status")
+async def get_session_status(
+    session_id: str,
+    auth: AuthContext = Depends(require_auth(AuthLevel.READ)),
+) -> dict:
+    """
+    查询会话状态（用于刷新后判断是否需要等待 done 事件）。
+
+    返回:
+        {"active": true/false, "session_id": "..."}
+      - active=true: 该会话仍有活跃的 WebSocket 连接，可能有新消息到达
+      - active=false: 会话已无活跃连接，之前的所有消息已持久化完毕
+    """
+    session = await message_repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    from app.api.chat import manager as _chat_manager
+    is_alive = _chat_manager.is_connected(session_id)
+    return {"active": is_alive, "session_id": session_id}
+
+
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(
     session_id: str,

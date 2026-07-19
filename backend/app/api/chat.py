@@ -8,6 +8,7 @@
 AgentHarness → ReporterAgent → AuditService 全链路。
 所有 Agent 均支持 LLM 增强路径（通过 LLM_ENABLED 配置开关）。
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -70,8 +71,10 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             await _handle_message(websocket, session_id, raw, role)
     except WebSocketDisconnect:
         logger.info(f"[WebSocket] 会话断开: {session_id}")
+        manager.cancel_session(session_id)
     except Exception as e:
         logger.exception(f"[WebSocket] 会话异常: {e}")
+        manager.cancel_session(session_id)
         try:
             await _send(websocket, "error", message="服务端处理异常，请稍后重试")
         except Exception:
@@ -329,41 +332,68 @@ async def _run_agent_flow(
 ) -> None:
     """执行 Orchestrator 主流程：逐帧发送到 WebSocket，并逐帧持久化。
 
-    与旧版"先全部发送、结束统一持久化"的区别：
-    1. chunk 帧按 trace_id 追加合并落库（同 trace_id 的多段 chunk 合并为一行），
-       其余帧（status / tool_call / fix_options / error）逐条落库。
-    2. 发送失败容错：客户端断开后继续 send 会触发 RuntimeError
-       （ASGI: send after websocket.close）。此时停止发送，但继续消费并
-       持久化剩余帧 —— 流程不再崩溃，用户刷新后仍能找回完整回答。
+    改进点（v1.1）：
+    1. WS 断开后不再继续消费 generator，立即 aclose 释放后端资源
+    2. 总超时 120s，防止 MCP/LLM 累积阻塞导致生成器永不结束
+    3. chunk 帧按 trace_id 追加合并落库
     """
-    alive = True
     effective_trace_id = trace_id or ""
+    # 总超时保护：整个 orchestration 不超过 120 秒
+    TOTAL_TIMEOUT = 120.0
+
     agen = _orchestrator.handle_chat(
         session_id=session_id, user_input=user_input, role=role,
         confirmed=confirmed, trace_id=trace_id,
     )
-    try:
+
+    async def _consume_frames() -> None:
+        """消费 generator 并发送/持久化帧"""
+        nonlocal effective_trace_id
         async for frame in agen:
-            if alive:
-                try:
-                    # 中危工具确认帧：把上下文暂存到 ConnectionManager，便于 tool_confirm 恢复执行
-                    if frame.get("type") == "pending_confirmation":
-                        manager.set_pending_tool(session_id, {
-                            "tool_confirm_id": frame.get("tool_confirm_id"),
-                            "tool": frame.get("tool"),
-                            "params": frame.get("params"),
-                            "trace_id": frame.get("trace_id"),
-                            "context": frame.get("context", {}),
-                        })
-                        # 前端不需要 context 字段，移除后再发送
-                        frame = {k: v for k, v in frame.items() if k != "context"}
-                    await websocket.send_json(frame)
-                except (WebSocketDisconnect, RuntimeError) as e:
-                    alive = False
-                    logger.warning(
-                        f"[WebSocket] 连接已关闭，后续帧仅落库不再发送: session={session_id}, {e}"
-                    )
+            # 检查是否已被取消
+            if manager.is_cancelled(session_id):
+                logger.info(
+                    f"[WebSocket] 会话已取消，中断 generator 消费: session={session_id}"
+                )
+                break
+
+            # 中危工具确认帧：把上下文暂存到 ConnectionManager
+            if frame.get("type") == "pending_confirmation":
+                manager.set_pending_tool(session_id, {
+                    "tool_confirm_id": frame.get("tool_confirm_id"),
+                    "tool": frame.get("tool"),
+                    "params": frame.get("params"),
+                    "trace_id": frame.get("trace_id"),
+                    "context": frame.get("context", {}),
+                })
+                frame = {k: v for k, v in frame.items() if k != "context"}
+
+            # 发送到前端（容错：连接断开时不抛异常）
+            try:
+                await websocket.send_json(frame)
+            except (WebSocketDisconnect, RuntimeError) as e:
+                logger.warning(
+                    f"[WebSocket] 连接已关闭，中断消费: session={session_id}, {e}"
+                )
+                manager.cancel_session(session_id)
+                break
+
             await _persist_frame(session_id, frame.get("trace_id") or effective_trace_id, frame)
+
+    try:
+        await asyncio.wait_for(_consume_frames(), timeout=TOTAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(
+            f"[WebSocket] orchestration 总超时 ({TOTAL_TIMEOUT}s): session={session_id}, "
+            f"trace_id={effective_trace_id}"
+        )
+        try:
+            await websocket.send_json({
+                "type": "error", "trace_id": effective_trace_id,
+                "message": "处理超时，请稍后重试或缩短查询范围",
+            })
+        except Exception:
+            pass
     finally:
         await agen.aclose()
 
