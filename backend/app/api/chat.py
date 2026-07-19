@@ -235,8 +235,14 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
             tool_frame["result"] = result.get("result")
         else:
             tool_frame["error"] = result.get("error") or "工具调用失败"
-        await websocket.send_json(tool_frame)
+        # 先持久化再推送 tool_call 结果帧：工具执行期间客户端可能已经断开
+        # （例如重启本机 nginx 反代会切断 WebSocket），先落库保证刷新后仍能看到执行结果
         await _persist_frame(session_id, trace_id, tool_frame)
+        try:
+            await websocket.send_json(tool_frame)
+        except Exception:
+            logger.info(f"[tool_confirm] 客户端已断开，工具结果已持久化: session={session_id}, tool={tool}")
+            return
 
         # 继续生成诊断报告
         try:
