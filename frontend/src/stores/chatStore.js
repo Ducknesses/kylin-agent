@@ -225,6 +225,14 @@ export const useChatStore = defineStore('chat', () => {
     messagesMap.value.set(sessionId, [...list])
   }
 
+  // 更新会话标题（done 帧驱动的实时更新）
+  function updateSessionTitle(sessionId, title) {
+    const idx = sessions.value.findIndex(s => s.id === sessionId)
+    if (idx !== -1) {
+      sessions.value[idx] = { ...sessions.value[idx], title }
+    }
+  }
+
   // 删除会话
   async function deleteSession(sessionId) {
     try {
@@ -262,6 +270,7 @@ export const useChatStore = defineStore('chat', () => {
     addMessage,
     appendToLastAssistant,
     addOrUpdateToolCall,
+    updateSessionTitle,
     deleteSession
   }
 })

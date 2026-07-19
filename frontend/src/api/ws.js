@@ -178,6 +178,10 @@ class WsClient {
         this.emit('risk_alert', data)
         break
       case 'done':
+        if (data.title) {
+          const chatStore = useChatStore()
+          chatStore.updateSessionTitle(this.sessionId, data.title)
+        }
         this.emit('done', data)
         break
       case 'error':

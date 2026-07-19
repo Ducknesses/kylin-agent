@@ -256,7 +256,8 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
         for i in range(0, len(report), 500):
             await _send(websocket, "chunk", content=report[i:i + 500], trace_id=trace_id)
 
-        await _send(websocket, "done", trace_id=trace_id, session_id=session_id)
+        title = await _generate_session_title_for_confirm(session_id, pending_tool, report)
+        await _send(websocket, "done", trace_id=trace_id, session_id=session_id, title=title)
         await message_repository.save_message(
             session_id=session_id, role="assistant",
             content=report,
@@ -404,6 +405,13 @@ async def _run_agent_flow(
         await agen.aclose()
 
 
+async def _generate_session_title_for_confirm(session_id: str, pending_tool: dict, report: str) -> str:
+    """tool_confirm 恢复路径的标题生成，委托给 orchestrator 的统一函数"""
+    from app.services.orchestrator import _generate_session_title
+    user_input = pending_tool.get("context", {}).get("user_input", "")
+    return await _generate_session_title(session_id, user_input, report)
+
+
 async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) -> None:
     """持久化单条 assistant 关键帧；写库失败仅记录日志，不中断主流程"""
     try:
@@ -479,6 +487,7 @@ async def _send(
     confirm_id: str | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
+    title: str | None = None,
     tool: str | None = None,
     tool_call_id: str | None = None,
     tool_confirm_id: str | None = None,
@@ -537,6 +546,8 @@ async def _send(
             payload["trace_id"] = trace_id
         if session_id is not None:
             payload["session_id"] = session_id
+        if title is not None:
+            payload["title"] = title
 
     elif msg_type == "error":
         if message is not None:

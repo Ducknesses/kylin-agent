@@ -68,6 +68,120 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "done", "trace_id": trace_id}
 
 
+async def _generate_session_title(session_id: str, user_input: str, report: str) -> str:
+    """根据对话内容生成会话标题，LLM 不可用时降级为用户输入截断。
+
+    同时写入数据库（幂等：仅当当前标题以 '新会话' 开头时才更新）。
+    """
+    # 延迟导入避免循环依赖
+    import json
+    from app.dependencies import message_repository
+    from app.services.llm_client import LLMClient
+
+    client = LLMClient()
+
+    async def _try_generate(system: str, user: str) -> str:
+        """尝试生成标题，返回 content（可能为空）"""
+        resp = await client.chat_simple(
+            system_prompt=system,
+            user_prompt=user,
+            max_tokens=2048,
+            temperature=0.2,
+            timeout=20,
+        )
+        return resp.content or ""
+
+    # 第一次尝试：标准 prompt
+    title = await _try_generate(
+        system=(
+            "你是一个标题生成助手。请把运维对话总结为一个短标题（15汉字以内），"
+            "只输出标题本身，不要解释、不要加引号、不要加序号。"
+        ),
+        user=(
+            f"把以下运维对话总结为一个短标题（15汉字以内）：\n"
+            f"用户问题：{user_input}\n"
+            f"助手回答：{report[:300]}"
+        ),
+    )
+
+    # 第二次尝试：JSON 格式 prompt（模型对结构化输出更稳定）
+    if not title or len(title.strip()) < 2:
+        logger.info("[Title] 第一次尝试返回空，使用 JSON 格式重试")
+        resp = await client.chat_simple(
+            system_prompt=(
+                "你是一个标题生成助手。请把运维对话总结为一个短标题（15汉字以内）。"
+                "只输出 JSON 对象，不要解释、不要加 markdown 代码块标记。"
+            ),
+            user_prompt=(
+                f"请总结以下运维对话的标题，输出 JSON 格式：\n"
+                f"用户问题：{user_input}\n"
+                f"助手回答：{report[:300]}\n\n"
+                f'输出格式：{{"title": "短标题内容"}}'
+            ),
+            max_tokens=2048,
+            temperature=0.2,
+            timeout=20,
+        )
+        raw = resp.content or ""
+        try:
+            parsed = json.loads(raw.strip().strip("`").strip())
+            if isinstance(parsed, dict) and "title" in parsed:
+                title = parsed["title"]
+        except (json.JSONDecodeError, AttributeError):
+            title = raw.strip()
+
+    # 第三次尝试：增大 temperature 增强生成多样性
+    if not title or len(title.strip()) < 2:
+        logger.info("[Title] 第二次尝试仍失败，增大 temperature 重试")
+        resp = await client.chat_simple(
+            system_prompt=(
+                "你是一个标题生成助手。请把运维对话总结为一个短标题（15汉字以内），"
+                "只输出标题本身，不要解释、不要加引号、不要加序号。"
+            ),
+            user_prompt=(
+                f"把以下运维对话总结为一个短标题（15汉字以内）：\n"
+                f"用户问题：{user_input}\n"
+                f"助手回答：{report[:300]}"
+            ),
+            max_tokens=2048,
+            temperature=0.7,
+            timeout=20,
+        )
+        title = (resp.content or "").strip()
+
+    # 清理大模型可能额外包裹的引号
+    for quote in ('"', "'", "「", "」", "『", "』", "“", "”"):
+        title = title.strip(quote)
+
+    # 清理可能的序号前缀（如 "1. "、"1、"等）
+    import re
+    title = re.sub(r'^[\s\d]+[.、．)\]]\s*', '', title)
+
+    # 如果 title 被引号包裹后只剩空串，再 strip 一次空格
+    title = title.strip()
+
+    if len(title) > 30:
+        title = title[:30]
+
+    # LLM 不可用或返回内容过短时的降级规则：用户输入截断 30 字
+    if len(title) < 2:
+        logger.info(
+            f"[Title] LLM 标题生成最终失败，降级为用户输入截断: session={session_id}"
+        )
+        text = user_input.strip()
+        title = text[:30] + ("…" if len(text) > 30 else "")
+    else:
+        logger.info(f"[Title] LLM 生成标题成功: session={session_id}, title={title!r}")
+
+    # 写入 DB（幂等，失败静默）
+    try:
+        await message_repository.update_session_title(session_id, title)
+    except Exception:
+        logger.warning("[Orchestrator] 标题写入 DB 失败（已忽略）", exc_info=True)
+
+    return title
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Orchestrator（Agent 主流程闭环）
 # ═══════════════════════════════════════════════════════════════════════
@@ -199,7 +313,8 @@ class Orchestrator:
                 ctx.final_response = report
                 for i in range(0, len(report), 500):
                     yield {"type": "chunk", "trace_id": trace_id, "content": report[i:i + 500]}
-                yield {"type": "done", "trace_id": trace_id, "session_id": session_id, "final_response": ctx.final_response}
+                title = await _generate_session_title(session_id, user_input, report)
+                yield {"type": "done", "trace_id": trace_id, "session_id": session_id, "title": title, "final_response": ctx.final_response}
                 await self._safe_audit(ctx, "chat_done")
                 return
 
@@ -293,7 +408,8 @@ class Orchestrator:
                         opt.model_dump(mode="json") for opt in fix_options
                     ],
                 }
-            yield {"type": "done", "trace_id": trace_id, "session_id": session_id, "final_response": ctx.final_response}
+            title = await _generate_session_title(session_id, user_input, report)
+            yield {"type": "done", "trace_id": trace_id, "session_id": session_id, "title": title, "final_response": ctx.final_response}
             await self._safe_audit(ctx, "chat_done")
 
         except Exception as e:

@@ -54,6 +54,11 @@ class MessageRepository(ABC):
         ...
 
     @abstractmethod
+    async def update_session_title(self, session_id: str, title: str) -> bool:
+        """更新会话标题（仅当标题仍为默认标题时生效），返回是否成功更新"""
+        ...
+
+    @abstractmethod
     async def get_messages(self, session_id: str) -> list[dict]:
         """按时间顺序返回指定会话的所有消息"""
         ...
