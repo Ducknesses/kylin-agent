@@ -98,7 +98,7 @@ async def update_whitelist(
     global _runtime_commands, _runtime_blocked
 
     # 从 Pydantic 模型提取数据
-    new_commands = [cmd.model_dump() for cmd in body.commands]
+    new_commands = [cmd.dict() for cmd in body.commands]
     new_blocked = body.blocked_patterns or []
 
     # 持久化到 DB（失败时返回 500，不更新内存缓存）

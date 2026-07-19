@@ -5,7 +5,7 @@
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, validator, root_validator
 
 # ── 风险等级 ──────────────────────────────────────────────────────────
 # 风险等级最终仍需由后端安全规则重新计算，不能直接信任规划器输入。
@@ -28,18 +28,17 @@ class FixOption(BaseModel):
     params: dict[str, object]
     requires_confirm: bool
     rollback: str | None = None
-    model_config = ConfigDict(extra="forbid")
+    class Config:
+        extra = "forbid"
 
-    @field_validator("option_id", "title", "description", "tool")
-    @classmethod
+    @validator("option_id", "title", "description", "tool")
     def _not_blank(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
             raise ValueError("不能为空或仅包含空白字符")
         return stripped
 
-    @field_validator("option_id")
-    @classmethod
+    @validator("option_id")
     def _valid_option_id(cls, v: str) -> str:
         if not _OPTION_ID_RE.fullmatch(v):
             raise ValueError("option_id 格式无效，需为 fix_{字母数字}")
@@ -52,18 +51,17 @@ class FixOption(BaseModel):
 class ActionExecuteRequest(BaseModel):
     session_id: str
     option_id: str
-    model_config = ConfigDict(extra="forbid")
+    class Config:
+        extra = "forbid"
 
-    @field_validator("session_id", "option_id")
-    @classmethod
+    @validator("session_id", "option_id")
     def _not_blank(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
             raise ValueError("不能为空或仅包含空白字符")
         return stripped
 
-    @field_validator("option_id")
-    @classmethod
+    @validator("option_id")
     def _valid_option_id(cls, v: str) -> str:
         if not _OPTION_ID_RE.fullmatch(v):
             raise ValueError("option_id 格式无效，需为 fix_{8位十六进制}")
@@ -84,21 +82,22 @@ class ActionExecuteResponse(BaseModel):
     result_summary: str | None = None
     confirm_id: str | None = None
 
-    @field_validator("confirm_id")
-    @classmethod
+    @validator("confirm_id")
     def _valid_confirm_id(cls, v: str | None) -> str | None:
         if v is not None and not re.fullmatch(r"cfm_[0-9a-f]{8}", v):
             raise ValueError("confirm_id 格式无效，需为 cfm_{8位十六进制}")
         return v
 
-    @model_validator(mode="after")
-    def _cross_validate(self) -> "ActionExecuteResponse":
-        if self.status == "confirm_required":
-            if self.confirm_id is None:
+    @root_validator
+    def _cross_validate(cls, values: dict) -> dict:
+        status = values.get("status")
+        confirm_id = values.get("confirm_id")
+        if status == "confirm_required":
+            if confirm_id is None:
                 raise ValueError("confirm_required 状态必须提供 confirm_id")
-        elif self.confirm_id is not None:
-            raise ValueError(f"{self.status} 状态不得包含 confirm_id")
-        return self
+        elif confirm_id is not None:
+            raise ValueError(f"{status} 状态不得包含 confirm_id")
+        return values
 
 
 # ── Confirm API 模型 ──────────────────────────────────────────────────
@@ -108,18 +107,17 @@ class ActionConfirmRequest(BaseModel):
     session_id: str
     confirm_id: str
     decision: Literal["approve", "reject"]
-    model_config = ConfigDict(extra="forbid")
+    class Config:
+        extra = "forbid"
 
-    @field_validator("session_id")
-    @classmethod
+    @validator("session_id")
     def _not_blank(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
             raise ValueError("不能为空或仅包含空白字符")
         return stripped
 
-    @field_validator("confirm_id")
-    @classmethod
+    @validator("confirm_id")
     def _valid_confirm_id(cls, v: str) -> str:
         if not re.fullmatch(r"cfm_[0-9a-f]{8}", v):
             raise ValueError("confirm_id 格式无效")
@@ -146,18 +144,17 @@ class ActionConfirmResponse(BaseModel):
 class ActionRollbackRequest(BaseModel):
     session_id: str
     option_id: str
-    model_config = ConfigDict(extra="forbid")
+    class Config:
+        extra = "forbid"
 
-    @field_validator("session_id", "option_id")
-    @classmethod
+    @validator("session_id", "option_id")
     def _not_blank(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
             raise ValueError("不能为空或仅包含空白字符")
         return stripped
 
-    @field_validator("option_id")
-    @classmethod
+    @validator("option_id")
     def _valid_option_id(cls, v: str) -> str:
         if not _OPTION_ID_RE.fullmatch(v):
             raise ValueError("option_id 格式无效，需为 fix_{8位十六进制}")

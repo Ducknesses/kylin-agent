@@ -405,7 +405,7 @@ class Orchestrator:
                     "type": "fix_options",
                     "trace_id": trace_id,
                     "options": [
-                        opt.model_dump(mode="json") for opt in fix_options
+                        opt.dict() for opt in fix_options
                     ],
                 }
             title = await _generate_session_title(session_id, user_input, report)

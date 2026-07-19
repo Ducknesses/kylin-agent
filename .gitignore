@@ -50,7 +50,6 @@ ws_test.py
 tmp/
 .clinerules
 mock_server.py
-extract_deploy.sh
 
 # IDE
 .vscode/

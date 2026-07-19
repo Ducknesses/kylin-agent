@@ -93,7 +93,7 @@ def _stored_to_dict(s: StoredFixOption) -> dict[str, Any]:
     return {
         "session_id": s.session_id,
         "trace_id": s.trace_id,
-        "option": s.option.model_dump(mode="json"),
+        "option": s.option.dict(),
         "status": s.status,
         "created_at": s.created_at.isoformat(),
         "expires_at": s.expires_at.isoformat(),
@@ -202,7 +202,7 @@ class FixOptionStore:
                     )
 
             # 深拷贝防止外部修改
-            copied = opt.model_copy(deep=True)
+            copied = opt.copy(deep=True)
             stored = StoredFixOption(
                 session_id=session_id,
                 trace_id=trace_id,

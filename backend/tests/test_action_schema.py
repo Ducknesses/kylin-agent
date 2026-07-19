@@ -70,7 +70,7 @@ class TestValidFixOption:
         assert _make(requires_confirm=False).requires_confirm is False
 
     def test_serialization_fields_complete(self):
-        d = _make().model_dump()
+        d = _make().dict()
         expected = {"option_id", "title", "description", "risk_level", "tool", "params", "requires_confirm", "rollback"}
         assert set(d.keys()) == expected
 
@@ -147,10 +147,10 @@ class TestExtraFields:
     def test_extra_field_rejected(self, extra_key, extra_value):
         payload = {**_VALID_KWARGS, extra_key: extra_value}
         with pytest.raises(ValidationError):
-            FixOption.model_validate(payload)
+            FixOption.parse_obj(payload)
 
     def test_model_dump_only_has_8_fields(self):
-        d = FixOption(**_VALID_KWARGS).model_dump()
+        d = FixOption(**_VALID_KWARGS).dict()
         assert set(d.keys()) == {"option_id", "title", "description", "risk_level", "tool", "params", "requires_confirm", "rollback"}
 
 
