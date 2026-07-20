@@ -15,6 +15,16 @@
         <div class="risk-reason">{{ props.msg.reason }}</div>
       </div>
       <div v-else-if="props.msg.type === 'error'" class="error-body">{{ props.msg.content }}</div>
+      <div v-else-if="props.msg.type === 'tool_rejected'" class="tool-rejected-body">
+        <div class="rejected-header">
+          <el-icon :size="16"><CircleCloseFilled /></el-icon>
+          <span>工具调用已拒绝</span>
+        </div>
+        <div class="rejected-tool">
+          <el-tag size="small" type="warning">{{ props.msg.tool }}</el-tag>
+        </div>
+        <div class="rejected-reason" v-if="props.msg.reason">{{ props.msg.reason }}</div>
+      </div>
       <ToolCallCard v-else-if="props.msg.role === 'tool'" :data="props.msg" />
       <FixOptionsCard v-else-if="props.msg.type === 'fix_options'" :data="props.msg" />
       <div v-else class="assistant-text" v-html="renderMarkdown(props.msg.content)" />
@@ -26,6 +36,7 @@
 import { computed } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
+import { CircleCloseFilled } from '@element-plus/icons-vue'
 import ToolCallCard from './ToolCallCard.vue'
 import FixOptionsCard from './FixOptionsCard.vue'
 import 'highlight.js/lib/common'
@@ -140,6 +151,29 @@ function renderMarkdown(text) {
   color: #991b1b;
   padding: 10px 14px;
   border-radius: 8px;
+}
+.tool-rejected-body {
+  background-color: #fffbeb;
+  color: #92400e;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid #fde68a;
+}
+.rejected-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: bold;
+  margin-bottom: 8px;
+  color: #b45309;
+}
+.rejected-tool {
+  margin-bottom: 4px;
+}
+.rejected-reason {
+  font-size: 13px;
+  color: #a16207;
+  margin-top: 6px;
 }
 .assistant-text :deep(p) {
   margin: 0 0 8px 0;

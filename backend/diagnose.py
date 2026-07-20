@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
+
 # ── ANSI 颜色 ──────────────────────────────────────────────────────
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -46,6 +48,9 @@ ENV_FILE = SCRIPT_DIR / ".env"
 REQUIREMENTS_FILE = SCRIPT_DIR / "requirements.txt"
 SERVICE_FILE = SCRIPT_DIR.parent / "deploy" / "backend" / "kylin-agent.service"
 SQLITE_DB = SCRIPT_DIR / "data" / "audit.db"
+
+# ── 加载 .env，与 run.py / config.py 保持一致 ─────────────────────
+load_dotenv(ENV_FILE)
 
 # ── 统计计数器 ──────────────────────────────────────────────────────
 _passed = 0
@@ -269,14 +274,14 @@ def _validate_port(port: str) -> bool:
 
 
 def check_listen(interactive: bool = True) -> dict:
-    """查看和修改监听地址"""
+    """查看和修改监听地址（使用 os.getenv 与后端 config.py 保持一致）"""
     global _passed, _failed, _warnings
     print(f"\n{BOLD}[2/4] 监听地址{RESET}")
     print("-" * 50)
 
-    env = _load_env()
-    host = env.get("APP_HOST", "0.0.0.0")
-    port = env.get("APP_PORT", "8000")
+    host = os.getenv("APP_HOST", "0.0.0.0")
+    port = os.getenv("APP_PORT", "8000")
+    env = _load_env()  # 仅用于交互模式下回写 .env
 
     print(f"  当前配置: {host}:{port}")
     _record(True)
@@ -441,14 +446,14 @@ def _check_systemd_service() -> tuple[bool, str]:
 
 
 def check_backend_status() -> dict[str, Any]:
-    """检测 Backend 启动状态"""
+    """检测 Backend 启动状态（使用 os.getenv 与后端 config.py 保持一致）"""
     global _passed, _failed, _warnings
     print(f"\n{BOLD}[3/4] Backend 启动状态{RESET}")
     print("-" * 50)
 
-    env = _load_env()
-    host = env.get("APP_HOST", "0.0.0.0")
-    port = env.get("APP_PORT", "8000")
+    host = os.getenv("APP_HOST", "0.0.0.0")
+    port = os.getenv("APP_PORT", "8000")
+    env = _load_env()  # 用于 Redis 等后续检测项
 
     results = {}
 

@@ -205,6 +205,16 @@ class WsClient {
         })
         this.emit('pending_confirmation', data)
         break
+      case 'tool_rejected':
+        chatStore.addMessage(this.sessionId, {
+          role: 'system',
+          type: 'tool_rejected',
+          tool: data.tool || '',
+          reason: data.reason || '用户拒绝该工具调用',
+          traceId: data.trace_id
+        })
+        this.emit('tool_rejected', data)
+        break
       case 'pong':
         break
       default:

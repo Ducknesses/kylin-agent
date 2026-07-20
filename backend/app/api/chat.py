@@ -2,7 +2,7 @@
 
 正式接口：WS /ws/chat/{session_id}（最新前后端 API 统一规范 v1.0）
 前端消息类型：chat / confirm / tool_confirm / ping
-后端消息类型：status / chunk / risk_alert / tool_call / pending_confirmation / error / done / pong
+后端消息类型：status / chunk / risk_alert / tool_call / tool_rejected / pending_confirmation / error / done / pong
 
 业务逻辑通过 Day5 Orchestrator.handle_chat 串起 IntentAgent → DiagnoseAgent →
 AgentHarness → ReporterAgent → AuditService 全链路。
@@ -197,12 +197,16 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
         trace_id = pending_tool.get("trace_id", "")
 
         if decision == "reject":
-            await _send(websocket, "status", content="已拒绝该工具调用。", trace_id=trace_id)
+            tool_name = pending_tool.get('tool', '')
+            await _send(websocket, "tool_rejected",
+                        tool=tool_name, reason="用户拒绝该工具调用",
+                        trace_id=trace_id)
             await _send(websocket, "done", trace_id=trace_id)
             await message_repository.save_message(
                 session_id=session_id, role="system",
-                content=f"已拒绝工具调用: {pending_tool.get('tool', '')}",
-                message_type="tool_confirm", trace_id=trace_id,
+                content=f"已拒绝工具调用: {tool_name}",
+                message_type="tool_rejected", trace_id=trace_id,
+                metadata={"tool": tool_name},
             )
             logger.info(f"[tool_confirm] 用户拒绝: session={session_id}, tool_confirm_id={tool_confirm_id}")
             return
@@ -465,6 +469,13 @@ async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) 
                     "risk_level": frame.get("risk_level"),
                 },
             )
+        elif ft == "tool_rejected":
+            await message_repository.save_message(
+                session_id=session_id, role="system",
+                content=f"已拒绝工具调用: {frame.get('tool', '')}",
+                message_type="tool_rejected", trace_id=trace_id,
+                metadata={"tool": frame.get("tool")},
+            )
         elif ft == "error":
             await message_repository.save_message(
                 session_id=session_id, role="assistant",
@@ -552,6 +563,14 @@ async def _send(
     elif msg_type == "error":
         if message is not None:
             payload["message"] = message
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
+    elif msg_type == "tool_rejected":
+        if tool is not None:
+            payload["tool"] = tool
+        if reason is not None:
+            payload["reason"] = reason
         if trace_id is not None:
             payload["trace_id"] = trace_id
 

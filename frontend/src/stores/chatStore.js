@@ -137,6 +137,22 @@ export const useChatStore = defineStore('chat', () => {
               timestamp: m.timestamp,
             }
           }
+          // tool_rejected 历史消息：还原为带 tool/reason 的结构
+          if (m.message_type === 'tool_rejected') {
+            let toolName = ''
+            try {
+              const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {})
+              toolName = meta.tool || ''
+            } catch (e) { /* ignore */ }
+            return {
+              role: 'system',
+              type: 'tool_rejected',
+              tool: toolName,
+              reason: '用户拒绝该工具调用',
+              content: m.content,
+              timestamp: m.timestamp,
+            }
+          }
           // fix_options 历史消息的 content 是选项数组的 JSON 字符串，
           // 解析失败时降级为空选项卡片，避免把原始 JSON 当文本渲染
           if (m.message_type === 'fix_options') {
