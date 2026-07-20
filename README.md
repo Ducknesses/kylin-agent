@@ -117,6 +117,11 @@ kylin-agent/
 │       ├── agent-op.sudoers     # sudoers 白名单
 │       └── loongarch-check.sh   # LoongArch 架构兼容性检查
 │
+├── scripts/                     # 辅助脚本
+│   ├── extract_deploy.sh        # 部署资源提取
+│   └── loongarch/               # LoongArch 二进制编译
+│       ├── build.sh             # 一键编译脚本（在龙芯机器上执行）
+│       └── package_source.sh    # 源码打包脚本（在开发机上执行）
 ├── docs/                        # 项目文档
 └── README.md                    # 本文件
 ```
@@ -1137,6 +1142,104 @@ sudo systemctl restart mcp-server
 ```
 
 ---
+
+## LoongArch 二进制编译（麒麟 V11 可执行文件）
+
+Backend 和 MCP Server 是 Python 项目，运行时需要 Python 环境。如果目标机器（麒麟 V11 / LoongArch）不方便安装 Python 3.10+ 及全部依赖，可通过 PyInstaller 或 Nuitka 将 Python 代码打包为独立可执行文件。
+
+> **注意：** Python 二进制打包是架构绑定的，必须在 LoongArch 机器上原生编译。x86_64 开发机只能做源码打包，不能在本地交叉编译出 LoongArch 二进制。
+
+### 工作流程
+
+```
+x86_64 开发机                            LoongArch 目标机
+┌─────────────────┐                    ┌─────────────────────┐
+│ package_source.sh│ ── scp .tar.gz ──→ │ tar -xzf            │
+│   ↓              │                    │   ↓                 │
+│ 打包源码+脚本     │                    │ build.sh            │
+│ 输出:            │                    │   ↓                 │
+│ kylin-agent-     │                    │ PyInstaller 打包    │
+│ loongarch-pkg/   │                    │   ↓                 │
+│ + .tar.gz        │                    │ dist/loongarch/     │
+│                  │                    │ ├─ kylin-agent-     │
+│                  │                    │ │  backend (二进制) │
+│                  │                    │ ├─ kylin-mcp-       │
+│                  │                    │ │  server (二进制)  │
+│                  │                    │ └─ frontend/ (静态) │
+└─────────────────┘                    └─────────────────────┘
+```
+
+### 步骤 1：在开发机上打包源码
+
+```bash
+# 在项目根目录执行
+./scripts/loongarch/package_source.sh
+
+# 产出：
+#   kylin-agent-loongarch-pkg/          ← 打包目录（可直接传输）
+#   kylin-agent-loongarch-src-*.tar.gz  ← 压缩包（方便 scp）
+```
+
+### 步骤 2：传输到龙芯机器
+
+```bash
+# 方式 A：使用压缩包
+scp kylin-agent-loongarch-src-*.tar.gz root@目标IP:/tmp/
+ssh root@目标IP
+cd /tmp && tar -xzf kylin-agent-loongarch-src-*.tar.gz
+cd kylin-agent-loongarch-pkg/
+
+# 方式 B：直接 scp 整个目录
+scp -r kylin-agent-loongarch-pkg/ root@目标IP:/tmp/
+```
+
+### 步骤 3：在龙芯机器上编译
+
+```bash
+cd kylin-agent-loongarch-pkg/
+
+# 一键编译所有组件（Backend + MCP Server + Frontend）
+sudo bash scripts/loongarch/build.sh
+
+# 分步编译：
+sudo bash scripts/loongarch/build.sh --backend-only    # 只编译 Backend
+sudo bash scripts/loongarch/build.sh --mcp-only        # 只编译 MCP Server
+sudo bash scripts/loongarch/build.sh --frontend-only   # 只构建前端
+
+# 使用 Nuitka 编译（性能更好，编译更慢）
+sudo bash scripts/loongarch/build.sh --use-nuitka
+
+# 清理构建产物
+sudo bash scripts/loongarch/build.sh --clean
+```
+
+### 编译产物
+
+```
+dist/loongarch/
+├── kylin-agent-backend           ← Backend 可执行文件
+├── kylin-mcp-server              ← MCP Server 可执行文件
+├── frontend/                     ← 前端静态文件
+├── INSTALL_LOONGARCH.txt         ← 部署说明
+└── kylin-agent-loongarch-*.tar.gz ← 自动生成的分发包
+```
+
+### 前置要求（龙芯机器）
+
+| 依赖 | 安装命令 | 用途 |
+|------|---------|------|
+| Python ≥ 3.10 | `sudo apt install python3 python3-venv python3-pip python3-dev` | PyInstaller/Nuitka 运行环境 |
+| GCC / Make | `sudo apt install gcc g++ make` | 编译 C 扩展（psutil, httptools 等） |
+| Node.js ≥ 18 | nvm 安装或二进制下载 | 前端构建（可选，跳过不影响 Backend） |
+
+`build.sh` 会自动安装这些依赖，无需手动操作。
+
+### 打包原理
+
+| 工具 | 原理 | 优点 | 缺点 |
+|------|------|------|------|
+| **PyInstaller**（默认） | 将 Python 解释器 + .pyc + .so 打包成单个 ELF | 速度快，兼容性好 | 文件较大（~50-100MB） |
+| **Nuitka**（`--use-nuitka`） | 将 Python 转为 C 再用 GCC 编译 | 性能更好，文件更小 | 编译慢（10-20分钟），需要完整编译工具链 |
 
 ## 开发
 
