@@ -7,8 +7,9 @@ Kylin Agent Backend 诊断工具
 功能：
   1. 依赖检测 —— 检查 requirements.txt 中的包是否已安装
   2. 监听地址查看/修改 —— 读取/修改 .env 中的 APP_HOST/APP_PORT
-  3. Backend 启动状态 —— 端口监听、/health、Redis、SQLite、systemd 服务
-  4. 网络连通性 —— MCP Server、DeepSeek API、前端连通性检测
+  3. LLM/MCP 配置修改 —— 查看/修改 DeepSeek API Key、Base URL、MCP 模式等
+  4. Backend 启动状态 —— 端口监听、/health、Redis、SQLite、systemd 服务
+  5. 网络连通性 —— MCP Server、DeepSeek API、前端连通性检测
 
 用法：
   python diagnose.py          # 完整检测
@@ -146,7 +147,7 @@ _PKG_NAME_MAP = {
 def check_dependencies() -> dict:
     """检测依赖项"""
     global _passed, _failed, _warnings
-    print(f"\n{BOLD}[1/4] 依赖检测{RESET}")
+    print(f"\n{BOLD}[1/5] 依赖检测{RESET}")
     print("-" * 50)
 
     packages = _parse_requirements()
@@ -276,7 +277,7 @@ def _validate_port(port: str) -> bool:
 def check_listen(interactive: bool = True) -> dict:
     """查看和修改监听地址（使用 os.getenv 与后端 config.py 保持一致）"""
     global _passed, _failed, _warnings
-    print(f"\n{BOLD}[2/4] 监听地址{RESET}")
+    print(f"\n{BOLD}[2/5] 监听地址{RESET}")
     print("-" * 50)
 
     host = os.getenv("APP_HOST", "0.0.0.0")
@@ -321,7 +322,154 @@ def check_listen(interactive: bool = True) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 3. Backend 启动状态检测
+# 3. LLM & MCP 配置查看 & 修改
+# ═══════════════════════════════════════════════════════════════════
+
+def _validate_url(value: str) -> bool:
+    """校验 URL 格式"""
+    if not value:
+        return False
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _validate_bool(value: str) -> bool:
+    """校验布尔值"""
+    return value.lower() in ("true", "false", "1", "0", "yes", "no")
+
+
+def _validate_provider(value: str) -> bool:
+    """校验 LLM 提供商"""
+    return value in ("deepseek", "local_openai_compatible")
+
+
+def _validate_mcp_mode(value: str) -> bool:
+    """校验 MCP 模式"""
+    return value in ("mock", "real")
+
+
+def _validate_positive_int(value: str) -> bool:
+    """校验正整数"""
+    try:
+        v = int(value)
+        return v > 0
+    except (ValueError, TypeError):
+        return False
+
+
+# ── LLM/MCP 可修改配置项定义 ─────────────────────────────────────
+# 格式: (env_key, display_name, validator, default_value, description)
+# validator 为 None 表示不校验，任意值均可
+_CONFIG_ITEMS = [
+    # LLM 核心
+    ("LLM_ENABLED",       "启用 LLM",        _validate_bool,   "false",  "true=走真实大模型链路 / false=走 Mock 编排器"),
+    ("LLM_PROVIDER",      "LLM 提供商",      _validate_provider, "deepseek", "deepseek 或 local_openai_compatible"),
+    ("LLM_MODEL",         "LLM 模型名",      None,             "deepseek-v4-pro", "DeepSeek 模型版本"),
+    ("LLM_BASE_URL",      "LLM Base URL",    _validate_url,    "https://api.deepseek.com", "大模型 API 地址（不含 /v1 后缀）"),
+    ("LLM_TIMEOUT",       "LLM 超时(秒)",    _validate_positive_int, "45",    "请求超时秒数"),
+    # DeepSeek 专属
+    ("DEEPSEEK_API_KEY",  "DeepSeek API Key", None,            "",       "从 platform.deepseek.com/api_keys 获取"),
+    ("DEEPSEEK_BASE_URL", "DeepSeek Base URL", _validate_url,  "https://api.deepseek.com", "DeepSeek API 地址"),
+    # MCP Server
+    ("MCP_SERVER_URL",    "MCP Server URL",  _validate_url,    "http://192.168.56.101:8001", "麒麟 MCP 执行器地址"),
+    ("MCP_AUTH_TOKEN",    "MCP 认证 Token",  None,             "",       "MCP Server 的 Bearer Token"),
+    ("MCP_MODE",          "MCP 模式",        _validate_mcp_mode, "mock",  "mock=模拟模式 / real=真实执行器"),
+    # 认证
+    ("API_TOKEN",         "API Token",       None,             "",       "后端 API 认证令牌（空=不启用认证）"),
+    # 兼容开关
+    ("USE_REAL_LLM",      "USE_REAL_LLM",    _validate_bool,   "false",  "旧版开关（已废弃，建议用 LLM_ENABLED）"),
+]
+
+
+def _show_config_items(env: dict[str, str]) -> None:
+    """打印当前所有可配置项的键值"""
+    print(f"\n  {BOLD}当前 LLM/MCP 配置:{RESET}")
+    for key, display, _, default, desc in _CONFIG_ITEMS:
+        val = env.get(key, os.getenv(key, default))
+        print(f"    {CYAN}{key:<20}{RESET} = {YELLOW}{val}{RESET}  ({display})")
+    print()
+
+
+def _pick_config_item() -> int | None:
+    """让用户选择要修改的配置项，返回索引或 None"""
+    print(f"\n  {BOLD}可修改的配置项:{RESET}")
+    for i, (key, display, _, default, desc) in enumerate(_CONFIG_ITEMS, 1):
+        print(f"    {i:2}. {CYAN}{key:<20}{RESET} - {display}")
+        print(f"         {desc}")
+        print(f"         当前值: {YELLOW}{os.getenv(key, default)}{RESET}")
+    print()
+    try:
+        choice = input(f"  请选择要修改的项 (1-{len(_CONFIG_ITEMS)}, 0=跳过): ").strip()
+        idx = int(choice)
+        if idx == 0:
+            return None
+        if 1 <= idx <= len(_CONFIG_ITEMS):
+            return idx - 1
+        print(f"  {CROSS} 无效选择，请输入 1-{len(_CONFIG_ITEMS)} 或 0")
+        return None
+    except (EOFError, KeyboardInterrupt):
+        return None
+    except ValueError:
+        print(f"  {CROSS} 输入无效")
+        return None
+
+
+def check_config_modifications(interactive: bool = True) -> dict:
+    """查看和修改 LLM/MCP 相关配置（使用 os.getenv 与后端 config.py 保持一致）"""
+    global _passed, _failed, _warnings
+    print(f"\n{BOLD}[3/5] LLM & MCP 配置修改{RESET}")
+    print("-" * 50)
+
+    env = _load_env()
+    _show_config_items(env)
+
+    if not interactive:
+        print(f"  (非交互模式，跳过修改)")
+        return {"modified": False, "items": []}
+
+    modified = []
+
+    while True:
+        idx = _pick_config_item()
+        if idx is None:
+            break
+
+        key, display, validator, default, _ = _CONFIG_ITEMS[idx]
+        current = env.get(key, os.getenv(key, default))
+
+        try:
+            new_val = input(f"  {display} [{current}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not new_val:
+            print(f"  {ARROW} 保持原值: {current}")
+            continue
+
+        # 校验
+        if validator is not None and not validator(new_val):
+            print(f"  {CROSS} 输入值 '{new_val}' 格式无效，未修改")
+            _record(False)
+            continue
+
+        env[key] = new_val
+        # 同步更新 os.environ 以便后续当前进程使用
+        os.environ[key] = new_val
+        modified.append({"key": key, "display": display, "old": current, "new": new_val})
+        print(f"  {CHECK} {display}: {current} → {YELLOW}{new_val}{RESET}")
+
+    if modified:
+        _save_env(env)
+        print(f"\n  {CHECK} 已写入 .env，请重启 Backend 服务使配置生效")
+        for m in modified:
+            print(f"    {m['display']}: {m['old']} → {m['new']}")
+        _record(True)
+
+    return {"modified": len(modified) > 0, "items": modified}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. Backend 启动状态检测
 # ═══════════════════════════════════════════════════════════════════
 
 def _check_port_listening(host: str, port: str) -> tuple[bool, str]:
@@ -448,7 +596,7 @@ def _check_systemd_service() -> tuple[bool, str]:
 def check_backend_status() -> dict[str, Any]:
     """检测 Backend 启动状态（使用 os.getenv 与后端 config.py 保持一致）"""
     global _passed, _failed, _warnings
-    print(f"\n{BOLD}[3/4] Backend 启动状态{RESET}")
+    print(f"\n{BOLD}[4/5] Backend 启动状态{RESET}")
     print("-" * 50)
 
     host = os.getenv("APP_HOST", "0.0.0.0")
@@ -564,7 +712,7 @@ def _diagnose_network_failure(target_type: str, url: str, error: str) -> str:
 def check_network() -> dict[str, Any]:
     """检测网络连通性"""
     global _passed, _failed, _warnings
-    print(f"\n{BOLD}[4/4] 网络连通性{RESET}")
+    print(f"\n{BOLD}[5/5] 网络连通性{RESET}")
     print("-" * 50)
 
     env = _load_env()
@@ -678,15 +826,18 @@ def main() -> None:
     if not args.quick:
         check_dependencies()
     else:
-        print(f"\n{BOLD}[1/4] 依赖检测{RESET} (跳过 — quick 模式)")
+        print(f"\n{BOLD}[1/5] 依赖检测{RESET} (跳过 — quick 模式)")
 
     # 2. 监听地址
     check_listen(interactive=not args.non_interactive)
 
-    # 3. Backend 状态
+    # 3. LLM / MCP 配置修改
+    check_config_modifications(interactive=not args.non_interactive)
+
+    # 4. Backend 状态
     check_backend_status()
 
-    # 4. 网络连通性
+    # 5. 网络连通性
     check_network()
 
     print_summary()

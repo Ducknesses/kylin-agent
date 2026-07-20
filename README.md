@@ -445,7 +445,7 @@ sudo ./deploy/mcp-server/uninstall.sh
 
 ## 诊断工具
 
-Backend 提供了独立 CLI 诊断脚本 `backend/diagnose.py`，可离线检测后端环境，**不依赖后端 API 服务**。
+Backend 提供了独立 CLI 诊断脚本 `backend/diagnose.py`，可离线检测后端环境，**不依赖后端 API 服务**。交互模式下支持修改监听地址和 LLM/MCP 配置，修改后自动写入 `.env` 文件。
 
 ### 功能
 
@@ -453,6 +453,7 @@ Backend 提供了独立 CLI 诊断脚本 `backend/diagnose.py`，可离线检测
 |--------|------|
 | 依赖检测 | 解析 `requirements.txt`，检查每个包是否已安装，缺失项给出安装建议 |
 | 监听地址 | 查看当前 `APP_HOST:APP_PORT` 配置，支持交互式修改 `.env` |
+| **LLM/MCP 配置修改** | **查看并修改 DeepSeek API Key、Base URL、LLM 开关、MCP 模式、MCP Server 地址、认证 Token 等 12 项配置** |
 | 启动状态 | 端口监听检测、`/health` 端点探测、Redis 连通性、SQLite 可读写性、systemd 服务状态 |
 | 网络连通性 | MCP Server、DeepSeek API、前端 Nginx 的 HTTP 可达性检测，含延迟测量和故障建议 |
 
@@ -461,33 +462,109 @@ Backend 提供了独立 CLI 诊断脚本 `backend/diagnose.py`，可离线检测
 ```bash
 cd backend
 
-# 完整检测（含依赖检测 + 交互式修改监听地址）
+# 完整检测（含依赖检测 + 交互式修改监听地址 + LLM/MCP 配置修改）
 python diagnose.py
 
 # 快速检测（跳过依赖检测）
 python diagnose.py --quick
 
-# 非交互模式（不提示修改监听地址）
+# 非交互模式（仅检测，不提示任何修改）
 python diagnose.py --non-interactive
 
 # 快速 + 非交互（适合 CI/脚本调用）
 python diagnose.py --quick --non-interactive
 ```
 
+### 交互式配置修改
+
+在交互模式下（不带 `--non-interactive`），诊断工具提供两阶段的配置修改：
+
+**阶段 1：监听地址修改**（`[2/5]`）—— 修改 `APP_HOST` 和 `APP_PORT`，修改后写入 `.env`。
+
+**阶段 2：LLM & MCP 配置修改**（`[3/5]`）—— 先展示当前全部 12 项配置，然后逐项选择修改：
+
+```
+[3/5] LLM & MCP 配置修改
+--------------------------------------------------
+
+  当前 LLM/MCP 配置:
+    LLM_ENABLED          = true  (启用 LLM)
+    LLM_PROVIDER         = deepseek  (LLM 提供商)
+    LLM_MODEL            = deepseek-v4-pro  (LLM 模型名)
+    LLM_BASE_URL         = https://api.deepseek.com  (LLM Base URL)
+    LLM_TIMEOUT          = 45  (LLM 超时(秒))
+    DEEPSEEK_API_KEY     = sk-xxxx  (DeepSeek API Key)
+    DEEPSEEK_BASE_URL    = https://api.deepseek.com  (DeepSeek Base URL)
+    MCP_SERVER_URL       = http://192.168.1.37:8001  (MCP Server URL)
+    MCP_AUTH_TOKEN       = 123456789  (MCP 认证 Token)
+    MCP_MODE             = real  (MCP 模式)
+    API_TOKEN            = 123456789  (API Token)
+    USE_REAL_LLM         = false  (USE_REAL_LLM)
+
+  可修改的配置项:
+     1. LLM_ENABLED          - 启用 LLM
+         true=走真实大模型链路 / false=走 Mock 编排器
+         当前值: true
+     2. LLM_PROVIDER         - LLM 提供商
+         deepseek 或 local_openai_compatible
+         当前值: deepseek
+    ...
+    12. USE_REAL_LLM         - USE_REAL_LLM
+         旧版开关（已废弃，建议用 LLM_ENABLED）
+         当前值: false
+
+  请选择要修改的项 (1-12, 0=跳过):
+```
+
+选择编号后输入新值（带格式校验），可循环修改多项。输入 `0` 结束修改，自动写入 `.env` 并提示重启 Backend。
+
+### 作为配置工具的典型场景
+
+```bash
+# 场景1：首次部署后配置 MCP 连接
+cd /opt/kylin-agent/backend
+python3 diagnose.py
+# 在 [2/5] 确认监听地址 → 跳过
+# 在 [3/5] 选择 8 修改 MCP_SERVER_URL，选择 9 修改 MCP_AUTH_TOKEN，
+#         选择 10 将 MCP_MODE 从 mock 改为 real
+# 输入 0 保存 → sudo systemctl restart kylin-agent
+
+# 场景2：切换 LLM 提供商
+python3 diagnose.py --quick
+# 在 [3/5] 选择 2 将 LLM_PROVIDER 从 deepseek 改为 local_openai_compatible
+# 修改完毕后重启 Backend
+
+# 场景3：更换 API Key
+python3 diagnose.py --quick
+# 在 [3/5] 选择 6 修改 DEEPSEEK_API_KEY
+# 修改完毕后重启 Backend
+```
+
+> **提示：** 诊断工具使用 `dotenv` 加载 `.env` 并写入，与后端 `config.py` 读取机制完全一致，不会破坏 `.env` 文件的注释和格式。
+
 ### 输出示例
 
 ```
   Kylin Agent Backend 诊断工具
 
-[1/4] 依赖检测
+[1/5] 依赖检测
   ✓ fastapi (0.110.0)
   ✓ uvicorn (0.29.0)
   ...
 
-[2/4] 监听地址
-  当前配置: 0.0.0.0:8000
+[2/5] 监听地址
+  当前配置: 127.0.0.1:8000
 
-[3/4] Backend 启动状态
+[3/5] LLM & MCP 配置修改
+  当前 LLM/MCP 配置:
+    LLM_ENABLED          = true
+    LLM_PROVIDER         = deepseek
+    DEEPSEEK_API_KEY     = sk-xxxx
+    MCP_SERVER_URL       = http://192.168.1.37:8001
+    MCP_MODE             = real
+    ...
+
+[4/5] Backend 启动状态
   ✓ 端口监听 — 端口 8000 正在监听
   ✓ Health API — /health 返回 200
   ✗ Redis — Redis 不可达 (localhost:6379)
@@ -496,7 +573,7 @@ python diagnose.py --quick --non-interactive
   ✗ Systemd 服务 — systemd 服务状态: inactive
     → 建议: systemctl start kylin-agent
 
-[4/4] 网络连通性
+[5/5] 网络连通性
   ✗ MCP Server (http://192.168.1.37:8001) — HTTP 502 Bad Gateway
   ✓ DeepSeek API (https://api.deepseek.com) — 130ms
   ✓ 前端 (http://127.0.0.1:80) — 6ms
@@ -507,11 +584,16 @@ python diagnose.py --quick --non-interactive
 
 ### 部署后使用
 
-生产环境部署 Backend 后，可直接使用诊断脚本排查问题：
+生产环境部署 Backend 后，可直接使用诊断脚本排查问题或修改配置：
 
 ```bash
 cd /opt/kylin-agent/backend
-python diagnose.py --non-interactive
+
+# 仅检测（不改配置）
+python3 diagnose.py --non-interactive
+
+# 交互式修改配置（推荐）
+python3 diagnose.py
 ```
 
 ## 常见问题与解决方法
