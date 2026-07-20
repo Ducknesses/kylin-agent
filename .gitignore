@@ -68,3 +68,6 @@ deploy/nginx/certs/*.csr
 # Reasonix
 .reasonix/
 reasonix.toml
+
+##docs
+!docs/*
