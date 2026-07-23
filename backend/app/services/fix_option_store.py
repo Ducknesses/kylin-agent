@@ -83,6 +83,7 @@ class StoredFixOption:
     expires_at: datetime
     executed_at: datetime | None = None
     pre_snapshot: dict[str, Any] | None = None  # 操作前状态快照 {tool, params}
+    result_summary: str | None = None  # 执行结果摘要（持久化，刷新后可恢复）
 
 
 # ── 序列化辅助 ────────────────────────────────────────────────────────
@@ -92,12 +93,13 @@ def _stored_to_dict(s: StoredFixOption) -> dict[str, Any]:
     return {
         "session_id": s.session_id,
         "trace_id": s.trace_id,
-        "option": s.option.model_dump(mode="json"),
+        "option": s.option.dict(),
         "status": s.status,
         "created_at": s.created_at.isoformat(),
         "expires_at": s.expires_at.isoformat(),
         "executed_at": s.executed_at.isoformat() if s.executed_at else None,
         "pre_snapshot": s.pre_snapshot,
+        "result_summary": s.result_summary,
     }
 
 
@@ -112,6 +114,7 @@ def _dict_to_stored(d: dict[str, Any]) -> StoredFixOption:
         expires_at=datetime.fromisoformat(d["expires_at"]),
         executed_at=datetime.fromisoformat(d["executed_at"]) if d.get("executed_at") else None,
         pre_snapshot=d.get("pre_snapshot"),
+        result_summary=d.get("result_summary"),
     )
 
 
@@ -199,7 +202,7 @@ class FixOptionStore:
                     )
 
             # 深拷贝防止外部修改
-            copied = opt.model_copy(deep=True)
+            copied = opt.copy(deep=True)
             stored = StoredFixOption(
                 session_id=session_id,
                 trace_id=trace_id,
@@ -390,6 +393,37 @@ class FixOptionStore:
             if data.get("status") != "executing":
                 return None
             data["pre_snapshot"] = snapshot
+            return data
+
+        result = self._storage.cas_update(
+            redis_key,
+            expected_status=None,
+            update_fn=_update,
+            ttl=ttl,
+        )
+        return result is not None
+
+    # ── 结果摘要持久化 ──────────────────────────────────────────
+
+    def set_result_summary(
+        self,
+        session_id: str,
+        option_id: str,
+        summary: str,
+    ) -> bool:
+        """将执行结果摘要写入已执行的选项（executed / failed / rolled_back 均可写）
+
+        通过 Lua CAS 原子写入，仅允许在终态状态下设置。
+        """
+        redis_key = _build_key(session_id, option_id)
+        ttl = self._storage.ttl(redis_key)
+        if ttl <= 0:
+            ttl = self._ttl
+
+        def _update(data: dict[str, Any]) -> dict[str, Any] | None:
+            if data.get("status") not in ("executed", "failed", "rolled_back"):
+                return None
+            data["result_summary"] = summary
             return data
 
         result = self._storage.cas_update(

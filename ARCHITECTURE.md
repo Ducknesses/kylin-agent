@@ -81,7 +81,6 @@ backend/
 | 文件 | 核心类/函数 | 职责 |
 |---|---|---|
 | `client.py` | `MCPClient` — `call_tool()` / `get_system_metrics()` / `list_tools()` | HTTP JSON-RPC 客户端。通过 Bearer Token 认证向麒麟 V11 MCP Server 发 `tools/call` 请求，含超时/错误处理 |
-| `executor.py` | `Executor` — `execute()` | 命令执行调度器。工具白名单校验 + RBAC 权限检查后委托给 `MCPClient`，拦截未授权工具调用 |
 | `tools.py` | `get_tool_names()` / `get_tool_schema()` | MCP 工具目录。定义 6 个工具（sys_info/service_mgr/log_reader/net_monitor/cmd_exec/file_guard）的 JSON Schema 参数模型 |
 
 ---
@@ -91,7 +90,7 @@ backend/
 | 文件 | 核心类/函数 | 职责 |
 |---|---|---|
 | `security.py` | `validate_token()` / 依赖注入 | API Token 认证。Bearer Token 校验，环境变量 `API_TOKEN` 为空时跳过认证（向后兼容） |
-| `rbac.py` | `check_command_permission()` / `load/save_config_from_db()` | 角色权限控制。基于白名单的 `agent-read`/`agent-op`/`agent-admin` 三级权限校验 + SQLite 持久化配置 |
+| `security_rules.py` | `CMD_EXEC_RULES` / `EXTRA_HIGH_RISK_PATTERNS` 等 | 安全规则数据唯一来源。用户输入检测模式、审计绕过关键词、cmd_exec 白名单、敏感路径，以及供配置接口使用的旧版 RBAC 默认白名单 |
 | `prompt_guard.py` | `analyze_prompt()` / `DANGEROUS_PATTERNS` | Prompt 输入防护。检测注入攻击、危险模式（`rm -rf`、管道执行等），返回风险等级 `high`/`medium`/`low` |
 | `redis_client.py` | `get_redis()` / `cache_*()` | Redis 客户端封装。`aioredis` 连接管理，提供 session/配置缓存工具函数 |
 
@@ -122,10 +121,10 @@ backend/
     → [high] 直接拒绝 → risk_alert 返回前端
     → [medium] 发送 risk_alert → 等待 confirm → 继续
     → [low] 直接放行
-  → RBAC 检查 (rbac.py)
+  → SafetyGuard 安全裁决 (services/safety_guard.py + core/security_rules.py)
   → LLM Router 意图识别 + 工具分发 (llm/router.py)
     → DeepSeek 流式调用 (llm/deepseek.py)
-    → MCP Executor 权限校验 (mcp/executor.py)
+    → AgentHarness 统一工具调用 + 安全裁决 (services/agent_harness.py)
     → MCP Client JSON-RPC 调用麒麟 V11 (mcp/client.py)
   → 流式结果返回前端 (chunk → tool_call → done)
   → 审计日志写入 (audit/logger.py → audit/models.py → SQLite)
@@ -149,12 +148,11 @@ backend/
 | 10 | LLM | `app/llm/deepseek.py` | DeepSeek API 流式调用客户端 |
 | 11 | LLM | `app/llm/router.py` | LLM Router — 意图识别 + 工具分发 |
 | 12 | MCP | `app/mcp/client.py` | MCP JSON-RPC HTTP 客户端 |
-| 13 | MCP | `app/mcp/executor.py` | 执行调度器 — 白名单 + RBAC 拦截 |
-| 14 | MCP | `app/mcp/tools.py` | MCP 工具目录 & JSON Schema 定义 |
-| 15 | 基础设施 | `app/core/security.py` | API Token Bearer 认证 |
-| 16 | 基础设施 | `app/core/rbac.py` | 三级角色权限控制 + 配置持久化 |
-| 17 | 基础设施 | `app/core/prompt_guard.py` | Prompt 注入检测 & 危险模式拦截 |
-| 18 | 基础设施 | `app/core/redis_client.py` | Redis 连接管理 & 缓存工具 |
-| 19 | 审计 | `app/audit/models.py` | SQLAlchemy ORM 审计记录模型 + DB 初始化 |
-| 20 | 审计 | `app/audit/logger.py` | 审计日志写入，trace_id 生成 |
+| 13 | MCP | `app/mcp/tools.py` | MCP 工具目录 & JSON Schema 定义 |
+| 14 | 基础设施 | `app/core/security.py` | API Token Bearer 认证 |
+| 15 | 基础设施 | `app/core/security_rules.py` | 安全规则数据唯一来源 + 旧版 RBAC 默认白名单 |
+| 16 | 基础设施 | `app/core/prompt_guard.py` | Prompt 注入检测 & 危险模式拦截 |
+| 17 | 基础设施 | `app/core/redis_client.py` | Redis 连接管理 & 缓存工具 |
+| 18 | 审计 | `app/audit/models.py` | SQLAlchemy ORM 审计记录模型 + DB 初始化 |
+| 19 | 审计 | `app/audit/logger.py` | 审计日志写入，trace_id 生成 |
 | 21 | 数据模型 | `app/schemas/models.py` | Pydantic 请求/响应模型，前后端契约 |

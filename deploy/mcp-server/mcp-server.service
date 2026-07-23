@@ -25,7 +25,9 @@ Environment=METRICS_DB_PATH=/opt/mcp-server/metrics.db
 # API_TOKEN 通过 python-dotenv 从 /opt/mcp-server/.env 加载
 
 # 安全加固（兼容 systemd v249+）
-NoNewPrivileges=yes
+# 注意：service_mgr / sandbox 通过 sudo -n 提权执行 systemctl 变更操作，
+# sudo 依赖 setuid 提权，NoNewPrivileges=yes 会导致 sudo 无法工作，此处必须为 no
+NoNewPrivileges=no
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes

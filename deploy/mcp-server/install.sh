@@ -39,10 +39,6 @@ mkdir -p "$INSTALL_DIR"
 # ---- 2. 复制文件 ----
 echo "[2/7] 复制项目文件..."
 cp -r "$PROJECT_ROOT/mcp-server"/* "$INSTALL_DIR/"
-# 确保 deploy 目录被正确复制
-if [ -d "$PROJECT_ROOT/mcp-server/deploy" ]; then
-    cp -r "$PROJECT_ROOT/mcp-server/deploy" "$INSTALL_DIR/"
-fi
 # 显式复制隐藏文件
 if [ -f "$PROJECT_ROOT/mcp-server/.env.example" ]; then
     cp "$PROJECT_ROOT/mcp-server/.env.example" "$INSTALL_DIR/"
@@ -137,6 +133,14 @@ for user in agent-read agent-op; do
     fi
 done
 
+# 允许 agent-read 读取 systemd journal（journalctl 需要 systemd-journal/adm/wheel 组权限）
+if getent group systemd-journal >/dev/null 2>&1; then
+    usermod -a -G systemd-journal agent-read
+    echo "  agent-read 已加入 systemd-journal 组"
+else
+    echo "  [WARN] systemd-journal 组不存在，跳过加入；如使用 adm 组，请手动加入"
+fi
+
 # 修复文件所有权（放在用户创建后面）
 echo "  修正 $INSTALL_DIR 文件所有权为 agent-read:agent-read ..."
 chown -R agent-read:agent-read "$INSTALL_DIR"
@@ -182,12 +186,12 @@ echo "  ║  📋 下一步                                   ║"
 echo "  ║                                              ║"
 echo "  ║  如需修改配置:                               ║"
 echo "  ║    cd $INSTALL_DIR                           ║"
-echo "  ║    sudo bash deploy/mcp-server/wizard.sh     ║"
+echo "  ║    vim .env                                  ║"
 echo "  ║                                              ║"
-echo "  ║  向导可帮助您：                              ║"
-echo "  ║    • 修改监听地址并配置防火墙                ║"
-echo "  ║    • 生成/修改认证 Token 并测试连接          ║"
-echo "  ║    • 查看当前配置与状态                      ║"
+echo "  ║  配置项目说明:                               ║"
+echo "  ║    • MCP_SERVER_HOST — 监听地址              ║"
+echo "  ║    • MCP_AUTH_TOKEN — 认证 Token             ║"
+echo "  ║    • CGROUP_ENABLED — 资源隔离开关           ║"
 echo "  ║                                              ║"
 echo "  ║  cgroup 资源隔离 (可选，推荐开启):           ║"
 echo "  ║    编辑 $INSTALL_DIR/.env                    ║"

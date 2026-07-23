@@ -1,42 +1,18 @@
-"""安全护栏核心：输入过滤、风险分级 + Token 认证"""
+"""安全护栏核心：输入过滤、风险分级 + Token 认证
+
+规则数据（高危模式 / 中危关键词）集中在 app.core.security_rules，
+本模块只保留判定逻辑（risk_classify）与 Token 认证（TokenStore）。
+"""
 import logging
-import re
 import hashlib
 import threading
 from typing import Dict, Optional
 
 from config import settings
 from app.core.prompt_guard import detect_injection
+from app.core.security_rules import HIGH_RISK_COMPILED, MEDIUM_RISK_KEYWORDS
 
 logger = logging.getLogger(__name__)
-
-# 高危命令黑名单（正则）
-HIGH_RISK_PATTERNS = [
-    r"rm\s+-rf\s+/.*",
-    r"mkfs\.",
-    r"dd\s+if=/dev/zero",
-    r">\s*/etc/passwd",
-    r">\s*/etc/shadow",
-    r":\(\)\s*\{\s*:\|:\&\s*\};.*",  # fork bomb
-    r"chmod\s+-R\s+777\s+/.*",
-    r"mv\s+/.*\s+/dev/null",
-]
-
-# 中危关键词
-MEDIUM_RISK_KEYWORDS = [
-    "systemctl stop",
-    "systemctl disable",
-    "iptables -F",
-    "useradd",
-    "userdel",
-    "passwd",
-    "chmod 777",
-    "chown -R",
-    "kill -9",
-]
-
-# 编译正则，提升性能
-_HIGH_RISK_COMPILED = [re.compile(p, re.IGNORECASE) for p in HIGH_RISK_PATTERNS]
 
 
 def _check_length(text: str) -> Optional[Dict]:
@@ -52,7 +28,7 @@ def _check_length(text: str) -> Optional[Dict]:
 
 def _check_blacklist(text: str) -> Optional[Dict]:
     """正则黑名单匹配"""
-    for pattern in _HIGH_RISK_COMPILED:
+    for pattern in HIGH_RISK_COMPILED:
         if pattern.search(text):
             return {
                 "level": "high",

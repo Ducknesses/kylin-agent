@@ -156,7 +156,24 @@ class DeepSeekProvider(BaseProvider):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                content = data["choices"][0]["message"]["content"]
+                choice = data["choices"][0]
+                msg = choice.get("message", {})
+                finish_reason = choice.get("finish_reason", "unknown")
+                # reasoning 模型（如 DeepSeek-R1、Kimi k1 等）：
+                # content 可能为空，reasoning_content 有推理过程
+                content = msg.get("content") or ""
+                reasoning = msg.get("reasoning_content") or ""
+                # 记录完整响应用于排查
+                logger.info(
+                    "LLM response detail: provider=%s model=%s finish_reason=%s "
+                    "content=%r reasoning_len=%d",
+                    "deepseek", model, finish_reason, content, len(reasoning)
+                )
+                if not content and reasoning:
+                    logger.warning(
+                        "LLM 返回空 content 但有 reasoning_content (%d chars)，"
+                        "可能是 reasoning 模型行为", len(reasoning)
+                    )
                 return LLMResponse(
                     ok=True,
                     content=content,

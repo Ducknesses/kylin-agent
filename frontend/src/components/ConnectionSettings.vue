@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     title="连接设置"
-    width="520px"
+    width="560px"
     :close-on-click-modal="false"
     destroy-on-close
   >
@@ -35,44 +35,58 @@
       <!-- 连接地址 -->
       <el-tab-pane label="连接地址" name="connection">
         <div class="section-desc">
-          配置后端 WebSocket 和 HTTP API 的连接地址。修改后立即生效，并保存到本地存储。
+          配置后端 WebSocket 和 HTTP API 的连接地址。修改后保存并自动重连。
         </div>
-        <el-form label-width="140px" size="small">
+
+        <el-form label-width="120px" size="small">
+          <!-- WebSocket 地址 -->
           <el-form-item label="WebSocket 地址">
-            <el-input
-              v-model="localWsUrl"
-              placeholder="ws://localhost:8000"
-            />
+            <div class="url-fields">
+              <el-select v-model="wsProtocol" class="field-protocol">
+                <el-option label="ws://" value="ws://" />
+                <el-option label="wss://" value="wss://" />
+              </el-select>
+              <el-input v-model="wsHost" placeholder="主机地址" class="field-host" />
+              <span class="field-sep">:</span>
+              <el-input v-model="wsPort" placeholder="端口" class="field-port" />
+            </div>
+            <div class="url-preview">
+              预览：<code>{{ wsPreview }}</code>
+            </div>
             <div class="protocol-hint">
-              <el-tag v-if="localWsUrl.startsWith('wss://')" type="warning" size="small">
+              <el-tag v-if="wsProtocol === 'wss://'" type="warning" size="small">
                 wss:// 需要后端已启用 SSL/TLS（如经过 Nginx HTTPS 代理）
               </el-tag>
-              <el-tag v-else-if="localWsUrl.startsWith('ws://') || !localWsUrl" type="success" size="small">
+              <el-tag v-else type="success" size="small">
                 ws:// 适用于后端直连（无 SSL），生产环境建议通过 Nginx 代理使用 wss://
               </el-tag>
-              <el-tag v-else type="danger" size="small">地址格式不正确，应以 ws:// 或 wss:// 开头</el-tag>
             </div>
           </el-form-item>
+
+          <!-- HTTP API 地址 -->
           <el-form-item label="HTTP API 地址">
-            <el-input
-              v-model="localApiUrl"
-              placeholder="http://localhost:8000"
-            />
+            <div class="url-fields">
+              <el-select v-model="apiProtocol" class="field-protocol">
+                <el-option label="http://" value="http://" />
+                <el-option label="https://" value="https://" />
+              </el-select>
+              <el-input v-model="apiHost" placeholder="主机地址" class="field-host" />
+              <span class="field-sep">:</span>
+              <el-input v-model="apiPort" placeholder="端口" class="field-port" />
+            </div>
+            <div class="url-preview">
+              预览：<code>{{ apiPreview }}</code>
+            </div>
             <div class="protocol-hint">
-              <el-tag v-if="localApiUrl.startsWith('https://')" type="warning" size="small">
+              <el-tag v-if="apiProtocol === 'https://'" type="warning" size="small">
                 https:// 需要后端已启用 SSL/TLS（如经过 Nginx HTTPS 代理）
               </el-tag>
-              <el-tag v-else-if="localApiUrl.startsWith('http://') || !localApiUrl" type="success" size="small">
+              <el-tag v-else type="success" size="small">
                 http:// 适用于后端直连（无 SSL）
               </el-tag>
-              <el-tag v-else type="danger" size="small">地址格式不正确，应以 http:// 或 https:// 开头</el-tag>
             </div>
           </el-form-item>
-          <el-form-item>
-            <el-button size="small" type="warning" plain @click="resetDefaults">
-              重置为默认值
-            </el-button>
-          </el-form-item>
+
         </el-form>
       </el-tab-pane>
     </el-tabs>
@@ -88,9 +102,9 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWsStore, getDefaultWsUrl, getDefaultApiUrl } from '@/stores/wsStore'
+import { useWsStore, getDefaultWsUrl, getDefaultApiUrl, parseUrl, buildUrl } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
 
 const props = defineProps({
@@ -104,16 +118,39 @@ const activeTab = ref('token')
 
 const visible = ref(props.modelValue)
 const localToken = ref(wsStore.token)
-const localWsUrl = ref(wsStore.wsBaseUrl)
-const localApiUrl = ref(wsStore.apiBaseUrl)
+
+// WebSocket 拆分字段
+const wsProtocol = ref('ws://')
+const wsHost = ref('localhost')
+const wsPort = ref('8000')
+
+// HTTP API 拆分字段
+const apiProtocol = ref('http://')
+const apiHost = ref('localhost')
+const apiPort = ref('8000')
+
+/** 从 store URL 解析出各字段 */
+function syncFromStore() {
+  const wsParts = parseUrl(wsStore.wsBaseUrl)
+  wsProtocol.value = wsParts.protocol
+  wsHost.value = wsParts.host
+  wsPort.value = wsParts.port
+
+  const apiParts = parseUrl(wsStore.apiBaseUrl)
+  apiProtocol.value = apiParts.protocol
+  apiHost.value = apiParts.host
+  apiPort.value = apiParts.port
+}
+
+// 实时预览
+const wsPreview = computed(() => buildUrl({ protocol: wsProtocol.value, host: wsHost.value, port: wsPort.value }))
+const apiPreview = computed(() => buildUrl({ protocol: apiProtocol.value, host: apiHost.value, port: apiPort.value }))
 
 watch(() => props.modelValue, (val) => {
   visible.value = val
   if (val) {
-    // 打开时同步最新值
     localToken.value = wsStore.token
-    localWsUrl.value = wsStore.wsBaseUrl
-    localApiUrl.value = wsStore.apiBaseUrl
+    syncFromStore()
   }
 })
 
@@ -122,18 +159,15 @@ watch(visible, (val) => {
 })
 
 function handleSave() {
-  // 保存到 store（会自动同步 localStorage）
   wsStore.setToken(localToken.value.trim())
-  wsStore.setWsBaseUrl(localWsUrl.value.trim() || getDefaultWsUrl())
-  wsStore.setApiBaseUrl(localApiUrl.value.trim() || getDefaultApiUrl())
+  wsStore.setWsBaseUrl(wsPreview.value || getDefaultWsUrl())
+  wsStore.setApiBaseUrl(apiPreview.value || getDefaultApiUrl())
 
   ElMessage.success('配置已保存')
 
-  // 重新连接 WebSocket
   const sessionId = wsStore.activeSessionId
   if (sessionId) {
     wsClient.close(true)
-    // 延迟重连，确保旧连接完全关闭
     setTimeout(() => {
       wsClient.connect(sessionId)
     }, 200)
@@ -148,12 +182,20 @@ function handleCancel() {
 
 function handleClearAll() {
   localToken.value = ''
-  localWsUrl.value = getDefaultWsUrl()
-  localApiUrl.value = getDefaultApiUrl()
+  // 重置拆分字段
+  const wsDefault = parseUrl(getDefaultWsUrl())
+  wsProtocol.value = wsDefault.protocol
+  wsHost.value = wsDefault.host
+  wsPort.value = wsDefault.port
+
+  const apiDefault = parseUrl(getDefaultApiUrl())
+  apiProtocol.value = apiDefault.protocol
+  apiHost.value = apiDefault.host
+  apiPort.value = apiDefault.port
+
   wsStore.resetToDefaults()
   ElMessage.success('已清除所有配置，恢复默认值')
 
-  // 重新连接
   const sessionId = wsStore.activeSessionId
   if (sessionId) {
     wsClient.close(true)
@@ -165,10 +207,6 @@ function handleClearAll() {
   visible.value = false
 }
 
-function resetDefaults() {
-  localWsUrl.value = getDefaultWsUrl()
-  localApiUrl.value = getDefaultApiUrl()
-}
 </script>
 
 <style scoped>
@@ -186,6 +224,42 @@ function resetDefaults() {
 .hint {
   font-size: 12px;
   color: #9ca3af;
+}
+.url-fields {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+.field-protocol {
+  width: 100px;
+  flex-shrink: 0;
+}
+.field-host {
+  flex: 1;
+  min-width: 0;
+}
+.field-sep {
+  font-size: 14px;
+  color: #9ca3af;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.field-port {
+  width: 80px;
+  flex-shrink: 0;
+}
+.url-preview {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+.url-preview code {
+  color: #2563eb;
+  background: #eff6ff;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: monospace;
 }
 .protocol-hint {
   margin-top: 6px;

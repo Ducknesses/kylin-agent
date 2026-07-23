@@ -136,7 +136,12 @@ class SQLiteMessageRepository(MessageRepository):
             return None
 
     async def delete_session(self, session_id: str) -> bool:
-        """删除会话及其所有关联消息（先删消息再删会话，保证外键约束）"""
+        """删除会话及其所有关联消息（先删消息再删会话，保证外键约束）
+
+        级联清理：
+        - chat_messages（已通过 SQLAlchemy relationship 关联）
+        - audit_chain（通过 session_id 字符串关联，无 FK 约束）
+        """
         await self._ensure_tables()
         try:
             async with self._get_session() as session:
@@ -149,12 +154,42 @@ class SQLiteMessageRepository(MessageRepository):
                 await session.execute(
                     delete(ChatMessage).where(ChatMessage.session_id == session_id)
                 )
+                # 级联清理审计记录（audit_chain.session_id 无外键约束，需手动清理）
+                from app.models.audit import AuditChain
+                await session.execute(
+                    delete(AuditChain).where(AuditChain.session_id == session_id)
+                )
                 # 删除会话
                 await session.delete(existing)
             logger.info(f"[ChatHistory] 会话已删除: {session_id}")
             return True
         except Exception as e:
             logger.warning(f"[ChatHistory] 删除会话失败: {e}")
+            return False
+
+    async def update_session_title(self, session_id: str, title: str) -> bool:
+        """更新会话标题，仅当当前标题为默认标题（'新会话'开头）时生效
+
+        幂等保证：如果标题已被修改为非默认值，此操作不会覆盖。
+        """
+        await self._ensure_tables()
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            async with self._get_session() as session:
+                result = await session.execute(
+                    update(ChatSession)
+                    .where(
+                        ChatSession.id == session_id,
+                        ChatSession.title.like("新会话%"),
+                    )
+                    .values(title=title, updated_at=now)
+                )
+                updated = result.rowcount > 0
+                if updated:
+                    logger.info(f"[ChatHistory] 会话标题已更新: {session_id} -> {title}")
+                return updated
+        except Exception as e:
+            logger.warning(f"[ChatHistory] 更新标题失败 (已忽略): {e}")
             return False
 
     # ── 消息 ──────────────────────────────────────────────────────

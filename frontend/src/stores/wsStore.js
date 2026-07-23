@@ -29,6 +29,27 @@ export function getDefaultApiUrl() {
 const DEFAULT_WS_URL = getDefaultWsUrl()
 const DEFAULT_API_URL = getDefaultApiUrl()
 
+/** 解析完整 URL 为 { protocol, host, port } 三部分 */
+export function parseUrl(url) {
+  if (!url) return { protocol: 'http://', host: 'localhost', port: '8000' }
+  const match = url.match(/^(ws|wss|http|https):\/\/([^:/]+)(?::(\d+))?/)
+  if (!match) {
+    // 格式错误时给默认值
+    return { protocol: 'http://', host: 'localhost', port: '8000' }
+  }
+  const [, proto, host, port] = match
+  const defaultPort = (proto === 'ws' || proto === 'http') ? '8000' : '443'
+  return { protocol: `${proto}://`, host, port: port || defaultPort }
+}
+
+/** 将 { protocol, host, port } 拼接为完整 URL */
+export function buildUrl({ protocol, host, port }) {
+  const proto = protocol.replace('://', '') || 'http'
+  const h = host || 'localhost'
+  const p = port || ((proto === 'ws' || proto === 'http') ? '8000' : '443')
+  return `${proto}://${h}:${p}`
+}
+
 export const useWsStore = defineStore('ws', () => {
   // 连接状态
   const isConnected = ref(false)
@@ -46,6 +67,10 @@ export const useWsStore = defineStore('ws', () => {
   const authError = ref(false)
   // 是否因连接被拒/超时导致断连
   const connectionRefused = ref(false)
+  // 当前是否正在处理后端任务（显示转圈效果）
+  const processing = ref(false)
+  // 当前处理状态文案
+  const processingText = ref('')
 
   function setConnected(val) {
     isConnected.value = val
@@ -108,6 +133,8 @@ export const useWsStore = defineStore('ws', () => {
     apiBaseUrl,
     authError,
     connectionRefused,
+    processing,
+    processingText,
     setConnected,
     setReconnectCount,
     setActiveSessionId,

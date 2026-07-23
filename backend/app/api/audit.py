@@ -71,4 +71,4 @@ async def get_audit_logs(
         )
         for r in records
     ]
-    return {"records": [rec.model_dump() for rec in out_records], "total": total}
+    return {"records": [rec.dict() for rec in out_records], "total": total}

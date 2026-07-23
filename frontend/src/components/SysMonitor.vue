@@ -332,10 +332,12 @@ function onRangeChange() {
   if (timeRange.value === '1h') ms = 60 * 60 * 1000
   const from = now - ms
 
-  // 检查本地缓存是否覆盖所选时间范围
-  const displayData = getDisplayMetrics()
-  if (displayData.length < 5) {
-    // 数据不足，拉取历史
+  // 检查本地缓存是否覆盖到窗口起点（留 15s 容差，对齐 MCP 采集间隔）：
+  // 缓存最早点晚于 from 说明更早的历史未加载，需要拉取补齐；
+  // 不能只看窗口内有没有点——挂载时只加载了最近 5 分钟历史，
+  // 切到 30m/1h 时窗口内有点但更早的数据缺失
+  const earliest = rawMetrics.length ? rawMetrics[0].timestamp.getTime() : Infinity
+  if (earliest > from + 15000) {
     fetchHistory(from, now)
   } else {
     refreshAll()

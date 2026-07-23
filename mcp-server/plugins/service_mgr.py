@@ -1,5 +1,6 @@
 """服务管理插件：systemctl status/start/stop/restart"""
 import logging
+import os
 import subprocess
 
 from config import config
@@ -8,6 +9,9 @@ logger = logging.getLogger("mcp.service_mgr")
 
 # 允许的操作
 ALLOWED_ACTIONS = ["status", "start", "stop", "restart", "is-active", "is-enabled"]
+
+# 需要 root 权限的变更操作（status/is-active/is-enabled 只读，无需提权）
+PRIVILEGED_ACTIONS = {"start", "stop", "restart", "reload"}
 
 
 def _validate_service(service: str) -> tuple:
@@ -31,8 +35,18 @@ def _validate_service(service: str) -> tuple:
 
 
 def _execute_systemctl(action: str, service: str) -> dict:
-    """执行 systemctl 命令"""
+    """执行 systemctl 命令
+
+    变更操作（start/stop/restart/reload）需要 root 权限：
+    - 当前进程为 root 时直接执行；
+    - 非 root（如 systemd 以 agent-read 运行）时通过 sudo -n 提权，
+      依赖 /etc/sudoers.d/agent-op 白名单；-n 为非交互模式，
+      未配置 sudoers 时会立即失败，而不是挂起等待密码输入。
+    """
     cmd = ["systemctl", action, service]
+    current_uid = os.geteuid() if hasattr(os, "geteuid") else 0
+    if action in PRIVILEGED_ACTIONS and current_uid != 0:
+        cmd = ["sudo", "-n"] + cmd
 
     try:
         result = subprocess.run(

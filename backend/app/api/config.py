@@ -3,6 +3,8 @@
 正式接口（最新前后端 API 统一规范 v1.0）：
   GET  /api/config/whitelist  → {commands, blocked_patterns}（需要 ADMIN 权限）
   PUT  /api/config/whitelist  → {message, saved_commands, saved_blocked_patterns}（需要 ADMIN 权限）
+
+默认白名单数据来自 app.core.security_rules（旧版 RBAC 常量）。
 """
 import json
 import logging
@@ -11,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.audit.models import load_config, save_config
 from app.core.auth import AuthContext, AuthLevel
-from app.core.rbac import COMMAND_WHITELIST, DANGEROUS_PATTERNS, Permission
+from app.core.security_rules import COMMAND_WHITELIST, DANGEROUS_PATTERNS, Permission
 from app.dependencies import require_auth
 from app.schemas.models import WhitelistUpdate
 
@@ -96,7 +98,7 @@ async def update_whitelist(
     global _runtime_commands, _runtime_blocked
 
     # 从 Pydantic 模型提取数据
-    new_commands = [cmd.model_dump() for cmd in body.commands]
+    new_commands = [cmd.dict() for cmd in body.commands]
     new_blocked = body.blocked_patterns or []
 
     # 持久化到 DB（失败时返回 500，不更新内存缓存）

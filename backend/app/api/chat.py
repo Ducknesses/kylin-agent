@@ -2,12 +2,13 @@
 
 正式接口：WS /ws/chat/{session_id}（最新前后端 API 统一规范 v1.0）
 前端消息类型：chat / confirm / tool_confirm / ping
-后端消息类型：status / chunk / risk_alert / tool_call / pending_confirmation / error / done / pong
+后端消息类型：status / chunk / risk_alert / tool_call / tool_rejected / pending_confirmation / error / done / pong
 
 业务逻辑通过 Day5 Orchestrator.handle_chat 串起 IntentAgent → DiagnoseAgent →
 AgentHarness → ReporterAgent → AuditService 全链路。
 所有 Agent 均支持 LLM 增强路径（通过 LLM_ENABLED 配置开关）。
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -70,8 +71,10 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             await _handle_message(websocket, session_id, raw, role)
     except WebSocketDisconnect:
         logger.info(f"[WebSocket] 会话断开: {session_id}")
+        manager.cancel_session(session_id)
     except Exception as e:
         logger.exception(f"[WebSocket] 会话异常: {e}")
+        manager.cancel_session(session_id)
         try:
             await _send(websocket, "error", message="服务端处理异常，请稍后重试")
         except Exception:
@@ -194,12 +197,16 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
         trace_id = pending_tool.get("trace_id", "")
 
         if decision == "reject":
-            await _send(websocket, "status", content="已拒绝该工具调用。", trace_id=trace_id)
+            tool_name = pending_tool.get('tool', '')
+            await _send(websocket, "tool_rejected",
+                        tool=tool_name, reason="用户拒绝该工具调用",
+                        trace_id=trace_id)
             await _send(websocket, "done", trace_id=trace_id)
             await message_repository.save_message(
                 session_id=session_id, role="system",
-                content=f"已拒绝工具调用: {pending_tool.get('tool', '')}",
-                message_type="tool_confirm", trace_id=trace_id,
+                content=f"已拒绝工具调用: {tool_name}",
+                message_type="tool_rejected", trace_id=trace_id,
+                metadata={"tool": tool_name},
             )
             logger.info(f"[tool_confirm] 用户拒绝: session={session_id}, tool_confirm_id={tool_confirm_id}")
             return
@@ -232,8 +239,14 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
             tool_frame["result"] = result.get("result")
         else:
             tool_frame["error"] = result.get("error") or "工具调用失败"
-        await websocket.send_json(tool_frame)
+        # 先持久化再推送 tool_call 结果帧：工具执行期间客户端可能已经断开
+        # （例如重启本机 nginx 反代会切断 WebSocket），先落库保证刷新后仍能看到执行结果
         await _persist_frame(session_id, trace_id, tool_frame)
+        try:
+            await websocket.send_json(tool_frame)
+        except Exception:
+            logger.info(f"[tool_confirm] 客户端已断开，工具结果已持久化: session={session_id}, tool={tool}")
+            return
 
         # 继续生成诊断报告
         try:
@@ -247,7 +260,8 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
         for i in range(0, len(report), 500):
             await _send(websocket, "chunk", content=report[i:i + 500], trace_id=trace_id)
 
-        await _send(websocket, "done", trace_id=trace_id, session_id=session_id)
+        title = await _generate_session_title_for_confirm(session_id, pending_tool, report)
+        await _send(websocket, "done", trace_id=trace_id, session_id=session_id, title=title)
         await message_repository.save_message(
             session_id=session_id, role="assistant",
             content=report,
@@ -329,43 +343,78 @@ async def _run_agent_flow(
 ) -> None:
     """执行 Orchestrator 主流程：逐帧发送到 WebSocket，并逐帧持久化。
 
-    与旧版"先全部发送、结束统一持久化"的区别：
-    1. chunk 帧按 trace_id 追加合并落库（同 trace_id 的多段 chunk 合并为一行），
-       其余帧（status / tool_call / fix_options / error）逐条落库。
-    2. 发送失败容错：客户端断开后继续 send 会触发 RuntimeError
-       （ASGI: send after websocket.close）。此时停止发送，但继续消费并
-       持久化剩余帧 —— 流程不再崩溃，用户刷新后仍能找回完整回答。
+    改进点（v1.1）：
+    1. WS 断开后不再继续消费 generator，立即 aclose 释放后端资源
+    2. 总超时 120s，防止 MCP/LLM 累积阻塞导致生成器永不结束
+    3. chunk 帧按 trace_id 追加合并落库
     """
-    alive = True
     effective_trace_id = trace_id or ""
+    # 总超时保护：整个 orchestration 不超过 120 秒
+    TOTAL_TIMEOUT = 120.0
+
     agen = _orchestrator.handle_chat(
         session_id=session_id, user_input=user_input, role=role,
         confirmed=confirmed, trace_id=trace_id,
     )
-    try:
+
+    async def _consume_frames() -> None:
+        """消费 generator 并发送/持久化帧"""
+        nonlocal effective_trace_id
         async for frame in agen:
-            if alive:
-                try:
-                    # 中危工具确认帧：把上下文暂存到 ConnectionManager，便于 tool_confirm 恢复执行
-                    if frame.get("type") == "pending_confirmation":
-                        manager.set_pending_tool(session_id, {
-                            "tool_confirm_id": frame.get("tool_confirm_id"),
-                            "tool": frame.get("tool"),
-                            "params": frame.get("params"),
-                            "trace_id": frame.get("trace_id"),
-                            "context": frame.get("context", {}),
-                        })
-                        # 前端不需要 context 字段，移除后再发送
-                        frame = {k: v for k, v in frame.items() if k != "context"}
-                    await websocket.send_json(frame)
-                except (WebSocketDisconnect, RuntimeError) as e:
-                    alive = False
-                    logger.warning(
-                        f"[WebSocket] 连接已关闭，后续帧仅落库不再发送: session={session_id}, {e}"
-                    )
+            # 检查是否已被取消
+            if manager.is_cancelled(session_id):
+                logger.info(
+                    f"[WebSocket] 会话已取消，中断 generator 消费: session={session_id}"
+                )
+                break
+
+            # 中危工具确认帧：把上下文暂存到 ConnectionManager
+            if frame.get("type") == "pending_confirmation":
+                manager.set_pending_tool(session_id, {
+                    "tool_confirm_id": frame.get("tool_confirm_id"),
+                    "tool": frame.get("tool"),
+                    "params": frame.get("params"),
+                    "trace_id": frame.get("trace_id"),
+                    "context": frame.get("context", {}),
+                })
+                frame = {k: v for k, v in frame.items() if k != "context"}
+
+            # 发送到前端（容错：连接断开时不抛异常）
+            try:
+                await websocket.send_json(frame)
+            except (WebSocketDisconnect, RuntimeError) as e:
+                logger.warning(
+                    f"[WebSocket] 连接已关闭，中断消费: session={session_id}, {e}"
+                )
+                manager.cancel_session(session_id)
+                break
+
             await _persist_frame(session_id, frame.get("trace_id") or effective_trace_id, frame)
+
+    try:
+        await asyncio.wait_for(_consume_frames(), timeout=TOTAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(
+            f"[WebSocket] orchestration 总超时 ({TOTAL_TIMEOUT}s): session={session_id}, "
+            f"trace_id={effective_trace_id}"
+        )
+        manager.cancel_session(session_id)
+        try:
+            await websocket.send_json({
+                "type": "error", "trace_id": effective_trace_id,
+                "message": "处理超时，请稍后重试或缩短查询范围",
+            })
+        except Exception:
+            pass
     finally:
         await agen.aclose()
+
+
+async def _generate_session_title_for_confirm(session_id: str, pending_tool: dict, report: str) -> str:
+    """tool_confirm 恢复路径的标题生成，委托给 orchestrator 的统一函数"""
+    from app.services.orchestrator import _generate_session_title
+    user_input = pending_tool.get("context", {}).get("user_input", "")
+    return await _generate_session_title(session_id, user_input, report)
 
 
 async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) -> None:
@@ -373,11 +422,8 @@ async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) 
     try:
         ft = frame.get("type", "")
         if ft == "status":
-            await message_repository.save_message(
-                session_id=session_id, role="assistant",
-                content=frame.get("content", frame.get("message", "")),
-                message_type="status", trace_id=trace_id,
-            )
+            # status 帧仅为前端实时进度提示，不持久化到对话记录
+            pass
         elif ft == "tool_call":
             meta = {
                 "tool": frame.get("tool"),
@@ -424,6 +470,13 @@ async def _persist_frame(session_id: str, trace_id: str, frame: dict[str, Any]) 
                     "risk_level": frame.get("risk_level"),
                 },
             )
+        elif ft == "tool_rejected":
+            await message_repository.save_message(
+                session_id=session_id, role="system",
+                content=f"已拒绝工具调用: {frame.get('tool', '')}",
+                message_type="tool_rejected", trace_id=trace_id,
+                metadata={"tool": frame.get("tool")},
+            )
         elif ft == "error":
             await message_repository.save_message(
                 session_id=session_id, role="assistant",
@@ -446,6 +499,7 @@ async def _send(
     confirm_id: str | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
+    title: str | None = None,
     tool: str | None = None,
     tool_call_id: str | None = None,
     tool_confirm_id: str | None = None,
@@ -504,10 +558,20 @@ async def _send(
             payload["trace_id"] = trace_id
         if session_id is not None:
             payload["session_id"] = session_id
+        if title is not None:
+            payload["title"] = title
 
     elif msg_type == "error":
         if message is not None:
             payload["message"] = message
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+
+    elif msg_type == "tool_rejected":
+        if tool is not None:
+            payload["tool"] = tool
+        if reason is not None:
+            payload["reason"] = reason
         if trace_id is not None:
             payload["trace_id"] = trace_id
 

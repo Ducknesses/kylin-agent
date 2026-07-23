@@ -5,150 +5,34 @@
   - 返回标准结构 {allowed, risk_level, reason, requires_confirm}
   - 不执行系统命令、不调用 LLM、不调用 MCP
 
-当前阶段复用并扩展已有 security.py / prompt_guard.py / rbac.py 的检测能力。
+规则数据全部集中在 app.core.security_rules，本模块只保留判定逻辑。
+
+返回契约（analyze_* 与所有 _check_* 都必须经 _result/_allow/_deny/_confirm
+返回完整四字段 dict，不允许返回缺字段的半成品）：
+  - allowed=True   → 放行
+  - allowed=False  → 策略硬拒绝（任何角色都不放行）
+  - allowed=None   → 待 RBAC 角色裁决（仅 medium，
+                     由 analyze_tool_call 统一补全为 True/False）
+  analyze_user_input / analyze_tool_call 对外返回时 allowed 必为 bool。
 """
 import logging
-import re
-from typing import Any, Dict
+from typing import Any
 
 from app.core.prompt_guard import detect_injection
 from app.core.security import risk_classify
+from app.core.security_rules import (
+    AUDIT_BYPASS_KEYWORDS,
+    CMD_EXEC_RULES,
+    EXTRA_HIGH_RISK_PATTERNS,
+    INJECTION_CHARS_PATTERN,
+    MEDIUM_NGINX_PATTERN,
+    ROLE_CAN_MEDIUM,
+    SENSITIVE_EXTENSIONS,
+    SENSITIVE_PATHS,
+    VALID_ROLES,
+)
 
 logger = logging.getLogger(__name__)
-
-# ── 本轮补充的高危模式（已有 security.py 未覆盖的破坏性命令） ─────────
-
-_EXTRA_HIGH_RISK_PATTERNS: list[tuple[re.Pattern, str]] = [
-    # curl ... | sh / curl ... | bash
-    (re.compile(r"curl\b.*\|.*\b(bash|sh|/bin/sh|/bin/bash)\b", re.IGNORECASE),
-     "禁止 curl 管道执行脚本"),
-    # wget ... | sh / wget ... | bash
-    (re.compile(r"wget\b.*\|.*\b(bash|sh|/bin/sh|/bin/bash)\b", re.IGNORECASE),
-     "禁止 wget 管道执行脚本"),
-    # dd of= 写入磁盘
-    (re.compile(r"\bdd\b.*\bof=/dev/\w+", re.IGNORECASE),
-     "禁止 dd 破坏性写入磁盘"),
-    # 覆盖写入 /boot 目录
-    (re.compile(r">\s*/boot/", re.IGNORECASE),
-     "禁止写入 /boot 引导分区"),
-    # systemd / auditd / mcp-server 服务破坏性操作
-    (re.compile(r"\b(systemctl|service)\s+(stop|disable|mask)\s+(systemd|auditd|mcp-server)\b", re.IGNORECASE),
-     "禁止破坏核心守护服务"),
-    # 禁止关闭或清空审计规则（auditctl -s 只是查看状态，不拦截）
-    (re.compile(r"\bauditctl\s+(-e\s*0|-D)\b", re.IGNORECASE),
-     "禁止关闭或清空审计规则"),
-    # 禁止停止、禁用、屏蔽 auditd 审计服务
-    (re.compile(r"\b(systemctl|service)\s+(stop|disable|mask)\s+auditd\b", re.IGNORECASE),
-     "禁止停止或禁用审计服务"),
-    # chmod 777（安全模块原有规则仅覆盖 chmod -R 777，这里补全无 -R 的情况）
-    (re.compile(r"\bchmod\s+777\b", re.IGNORECASE),
-     "禁止 chmod 777 权限变更"),
-    # sudo rm -rf（安全模块原有规则不匹配带 sudo 前缀的情况）
-    (re.compile(r"\bsudo\s+rm\b", re.IGNORECASE),
-     "禁止 sudo rm 高危删除操作"),
-]
-
-# ── 审计绕过 / 安全关闭注入关键词 ─────────────────────────────────────
-
-_AUDIT_BYPASS_KEYWORDS: list[str] = [
-    "忽略规则",
-    "绕过安全限制",
-    "不要记录日志",
-    "不要写审计",
-    "关闭审计",
-    "ignore previous instructions",
-    "bypass safety",
-    "disable logging",
-    "do not log",
-    "no audit",
-    "disable audit",
-    "turn off logging",
-    "绕过审计",
-    "跳过安全检查",
-    "停用审计",
-]
-
-
-# ── 工具调用 RBAC 角色映射 ────────────────────────────────────────────
-
-# 角色权限：viewer 只能 low，operator/admin 可以 low + medium（需 confirm）
-_ROLE_CAN_MEDIUM = {"admin", "operator"}  # admin/operator 可执行中危操作
-
-# cmd_exec 白名单命令（低风险只读查询 / 诊断）
-_CMD_EXEC_WHITELIST: list[str] = [
-    # ── 系统基本信息 ──
-    "df -h", "free -m", "uptime", "whoami", "uname -a",
-    "hostnamectl", "timedatectl", "lscpu", "lsblk", "lsblk -f", "mount",
-    "systemd-analyze", "systemd-analyze blame",
-    # ── 进程 / 资源 ──
-    "ps aux", "top -bn1",
-    # ── 网络状态 ──
-    "ip addr", "ip route", "ip link",
-    "ss -tlnp", "ss -an", "ss -tuln",
-    "ping -c 4 127.0.0.1", "ping -c 4 localhost",
-    "curl -s --max-time 10 http://localhost",
-    # ── 日志 / dmesg ──
-    "systemctl status nginx", "systemctl status sshd",
-    "systemctl status docker", "systemctl status cron",
-    "journalctl -u nginx -n 50",
-    "journalctl --no-pager -n 50",
-    "journalctl --no-pager -p err -n 50",
-    "journalctl --no-pager -u nginx -n 50",
-    "dmesg -T", "dmesg --level=err",
-    "dmesg --level=err,warn -T",
-    # ── /proc 只读 ──
-    "cat /proc/cpuinfo", "cat /proc/meminfo",
-    "cat /proc/version", "cat /proc/loadavg",
-    "cat /proc/uptime",
-    # ── 文件 / 磁盘使用 ──
-    "ls -la /var/log", "ls -la /tmp",
-    "du -sh /var/log", "du -sh /tmp",
-    # ── service 列表 ──
-    "systemctl list-units --all", "systemctl list-unit-files",
-    "systemctl list-units --type=service",
-    "systemctl list-units --type=service --state=running",
-    "systemctl list-units --type=service --state=failed",
-    # ── 用户 / 登录 ──
-    "last -n 20", "lastb -n 20", "w",
-]
-
-# cmd_exec 中危白名单命令（允许但需二次确认）
-_CMD_EXEC_MEDIUM_WHITELIST: list[str] = [
-    # nginx
-    "systemctl restart nginx", "systemctl start nginx",
-    "systemctl stop nginx", "systemctl reload nginx",
-    # sshd
-    "systemctl restart sshd", "systemctl reload sshd",
-    # cron / rsyslog
-    "systemctl restart cron", "systemctl restart rsyslog",
-    # docker
-    "systemctl restart docker",
-    "docker ps", "docker ps -a",
-    "docker images", "docker info",
-]
-
-# 敏感路径（high 拒绝 file_guard 访问）
-_SENSITIVE_PATHS: list[str] = [
-    "/etc/passwd", "/etc/shadow", "/boot", "/root",
-    "/var/lib", "/usr/bin", "/bin", "/sbin",
-]
-
-# 敏感文件后缀（密钥/证书）
-_SENSITIVE_EXTENSIONS: tuple[str, ...] = (
-    ".pem", ".key", ".crt", ".cer", ".p12", ".pfx", ".jks", ".keystore",
-)
-
-# 命令注入字符（service 名中的非法字符）
-_INJECTION_CHARS_PATTERN = re.compile(r"[;&|`$()><\n]")
-
-# 中风险 nginx 服务操作（需二次确认，但不禁用）
-# 匹配：重启/停止/启动/重新加载 nginx，支持 systemctl/service + restart/stop/start/reload
-_MEDIUM_NGINX_PATTERN = re.compile(
-    # 匹配 systemctl restart nginx / service nginx restart / 重启 nginx 等
-    r"((?:systemctl|service)\s+)?(restart|stop|start|reload|重启|停止|启动|重新加载)\s+nginx"
-    r"|service\s+nginx\s+(restart|stop|start|reload)",
-    re.IGNORECASE,
-)
 
 
 class SafetyGuard:
@@ -173,56 +57,36 @@ class SafetyGuard:
         # 空输入 / 纯空白
         stripped = content.strip() if content else ""
         if not stripped:
-            return {
-                "allowed": False,
-                "risk_level": "low",
-                "reason": "输入不能为空",
-                "requires_confirm": False,
-            }
+            return self._deny("low", "输入不能为空")
 
         # 1. 归一化后做补充高危模式匹配
         normalized = stripped.lower()
-        for pattern, reason in _EXTRA_HIGH_RISK_PATTERNS:
+        for pattern, reason in EXTRA_HIGH_RISK_PATTERNS:
             if pattern.search(normalized):
                 logger.warning(f"[SafetyGuard] 补充高危拦截: {reason}")
-                return {
-                    "allowed": False,
-                    "risk_level": "high",
-                    "reason": reason,
-                    "requires_confirm": False,
-                }
+                return self._deny("high", reason)
 
         # 2. 审计绕过 / 安全关闭关键词检测（直接判定为高危）
-        for kw in _AUDIT_BYPASS_KEYWORDS:
+        for kw in AUDIT_BYPASS_KEYWORDS:
             if kw.lower() in normalized:
                 logger.warning(f"[SafetyGuard] 审计绕过检测: {kw}")
-                return {
-                    "allowed": False,
-                    "risk_level": "high",
-                    "reason": "检测到试图绕过安全审计的输入",
-                    "requires_confirm": False,
-                }
+                return self._deny("high", "检测到试图绕过安全审计的输入")
 
         # 3. Prompt Injection 检测（优先于中风险，防止「忽略规则 + restart nginx」被误判为 medium）
         injection = detect_injection(stripped)
         if injection["detected"]:
             logger.warning(f"[SafetyGuard] Prompt Injection: {injection['reason']}")
-            return {
-                "allowed": False,
-                "risk_level": "high",
-                "reason": f"输入安全检测未通过: {injection['reason']}",
-                "requires_confirm": False,
-            }
+            return self._deny("high", f"输入安全检测未通过: {injection['reason']}")
 
         # 4. 中风险 nginx 服务操作检测（Prompt 注入已排除，仅正常运维操作到此）
-        if _MEDIUM_NGINX_PATTERN.search(stripped):
+        if MEDIUM_NGINX_PATTERN.search(stripped):
             logger.info(f"[SafetyGuard] 中风险服务操作: {stripped[:60]}")
-            return {
-                "allowed": True,
-                "risk_level": "medium",
-                "reason": f"该操作涉及服务变更，需要确认: {stripped[:50]}",
-                "requires_confirm": True,
-            }
+            return self._result(
+                allowed=True,
+                risk_level="medium",
+                reason=f"该操作涉及服务变更，需要确认: {stripped[:50]}",
+                requires_confirm=True,
+            )
 
         # 5. 调已有 risk_classify 做完整风险分级（跳过注入检测，前面已做过）
         risk = risk_classify(stripped, skip_injection_check=True)
@@ -230,30 +94,20 @@ class SafetyGuard:
         # 高危：不允许
         if risk["action"] == "reject":
             logger.warning(f"[SafetyGuard] 高危拦截: {risk['reason']}")
-            return {
-                "allowed": False,
-                "risk_level": risk["level"],
-                "reason": risk["reason"],
-                "requires_confirm": False,
-            }
+            return self._deny(risk["level"], risk["reason"])
 
         # 中危：需二次确认
         if risk["action"] == "confirm":
             logger.info(f"[SafetyGuard] 中危需确认: {risk['reason']}")
-            return {
-                "allowed": True,
-                "risk_level": risk["level"],
-                "reason": risk["reason"],
-                "requires_confirm": True,
-            }
+            return self._result(
+                allowed=True,
+                risk_level=risk["level"],
+                reason=risk["reason"],
+                requires_confirm=True,
+            )
 
         # 低危：直接放行
-        return {
-            "allowed": True,
-            "risk_level": "low",
-            "reason": "未发现高危输入",
-            "requires_confirm": False,
-        }
+        return self._allow("low", "未发现高危输入")
 
     # ── 工具调用检查 ─────────────────────────────────────────────────
 
@@ -263,16 +117,18 @@ class SafetyGuard:
         """对 MCP 工具调用进行安全裁决
 
         参数:
-            tool: 工具名（sys_info / log_reader / service_mgr / cmd_exec / file_guard）
+            tool: 工具名（sys_info / log_reader / service_mgr / cmd_exec / file_guard 等）
             params: 工具参数
             role: 用户角色（viewer / operator / admin），未知按 viewer 处理
 
         返回:
             {allowed, risk_level, reason, requires_confirm}
+            对外返回时 allowed 必为 bool；_check_* 返回的 allowed=None
+            （待 RBAC 角色裁决）在此统一补全。
         """
         # 规范化 role，未知角色按 viewer
         role = role.lower() if role else "viewer"
-        if role not in ("viewer", "operator", "admin"):
+        if role not in VALID_ROLES:
             role = "viewer"
 
         # 分发到具体工具检查
@@ -293,25 +149,25 @@ class SafetyGuard:
         else:
             return self._deny("medium", "未知工具")
 
-        # 应用 RBAC：high 永远拒绝，medium 需要角色权限
+        # 应用 RBAC：high 永远拒绝
         if result["risk_level"] == "high":
             result["allowed"] = False
             result["requires_confirm"] = False
             return result
 
+        # medium：策略硬拒绝（allowed=False）不因角色放行；
+        # 待裁决（allowed=None）由角色补全最终判定
         if result["risk_level"] == "medium":
-            # 如果 _check_* 已显式拒绝，则不因角色放行
-            if result.get("allowed") is False:
+            if result["allowed"] is False:
                 return result
-            if role in _ROLE_CAN_MEDIUM:
+            if role in ROLE_CAN_MEDIUM:
                 result["allowed"] = True
                 result["requires_confirm"] = True
                 return result
-            else:
-                return self._deny(
-                    "medium",
-                    f"当前角色 ({role}) 无权执行中风险操作",
-                )
+            return self._deny(
+                "medium",
+                f"当前角色 ({role}) 无权执行中风险操作",
+            )
 
         # low：直接放行
         result["allowed"] = True
@@ -339,7 +195,7 @@ class SafetyGuard:
         file_path = params.get("source") or params.get("path") or params.get("log_file") or ""
 
         # service 名中的命令注入检测
-        if service and _INJECTION_CHARS_PATTERN.search(service):
+        if service and INJECTION_CHARS_PATTERN.search(service):
             return self._deny("high", "service 名称包含命令注入字符")
 
         # 路径在 /var/log 之外
@@ -357,12 +213,12 @@ class SafetyGuard:
         return self._allow("low", "log_reader 只读日志查询")
 
     def _check_service_mgr(self, params: dict) -> dict[str, Any]:
-        """service_mgr 工具检查：按 action + 服务名分级（去除 dead code）"""
+        """service_mgr 工具检查：按 action + 服务名分级"""
         action = (params.get("action") or "").strip().lower()
         service_name = (params.get("service") or params.get("name") or "").strip()
 
         # 服务名为空或含注入字符
-        if not service_name or _INJECTION_CHARS_PATTERN.search(service_name):
+        if not service_name or INJECTION_CHARS_PATTERN.search(service_name):
             return self._deny("high", "服务名称为空或包含命令注入字符")
 
         svc_lower = service_name.lower()
@@ -388,12 +244,9 @@ class SafetyGuard:
         if action in read_actions:
             return self._allow("low", f"service_mgr 只读查询: {action} {service_name}")
 
-        # 变更 action → medium（需确认）
+        # 变更 action → medium（待 RBAC 角色裁决）
         if action in medium_actions:
-            return {
-                "risk_level": "medium",
-                "reason": f"中风险服务操作: {action} {service_name}",
-            }
+            return self._confirm("medium", f"中风险服务操作: {action} {service_name}")
 
         # disable（非高风险服务）→ medium 拒绝
         if action == "disable":
@@ -402,19 +255,8 @@ class SafetyGuard:
         # 非法 action
         return self._deny("medium", f"非法的 service_mgr action: {action}")
 
-    # 只读诊断命令前缀：不修改系统状态，委托 sandbox 做最终路径校验
-    _READONLY_CMD_PREFIXES: tuple[str, ...] = (
-        "ls ", "lsblk", "lscpu", "lspci", "lsusb",
-        "cat ", "head ", "tail ", "df ", "du ",
-        "free ", "ps ", "top ", "uptime", "whoami",
-        "hostname", "id", "uname ", "hostnamectl",
-        "timedatectl", "mount", "findmnt",
-        "ss ", "ip ", "ping ", "netstat ", "dmesg ",
-        "journalctl ", "file ", "stat ", "wc ",
-    )
-
     def _check_cmd_exec(self, params: dict) -> dict[str, Any]:
-        """cmd_exec 工具检查：高危拦截 → 精确白名单 → 只读前缀放行（sandbox 兜底）"""
+        """cmd_exec 工具检查：高危拦截 → 白名单单表匹配（exact/prefix）→ 兜底拒绝"""
         command = (params.get("command") or "").strip()
         if not command:
             return self._deny("high", "命令为空")
@@ -426,26 +268,19 @@ class SafetyGuard:
 
         normalized_cmd = command.lower().strip()
 
-        # 2. 精确白名单命令 —— 直接放行（保留原有精确匹配逻辑）
-        for allowed in _CMD_EXEC_WHITELIST:
-            if normalized_cmd == allowed.lower():
+        # 2. 白名单单表匹配（表内顺序：exact low → exact medium → prefix low）
+        for mode, pattern, level in CMD_EXEC_RULES:
+            if mode == "exact":
+                if normalized_cmd != pattern:
+                    continue
+                if level == "medium":
+                    return self._confirm("medium", f"中危白名单命令: {command}")
                 return self._allow("low", f"白名单命令: {command}")
-
-        # 3. 中危白名单命令 —— 需二次确认（service restart/stop 等）
-        for allowed in _CMD_EXEC_MEDIUM_WHITELIST:
-            if normalized_cmd == allowed.lower():
-                return self._result(
-                    allowed=True, risk_level="medium",
-                    reason=f"中危白名单命令: {command}",
-                    requires_confirm=True,
-                )
-
-        # 4. 只读诊断命令前缀 —— 低风险放行，由 sandbox 做最终路径/字符校验
-        for prefix in self._READONLY_CMD_PREFIXES:
-            if normalized_cmd.startswith(prefix) or normalized_cmd == prefix:
+            # prefix：只读诊断命令前缀，由 sandbox 做最终路径/字符校验
+            if normalized_cmd.startswith(pattern) or normalized_cmd == pattern:
                 return self._allow("low", f"只读诊断命令（sandbox 最终裁决）: {command[:60]}")
 
-        # 5. 其余命令拒绝
+        # 3. 其余命令拒绝
         return self._deny("medium", f"命令不在白名单中: {command[:60]}")
 
     def _check_file_guard(self, params: dict, role: str) -> dict[str, Any]:
@@ -458,13 +293,13 @@ class SafetyGuard:
             return self._deny("high", "文件路径为空")
         if ".." in path:
             return self._deny("high", f"文件路径包含路径穿越: {path}")
-        if _INJECTION_CHARS_PATTERN.search(path):
+        if INJECTION_CHARS_PATTERN.search(path):
             return self._deny("high", "文件路径包含命令注入字符")
 
         path_lower = path.lower()
 
         # 敏感路径
-        for sensitive in _SENSITIVE_PATHS:
+        for sensitive in SENSITIVE_PATHS:
             if path_lower.startswith(sensitive):
                 return self._deny("high", f"禁止访问敏感路径: {path}")
 
@@ -473,7 +308,7 @@ class SafetyGuard:
             return self._deny("high", f"禁止访问 SSH 密钥目录: {path}")
 
         # 敏感文件后缀（密钥/证书）
-        for ext in _SENSITIVE_EXTENSIONS:
+        for ext in SENSITIVE_EXTENSIONS:
             if path_lower.endswith(ext):
                 return self._deny("high", f"禁止访问密钥/证书文件: {path}")
 
@@ -488,42 +323,26 @@ class SafetyGuard:
                 # viewer 不能写
                 if role == "viewer":
                     return self._deny("medium", "viewer 无权执行文件写入操作")
-                return {
-                    "risk_level": "medium",
-                    "reason": f"中风险文件写入: {path}",
-                }
+                return self._confirm("medium", f"中风险文件写入: {path}")
             return self._deny("high", f"禁止写入路径: {path}")
 
         return self._deny("medium", f"非法的 file_guard action: {action}")
 
-    def _check_net_monitor(
-        self,
-        params: dict[str, object],
-    ) -> dict[str, object]:
+    def _check_net_monitor(self, params: dict) -> dict[str, Any]:
         """检查网络监控调用的动态安全边界。
 
         metric 的枚举合法性由 ToolRegistry 负责；
         这里只保留防御性类型检查和安全语义判断。
         """
-
         metric = params.get("metric", "all")
 
         if not isinstance(metric, str):
-            return self._deny(
-                "medium",
-                "net_monitor metric 类型非法",
-            )
+            return self._deny("medium", "net_monitor metric 类型非法")
 
         # 当前 Registry 中允许的 net_monitor 操作均为只读监控。
-        return self._allow(
-            "low",
-            "net_monitor 只读网络监控",
-        )
+        return self._allow("low", "net_monitor 只读网络监控")
 
-    def _check_metrics_history(
-        self,
-        params: dict[str, object],
-    ) -> dict[str, object]:
+    def _check_metrics_history(self, params: dict) -> dict[str, Any]:
         """检查 metrics_history 调用的安全边界。
 
         metrics_history 是只读历史指标查询工具，所有参数都是可选的查询条件。
@@ -553,10 +372,14 @@ class SafetyGuard:
 
         # 只读历史指标查询，低风险
         return self._allow("low", "metrics_history 只读历史指标查询")
+
     # ── 辅助方法 ────────────────────────────────────────────────────
 
     @staticmethod
-    def _result(allowed: bool, risk_level: str, reason: str, requires_confirm: bool = False) -> dict[str, Any]:
+    def _result(
+        allowed: bool | None, risk_level: str, reason: str,
+        requires_confirm: bool = False,
+    ) -> dict[str, Any]:
         """统一结果工厂 —— 所有 _check_* 方法返回完整四字段"""
         return {
             "allowed": allowed,
@@ -567,8 +390,15 @@ class SafetyGuard:
 
     @classmethod
     def _allow(cls, risk_level: str, reason: str) -> dict[str, Any]:
+        """放行（low 直接执行）"""
         return cls._result(True, risk_level, reason, requires_confirm=False)
 
     @classmethod
     def _deny(cls, risk_level: str, reason: str) -> dict[str, Any]:
+        """策略硬拒绝（任何角色都不放行）"""
         return cls._result(False, risk_level, reason, requires_confirm=False)
+
+    @classmethod
+    def _confirm(cls, risk_level: str, reason: str) -> dict[str, Any]:
+        """中风险待 RBAC 角色裁决 —— 由 analyze_tool_call 补全最终判定"""
+        return cls._result(None, risk_level, reason, requires_confirm=True)

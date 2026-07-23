@@ -138,14 +138,13 @@ class WsClient {
     }
 
     const chatStore = useChatStore()
+    const wsStore = useWsStore()
 
     switch (data.type) {
       case 'status':
-        chatStore.addMessage(this.sessionId, {
-          role: 'system',
-          type: 'status',
-          content: data.content || '处理中...'
-        })
+        // 不写入消息列表，仅通过 wsStore 驱动顶部转圈加载条
+        wsStore.processing = true
+        wsStore.processingText = data.content || '处理中...'
         this.emit('status', data)
         break
       case 'chunk':
@@ -179,6 +178,10 @@ class WsClient {
         this.emit('risk_alert', data)
         break
       case 'done':
+        if (data.title) {
+          const chatStore = useChatStore()
+          chatStore.updateSessionTitle(this.sessionId, data.title)
+        }
         this.emit('done', data)
         break
       case 'error':
@@ -201,6 +204,16 @@ class WsClient {
           trace_id: data.trace_id,
         })
         this.emit('pending_confirmation', data)
+        break
+      case 'tool_rejected':
+        chatStore.addMessage(this.sessionId, {
+          role: 'system',
+          type: 'tool_rejected',
+          tool: data.tool || '',
+          reason: data.reason || '用户拒绝该工具调用',
+          traceId: data.trace_id
+        })
+        this.emit('tool_rejected', data)
         break
       case 'pong':
         break

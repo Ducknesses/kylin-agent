@@ -13,6 +13,9 @@ from resource_limiter import CgroupV2Limiter, ResourceLimitError
 
 logger = logging.getLogger("mcp.sandbox")
 
+# 需要 root 权限的 systemctl 变更操作
+PRIVILEGED_SYSTEMCTL_ACTIONS = ("start", "stop", "restart", "reload")
+
 
 def _match_command_pattern(cmd: str) -> str:
     """
@@ -167,9 +170,21 @@ def execute(command: str, timeout: int = 30, user: str = "agent-read") -> dict:
     cmd_parts = _build_safe_cmd(command, matched)
     actual_timeout = min(timeout, config.COMMAND_TIMEOUT)
 
-    # 如果当前不是root，不需要sudo降级；否则用sudo -u降级
     current_uid = os.getuid() if hasattr(os, "getuid") else 0
-    if current_uid == 0 and user != "root":
+
+    # systemctl 变更操作需要 root 权限：
+    # root 直接执行（不能降级，降级用户无权操作）；非 root 通过 sudo -n 提权
+    # （依赖 /etc/sudoers.d/agent-op 白名单；-n 非交互，未授权时立即失败）
+    is_privileged_systemctl = (
+        len(cmd_parts) > 1
+        and cmd_parts[0] == "systemctl"
+        and cmd_parts[1] in PRIVILEGED_SYSTEMCTL_ACTIONS
+    )
+
+    if is_privileged_systemctl:
+        exec_cmd = cmd_parts if current_uid == 0 else ["sudo", "-n"] + cmd_parts
+    elif current_uid == 0 and user != "root":
+        # root 运行时对普通命令做 sudo -u 降级；非 root 直接执行
         exec_cmd = ["sudo", "-u", user] + cmd_parts
     else:
         exec_cmd = cmd_parts

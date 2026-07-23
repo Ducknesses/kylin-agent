@@ -120,9 +120,11 @@ export const useChatStore = defineStore('chat', () => {
       const { data } = await http.get(`/sessions/${sessionId}/messages`)
       if (data.messages && data.messages.length > 0) {
         const mergedMessages = mergeAdjacentChunks(data.messages)
+        // 过滤掉 status 帧（现为纯实时进度提示，不保存到记录中）
+        const filteredMessages = mergedMessages.filter(m => m.message_type !== 'status')
         // 历史 tool_call 消息归一化为与实时 WS 一致的扁平结构，
         // 否则 MsgBubble 按 role === 'tool' 判断不命中，会把 content（JSON 字符串）当普通文本渲染
-        const msgs = mergedMessages.map(m => {
+        const msgs = filteredMessages.map(m => {
           if (m.tool_calls && m.tool_calls.length > 0) {
             const tc = m.tool_calls[0]
             return {
@@ -132,6 +134,22 @@ export const useChatStore = defineStore('chat', () => {
               tool: tc.tool,
               params: tc.params,
               result: tc.ok ? tc.result : (tc.error ?? tc.result),
+              timestamp: m.timestamp,
+            }
+          }
+          // tool_rejected 历史消息：还原为带 tool/reason 的结构
+          if (m.message_type === 'tool_rejected') {
+            let toolName = ''
+            try {
+              const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {})
+              toolName = meta.tool || ''
+            } catch (e) { /* ignore */ }
+            return {
+              role: 'system',
+              type: 'tool_rejected',
+              tool: toolName,
+              reason: '用户拒绝该工具调用',
+              content: m.content,
               timestamp: m.timestamp,
             }
           }
@@ -223,6 +241,14 @@ export const useChatStore = defineStore('chat', () => {
     messagesMap.value.set(sessionId, [...list])
   }
 
+  // 更新会话标题（done 帧驱动的实时更新）
+  function updateSessionTitle(sessionId, title) {
+    const idx = sessions.value.findIndex(s => s.id === sessionId)
+    if (idx !== -1) {
+      sessions.value[idx] = { ...sessions.value[idx], title }
+    }
+  }
+
   // 删除会话
   async function deleteSession(sessionId) {
     try {
@@ -260,6 +286,7 @@ export const useChatStore = defineStore('chat', () => {
     addMessage,
     appendToLastAssistant,
     addOrUpdateToolCall,
+    updateSessionTitle,
     deleteSession
   }
 })

@@ -14,7 +14,7 @@ import logging
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, validator
 
 from app.schemas.action import FixOption
 
@@ -157,10 +157,10 @@ class LLMFixCandidate(BaseModel):
     params: dict[str, object]
     rollback: str | None = None
 
-    model_config = ConfigDict(extra="forbid")
+    class Config:
+        extra = "forbid"
 
-    @field_validator("title", "description", "tool")
-    @classmethod
+    @validator("title", "description", "tool")
     def _not_blank(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
@@ -313,7 +313,7 @@ class FixPlannerAgent:
                 continue
 
             validated.append(
-                opt.model_copy(
+                opt.copy(
                     update={
                         "risk_level": final_risk,
                         "requires_confirm": final_risk == "medium",

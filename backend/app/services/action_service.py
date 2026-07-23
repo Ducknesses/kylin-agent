@@ -246,10 +246,12 @@ class ActionService:
 
         if result.get("ok"):
             self._store.mark_executed(session_id, option_id)
-            await self._safe_audit(ctx, "action_executed")
             raw = result.get("result")
             safe = sanitize_sensitive_data(raw) if raw is not None else None
             summary = json.dumps(safe, ensure_ascii=False, default=str)[:200] if safe is not None else None
+            if summary:
+                self._store.set_result_summary(session_id, option_id, summary)
+            await self._safe_audit(ctx, "action_executed")
             return ActionPrecheck(result="executed", option_id=stored.option.option_id,
                                   session_id=session_id, trace_id=stored.trace_id,
                                   risk_level="low", message="修复操作执行成功",
@@ -347,10 +349,16 @@ class ActionService:
         if result.get("ok"):
             self._store.mark_executed(session_id, option_id)
             self._confirmation.mark_consumed(session_id, confirm_id)
+            raw = result.get("result")
+            safe = sanitize_sensitive_data(raw) if raw is not None else None
+            summary = json.dumps(safe, ensure_ascii=False, default=str)[:200] if safe is not None else None
+            if summary:
+                self._store.set_result_summary(session_id, option_id, summary)
             await self._safe_audit(ctx, "action_confirm_executed")
             return ActionPrecheck(result="executed", option_id=option_id,
                                   session_id=session_id, trace_id=conf.trace_id,
-                                  message="执行成功")
+                                  message="执行成功",
+                                  result_summary=summary)
         else:
             self._store.mark_failed(session_id, option_id)
             self._confirmation.mark_failed(session_id, confirm_id)

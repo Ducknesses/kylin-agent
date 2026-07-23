@@ -1,4 +1,5 @@
 """WebSocket 连接管理器（含 token 校验）"""
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -18,6 +19,10 @@ class ConnectionManager:
     2. 如果 API_TOKEN 已配置，校验 token；无效则 close(code=4001)
     3. 如果 API_TOKEN 未配置，放行（向后兼容）
     4. 返回 AuthContext 供调用方做 RBAC
+
+    取消机制：
+    - cancel_session() 设置 asyncio.Event，允许 _run_agent_flow
+      在 WS 断开后主动中断长时间运行的 orchestrator generator。
     """
 
     def __init__(self) -> None:
@@ -25,6 +30,7 @@ class ConnectionManager:
         self._sessions_auth: Dict[str, AuthContext] = {}
         self._pending_confirm: Dict[str, dict] = {}
         self._pending_tool: Dict[str, dict] = {}
+        self._cancel_events: Dict[str, asyncio.Event] = {}
 
     # ── 连接管理 ──
 
@@ -59,6 +65,8 @@ class ConnectionManager:
         await websocket.accept()
         self._connections[session_id] = websocket
         self._sessions_auth[session_id] = auth
+        # 新连接建立时清除旧的取消标记
+        self._cancel_events.pop(session_id, None)
         logger.info(
             f"[Connection] 会话建立: {session_id}, "
             f"level={auth.level.value}, authenticated={auth.is_authenticated}"
@@ -133,3 +141,23 @@ class ConnectionManager:
     def has_pending_tool(self, session_id: str) -> bool:
         """是否存在待确认的工具调用"""
         return session_id in self._pending_tool
+
+    # ── 会话取消（WS 断开后中断长时间运行的 orchestrator） ──
+
+    def get_cancel_event(self, session_id: str) -> asyncio.Event:
+        """获取或创建会话取消事件。WS 断开时 set()，orchestrator 可 await 它来感知断开。"""
+        if session_id not in self._cancel_events:
+            self._cancel_events[session_id] = asyncio.Event()
+        return self._cancel_events[session_id]
+
+    def cancel_session(self, session_id: str) -> None:
+        """标记会话已取消，通知 orchestrator 尽快终止。"""
+        evt = self._cancel_events.get(session_id)
+        if evt is not None:
+            evt.set()
+            logger.info(f"[Connection] 会话取消: {session_id}")
+
+    def is_cancelled(self, session_id: str) -> bool:
+        """检查会话是否已被取消"""
+        evt = self._cancel_events.get(session_id)
+        return evt is not None and evt.is_set()
