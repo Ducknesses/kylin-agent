@@ -1,0 +1,195 @@
+{
+  "version": 1,
+  "tools": {
+    "sys_info": {
+      "name": "sys_info",
+      "description": "获取系统信息（CPU、内存、磁盘、负载等）",
+      "default_risk": "low",
+      "action_field": null,
+      "action_risk_overrides": {},
+      "params": {
+        "metric": {
+          "type": "string",
+          "required": true,
+          "enum": ["cpu", "memory", "disk", "load", "uptime", "all", "network"],
+          "description": "指标类型"
+        }
+      }
+    },
+    "service_mgr": {
+      "name": "service_mgr",
+      "description": "管理系统服务（systemctl 操作）",
+      "default_risk": "low",
+      "action_field": "action",
+      "action_risk_overrides": {
+        "status": "low",
+        "is-active": "low",
+        "is-enabled": "low",
+        "start": "medium",
+        "stop": "medium",
+        "restart": "medium"
+      },
+      "params": {
+        "action": {
+          "type": "string",
+          "required": true,
+          "enum": ["status", "start", "stop", "restart", "is-active", "is-enabled"],
+          "description": "操作类型"
+        },
+        "service": {
+          "type": "string",
+          "required": true,
+          "description": "服务名称"
+        }
+      }
+    },
+    "log_reader": {
+      "name": "log_reader",
+      "description": "读取系统日志",
+      "default_risk": "low",
+      "action_field": null,
+      "action_risk_overrides": {},
+      "params": {
+        "type": {
+          "type": "string",
+          "required": false,
+          "description": "日志类型"
+        },
+        "source": {
+          "type": "string",
+          "required": false,
+          "description": "日志来源"
+        },
+        "service": {
+          "type": "string",
+          "required": false,
+          "description": "服务名称"
+        },
+        "lines": {
+          "type": "integer",
+          "required": false,
+          "constraints": {"min": 1, "max": 500},
+          "description": "读取行数"
+        },
+        "since": {
+          "type": "string",
+          "required": false,
+          "description": "起始时间"
+        },
+        "keyword": {
+          "type": "string",
+          "required": false,
+          "description": "关键词过滤"
+        }
+      }
+    },
+    "net_monitor": {
+      "name": "net_monitor",
+      "description": "网络监控信息",
+      "default_risk": "low",
+      "action_field": null,
+      "action_risk_overrides": {},
+      "params": {
+        "metric": {
+          "type": "string",
+          "required": false,
+          "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
+          "description": "监控指标"
+        },
+        "port": {
+          "type": "integer",
+          "required": false,
+          "description": "端口号"
+        }
+      }
+    },
+    "cmd_exec": {
+      "name": "cmd_exec",
+      "description": "执行安全范围内的系统命令",
+      "default_risk": "medium",
+      "action_field": null,
+      "action_risk_overrides": {},
+      "params": {
+        "command": {
+          "type": "string",
+          "required": true,
+          "description": "要执行的命令"
+        },
+        "timeout": {
+          "type": "integer",
+          "required": false,
+          "description": "超时时间（秒）"
+        },
+        "user": {
+          "type": "string",
+          "required": false,
+          "description": "执行用户"
+        }
+      }
+    },
+    "metrics_history": {
+      "name": "metrics_history",
+      "description": "查询系统历史指标数据（CPU、内存、磁盘、网络），按时间范围返回历史读数。用于分析系统负载趋势、排查历史性能问题。",
+      "default_risk": "low",
+      "action_field": null,
+      "action_risk_overrides": {},
+      "params": {
+        "from_ts": {
+          "type": "number",
+          "required": false,
+          "description": "开始时间戳（Unix秒），默认5分钟前"
+        },
+        "to_ts": {
+          "type": "number",
+          "required": false,
+          "description": "结束时间戳（Unix秒），默认当前时间"
+        },
+        "metrics": {
+          "type": "string",
+          "required": false,
+          "description": "逗号分隔的指标名: cpu,memory,disk,network,all"
+        },
+        "limit": {
+          "type": "integer",
+          "required": false,
+          "constraints": {"min": 1, "max": 10000},
+          "description": "返回记录数上限"
+        }
+      }
+    },
+    "file_guard": {
+      "name": "file_guard",
+      "description": "安全地操作文件（检查、读取、写入）",
+      "default_risk": "medium",
+      "action_field": "action",
+      "action_risk_overrides": {
+        "check": "low",
+        "read": "low",
+        "write": "medium"
+      },
+      "params": {
+        "action": {
+          "type": "string",
+          "required": true,
+          "enum": ["check", "read", "write"],
+          "description": "操作类型"
+        },
+        "path": {
+          "type": "string",
+          "required": true,
+          "description": "文件路径"
+        },
+        "content": {
+          "type": "string",
+          "required": false,
+          "description": "写入内容（仅 write 操作需要）"
+        },
+        "max_size": {
+          "type": "integer",
+          "required": false,
+          "description": "最大文件大小"
+        }
+      }
+    }
+  }
+}

@@ -177,8 +177,11 @@ class AgentHarness:
         # ── 5. 调用 MCPClient ──
         try:
             # 从 ToolRegistry 获取工具所属的 MCP 服务器 ID
-            tool = self.tool_registry.get_tool(tool_name) if self.tool_registry else None
-            server_id = tool.server_id if tool and tool.server_id else ""
+            # 静态工具（如 service_mgr）通过 _static_tool_to_server 映射查找
+            # 动态工具直接从 _tools 取 server_id
+            server_id = ""
+            if self.tool_registry is not None:
+                server_id = self.tool_registry.get_tool_server_id(tool_name)
             raw_mcp_result = await self.mcp_client.call_tool(
                 tool_name, arguments=params, server_id=server_id,
             )

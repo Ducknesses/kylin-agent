@@ -406,13 +406,18 @@ class TestNoMCPClientDirectCall:
 
 
 class TestBuildAuditMetadata:
-    """ToolRegistry.build_audit_metadata 直接单元测试"""
+    """ToolRegistry.build_audit_metadata 直接单元测试
+
+    注意：审计策略已改为通用脱敏（sanitize_sensitive_data），不再使用 AuditPolicy 白名单。
+    所有参数都会被保留，但敏感 key 会被替换为 [REDACTED]。
+    cmd_exec 仍使用 build_cmd_exec_summary 做特殊安全摘要。
+    """
 
     @pytest.fixture
     def registry(self) -> ToolRegistry:
         return ToolRegistry()
 
-    # A. service_mgr — 只返回 action/service，不含 password/extra
+    # A. service_mgr — 敏感字段 password 值被脱敏，非敏感字段保留原值
     def test_service_mgr_filters_password(self, registry):
         meta = registry.build_audit_metadata("service_mgr", {
             "action": "restart",
@@ -420,21 +425,24 @@ class TestBuildAuditMetadata:
             "password": "secret",
             "extra": "ignored",
         })
+        # 非敏感字段保留
         assert meta.get("action") == "restart"
         assert meta.get("service") == "nginx"
-        assert "password" not in meta
-        assert "extra" not in meta
+        assert meta.get("extra") == "ignored"
+        # 敏感 key 值被脱敏
+        assert meta.get("password") == "[REDACTED]"
 
-    # B. sys_info — 只返回 metric
+    # B. sys_info — 敏感字段 secret 值被脱敏
     def test_sys_info_only_metric(self, registry):
         meta = registry.build_audit_metadata("sys_info", {
             "metric": "cpu",
             "secret": "should_not_appear",
         })
         assert meta.get("metric") == "cpu"
-        assert "secret" not in meta
+        # 敏感 key 被脱敏但保留 key
+        assert meta.get("secret") == "[REDACTED]"
 
-    # C. log_reader — 只返回 service、lines，不含日志内容字段
+    # C. log_reader — 通用脱敏，所有字段保留，仅敏感 key 脱敏
     def test_log_reader_only_service_lines(self, registry):
         meta = registry.build_audit_metadata("log_reader", {
             "service": "nginx",
@@ -444,19 +452,21 @@ class TestBuildAuditMetadata:
         })
         assert meta.get("service") == "nginx"
         assert meta.get("lines") == 100
-        assert "source" not in meta
-        assert "keyword" not in meta
+        # 非敏感字段保留（审计策略待后续重构统一处理）
+        assert meta.get("source") == "/var/log/syslog"
+        assert meta.get("keyword") == "error"
 
-    # D. net_monitor — 只返回 audit_policy 声明的字段
+    # D. net_monitor — 通用脱敏，所有字段保留
     def test_net_monitor_only_metric(self, registry):
         meta = registry.build_audit_metadata("net_monitor", {
             "metric": "connections",
             "port": 80,
         })
         assert meta.get("metric") == "connections"
-        assert "port" not in meta
+        # 审计策略待后续重构，当前通用脱敏保留所有字段
+        assert meta.get("port") == 80
 
-    # E. file_guard — 只返回 action/path，不含 content/password
+    # E. file_guard — 敏感 key 脱敏，非敏感字段保留
     def test_file_guard_only_action_path(self, registry):
         meta = registry.build_audit_metadata("file_guard", {
             "action": "write",
@@ -466,8 +476,10 @@ class TestBuildAuditMetadata:
         })
         assert meta.get("action") == "write"
         assert meta.get("path") == "/tmp/test.txt"
-        assert "content" not in meta
-        assert "password" not in meta
+        # content 不是敏感 key，保留原值
+        assert meta.get("content") == "secret content"
+        # password 是敏感 key，被脱敏
+        assert meta.get("password") == "[REDACTED]"
 
     # F. cmd_exec — 完整 command 不出现在 metadata；含安全摘要字段
     def test_cmd_exec_safe_summary_no_full_command(self, registry):
@@ -485,7 +497,7 @@ class TestBuildAuditMetadata:
         assert "contains_pipe" in meta
         assert "contains_redirect" in meta
         assert "contains_shell_chain" in meta
-        # 不含完整参数数组或原始路径
+        # timeout 不在摘要中
         assert "timeout" not in meta
 
     def test_cmd_exec_empty_command(self, registry):
@@ -494,41 +506,26 @@ class TestBuildAuditMetadata:
         })
         assert meta.get("command") == "[empty]"
 
-    # G. unknown tool — 返回 {}，warning 存在，不含 params/secret
+    # G. unknown tool — 抛出 ValueError，错误信息包含工具名
     def test_unknown_tool_returns_empty(self, registry, caplog):
-        import logging
-        caplog.set_level(logging.WARNING)
-        meta = registry.build_audit_metadata("nonexistent_tool", {
-            "param1": "value1",
-            "token": "secret123",
-        })
-        assert meta == {}
-        # warning 存在
-        warnings = [r.message for r in caplog.records if "nonexistent_tool" in str(r.message)]
-        assert len(warnings) >= 1
-        # warning 不包含 params
-        warning_text = str(warnings[0])
-        assert "param1" not in warning_text
-        assert "secret123" not in warning_text
-        assert "token" not in warning_text
+        with pytest.raises(ValueError, match="找不到对应工具: nonexistent_tool"):
+            registry.build_audit_metadata("nonexistent_tool", {
+                "param1": "value1",
+                "token": "secret123",
+            })
 
-    # H. 所有注册工具 — 参数化校验
+    # H. 所有注册工具 — 校验 spec 不为 None
     @pytest.mark.parametrize("tool_name", [
         "sys_info", "service_mgr", "log_reader",
         "net_monitor", "cmd_exec", "file_guard",
     ])
-    def test_all_tools_have_valid_audit_policy(self, registry, tool_name):
-        """每个注册工具 audit_policy 不为 None，safe_fields 都属于 params"""
-        policy = registry.get_audit_policy(tool_name)
-        assert policy is not None, f"{tool_name} 缺少 AuditPolicy"
+    def test_all_tools_have_valid_spec(self, registry, tool_name):
+        """每个注册工具 spec 不为 None"""
         spec = registry.get_tool_spec(tool_name)
-        assert spec is not None
-        for sf in policy.safe_fields:
-            assert sf in spec.params, f"{tool_name} safe_field '{sf}' 不在 params 中"
-        # summary_builder 如存在必须有效
-        if policy.summary_builder:
-            assert policy.summary_builder in ("cmd_exec_summary",), \
-                f"{tool_name} summary_builder '{policy.summary_builder}' 未注册"
+        assert spec is not None, f"{tool_name} 缺少 ToolSpec"
+        assert spec.name == tool_name
+        assert spec.default_risk in ("low", "medium", "high"), \
+            f"{tool_name} default_risk 无效: {spec.default_risk}"
 
 
 # ── S1: ToolSpec 深度不可变测试 ──────────────────────────────────────

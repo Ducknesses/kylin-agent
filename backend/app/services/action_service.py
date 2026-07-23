@@ -153,7 +153,13 @@ class ActionService:
         ctx.trace_id = stored.trace_id
         ctx.intent = "action_execute"
         ctx.risk_level = "medium"
-        meta = self._tool_registry.build_audit_metadata(tool, dict(params))
+        try:
+            meta = self._tool_registry.build_audit_metadata(tool, dict(params))
+        except ValueError as e:
+            return ActionPrecheck(result="not_found", option_id=stored.option.option_id,
+                                  session_id=session_id, trace_id=stored.trace_id,
+                                  risk_level=stored.option.risk_level,
+                                  message=str(e))
         meta["option_id"] = stored.option.option_id
         ctx.add_tool_call(tool, dict(meta), None)
 
@@ -205,7 +211,13 @@ class ActionService:
         ctx.trace_id = stored.trace_id
         ctx.intent = "action_execute"
         ctx.risk_level = "low"
-        meta = self._tool_registry.build_audit_metadata(tool, dict(params))
+        try:
+            meta = self._tool_registry.build_audit_metadata(tool, dict(params))
+        except ValueError as e:
+            return ActionPrecheck(result="not_found", option_id=stored.option.option_id,
+                                  session_id=session_id, trace_id=stored.trace_id,
+                                  risk_level="low",
+                                  message=str(e))
         meta["option_id"] = stored.option.option_id
         ctx.add_tool_call(tool, dict(meta), None)
 
@@ -426,7 +438,13 @@ class ActionService:
         ctx.trace_id = stored.trace_id
         ctx.intent = "action_rollback"
         ctx.risk_level = stored.option.risk_level
-        meta = self._tool_registry.build_audit_metadata(tool_name, rollback_params)
+        try:
+            meta = self._tool_registry.build_audit_metadata(tool_name, rollback_params)
+        except ValueError as e:
+            return ActionPrecheck(result="not_found", option_id=stored.option.option_id,
+                                  session_id=session_id, trace_id=stored.trace_id,
+                                  risk_level=stored.option.risk_level,
+                                  message=str(e))
         meta["option_id"] = stored.option.option_id
         meta["rollback"] = True
         ctx.add_tool_call(tool_name, dict(meta), None)
@@ -516,7 +534,11 @@ class ActionService:
         ctx.trace_id = trace_id
         ctx.intent = "action_execute"
         ctx.risk_level = risk
-        meta = self._tool_registry.build_audit_metadata(tool, dict(params))
+        try:
+            meta = self._tool_registry.build_audit_metadata(tool, dict(params))
+        except ValueError:
+            logger.warning("_audit_blocked: 找不到对应工具: %s，跳过审计", tool)
+            return
         meta["option_id"] = option_id
         ctx.add_tool_call(tool, dict(meta), None)
         await self._safe_audit(ctx, "action_blocked")
