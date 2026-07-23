@@ -25,6 +25,7 @@
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import { Plus, Close } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chatStore'
@@ -34,6 +35,9 @@ import ChatPanel from '@/components/ChatPanel.vue'
 
 const chatStore = useChatStore()
 const wsStore = useWsStore()
+
+// 当前连接期间是否已确认过删除操作，确认一次后不再弹出确认框
+const deleteConfirmed = ref(false)
 
 async function newSession() {
   const id = await chatStore.createSession()
@@ -48,14 +52,18 @@ async function switchSession(id) {
 }
 
 async function confirmDelete(s) {
-  try {
-    await ElMessageBox.confirm(
-      `确认删除会话「${s.title}」？删除后不可恢复。`,
-      '删除确认',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
-    )
-  } catch {
-    return // 用户取消
+  if (!deleteConfirmed.value) {
+    try {
+      await ElMessageBox.confirm(
+        `确认删除会话「${s.title}」？删除后不可恢复。`,
+        '删除确认',
+        { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return // 用户取消
+    }
+    // 用户确认后，本次连接内不再弹出确认框
+    deleteConfirmed.value = true
   }
   try {
     await chatStore.deleteSession(s.id)
