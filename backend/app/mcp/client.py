@@ -630,9 +630,18 @@ class MCPClient:
 
             result = response.result
             if isinstance(result, dict):
+                # MCP 标准格式：{content: [...], isError: false}
+                if "content" in result:
+                    return {
+                        "content": result.get("content", []),
+                        "isError": result.get("isError", False),
+                    }
+                # mcp-server 插件原始格式：直接返回结果 dict
+                # 包装为 MCP 标准 content 格式
+                text_content = json.dumps(result, ensure_ascii=False) if result else ""
                 return {
-                    "content": result.get("content", []),
-                    "isError": result.get("isError", False),
+                    "content": [{"type": "text", "text": text_content}],
+                    "isError": bool(result.get("blocked") or result.get("error")),
                 }
 
             return {
@@ -742,3 +751,17 @@ async def get_mcp_client() -> MCPClient:
     if _mcp_client is None:
         _mcp_client = MCPClient()
     return _mcp_client
+
+
+# ========================================================================
+# 辅助函数（向后兼容旧版测试/调用方）
+# ========================================================================
+
+def _ok(result: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """构造成功响应 {ok: True, result: {...}, error: None}"""
+    return {"ok": True, "result": result or {}, "error": None}
+
+
+def _fail(error: str, result: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """构造失败响应 {ok: False, result: None, error: str}"""
+    return {"ok": False, "result": result, "error": error}

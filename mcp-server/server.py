@@ -213,67 +213,127 @@ def handle_pending_confirm(params: dict, req_id=None) -> dict:
 
 
 def handle_tools_list(req_id=None) -> dict:
-    """列出所有可用工具及其参数定义"""
-    tool_defs = {
-        "sys_info": {
+    """列出所有可用工具及其参数定义 — MCP 2024-11-05 标准格式"""
+    tool_defs = [
+        {
+            "name": "sys_info",
             "description": "获取系统信息（CPU、内存、磁盘、负载）",
-            "parameters": {
-                "metric": "cpu|memory|disk|load|uptime|all",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "查询指标类型",
+                        "enum": ["cpu", "memory", "disk", "load", "uptime", "network", "all"],
+                        "default": "all",
+                    },
+                },
             },
         },
-        "service_mgr": {
+        {
+            "name": "service_mgr",
             "description": "管理系统服务",
-            "parameters": {
-                "action": "status|start|stop|restart",
-                "service": "服务名称",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作类型",
+                        "enum": ["status", "start", "stop", "restart", "is-active", "is-enabled"],
+                    },
+                    "service": {
+                        "type": "string",
+                        "description": "服务名称",
+                    },
+                },
+                "required": ["action", "service"],
             },
         },
-        "log_reader": {
+        {
+            "name": "log_reader",
             "description": "读取系统日志，支持关键词过滤",
-            "parameters": {
-                "type": "journalctl|file",
-                "source": "日志来源（别名或路径）",
-                "lines": "行数",
-                "service": "服务名（journalctl模式）",
-                "since": "时间范围",
-                "keyword": "关键词过滤（可选）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "日志读取方式",
+                        "enum": ["journalctl", "file"],
+                    },
+                    "source": {"type": "string", "description": "日志来源（别名或路径）"},
+                    "lines": {"type": "integer", "description": "读取行数", "default": 100},
+                    "service": {"type": "string", "description": "服务名（journalctl模式）"},
+                    "since": {"type": "string", "description": "时间范围，如 1h / 30m"},
+                    "keyword": {"type": "string", "description": "关键词过滤（可选）"},
+                },
+                "required": ["type", "source"],
             },
         },
-        "net_monitor": {
+        {
+            "name": "net_monitor",
             "description": "网络监控信息（连接/流量/网卡/路由/DNS/监听端口）",
-            "parameters": {
-                "metric": "connections|traffic|interfaces|routes|dns|listen|all",
-                "port": "端口号（listen模式筛选，可选）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "监控指标类型",
+                        "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
+                        "default": "all",
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "端口号（listen模式筛选，可选）",
+                    },
+                },
             },
         },
-        "cmd_exec": {
+        {
+            "name": "cmd_exec",
             "description": "在沙箱中安全执行系统命令",
-            "parameters": {
-                "command": "要执行的命令",
-                "timeout": "超时秒数（默认30）",
-                "user": "执行用户（默认agent-read）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的命令"},
+                    "timeout": {"type": "integer", "description": "超时秒数", "default": 30},
+                    "user": {"type": "string", "description": "执行用户", "default": "agent-read"},
+                },
+                "required": ["command"],
             },
         },
-        "file_guard": {
+        {
+            "name": "file_guard",
             "description": "文件安全检查、读取与安全写入（带审计日志）",
-            "parameters": {
-                "action": "check|read|write",
-                "path": "文件路径",
-                "content": "写入内容（write 操作）",
-                "max_size": "最大读取字节数（默认1MB）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作类型",
+                        "enum": ["check", "read", "write"],
+                    },
+                    "path": {"type": "string", "description": "文件路径"},
+                    "content": {"type": "string", "description": "写入内容（write 操作）"},
+                    "max_size": {"type": "integer", "description": "最大读取字节数", "default": 1048576},
+                },
+                "required": ["action", "path"],
             },
         },
-        "metrics_history": {
+        {
+            "name": "metrics_history",
             "description": "查询系统历史指标数据（CPU、内存、磁盘、网络），按时间范围返回历史读数",
-            "parameters": {
-                "from_ts": "开始时间戳（Unix秒，可选，默认5分钟前）",
-                "to_ts": "结束时间戳（Unix秒，可选，默认当前时间）",
-                "metrics": "逗号分隔的指标名: cpu,memory,disk,network,all（可选，默认all）",
-                "limit": "最大返回条数（默认5000，最大10000）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_ts": {"type": "number", "description": "开始时间戳（Unix秒），默认5分钟前"},
+                    "to_ts": {"type": "number", "description": "结束时间戳（Unix秒），默认当前时间"},
+                    "metrics": {"type": "string", "description": "逗号分隔的指标名: cpu,memory,disk,network,all"},
+                    "limit": {"type": "integer", "description": "最大返回条数", "default": 5000},
+                },
             },
         },
-    }
-    return make_jsonrpc_response({"tools": list(TOOLS.keys()), "definitions": tool_defs}, req_id)
+    ]
+    return make_jsonrpc_response({"tools": tool_defs}, req_id)
 
 
 def process_request(method: str, params: dict, req_id=None) -> dict:
@@ -293,6 +353,25 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
     if method == "ping":
         mcp_self_monitor.request_stats["success"] += 1
         return make_jsonrpc_response({"pong": True, "version": "1.0.0", "tools_count": len(TOOLS)}, req_id)
+
+    if method == "initialize":
+        mcp_self_monitor.request_stats["success"] += 1
+        return make_jsonrpc_response({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "KylinOS MCP Server",
+                "version": "1.0.0",
+            },
+            "capabilities": {
+                "tools": {},
+                "resources": {},
+            },
+        }, req_id)
+
+    if method == "notifications/initialized":
+        # 标准 MCP 握手完成通知，无需返回数据
+        mcp_self_monitor.request_stats["success"] += 1
+        return make_jsonrpc_response({}, req_id)
 
     if method == "tools/list":
         mcp_self_monitor.request_stats["success"] += 1
@@ -411,10 +490,11 @@ class MCPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # 检查路径
-        if self.path not in ("/mcp/v1/tools/call", "/mcp/v1/tools/list", "/mcp/v1/rpc", "/jsonrpc"):
+        # 检查路径 — 兼容 MCP 客户端发到根路径的习惯
+        ALLOWED_PATHS = ("/mcp/v1/tools/call", "/mcp/v1/tools/list", "/mcp/v1/rpc", "/jsonrpc", "/", "")
+        if self.path not in ALLOWED_PATHS and not self.path.startswith("/mcp/v1/"):
             self._send_json(
-                {"error": "未找到接口，请使用 /mcp/v1/tools/call"},
+                {"error": "未找到接口，请使用 /mcp/v1/tools/call 或根路径"},
                 404,
             )
             return

@@ -2,7 +2,7 @@
 
 正式接口（最新前后端 API 统一规范 v1.0）：
   GET /api/monitor/metrics  → 嵌套结构 REST 快照（本地 psutil）（需要 READ 权限）
-  GET /api/monitor/stream   → 扁平结构 SSE 实时流（本地 psutil）
+  GET /api/monitor/stream   → 扁平结构 SSE 实时流（MCP 远程 sys_info）
   GET /api/monitor/history  → 历史指标数据（通过 MCP 拉取 SQLite 缓存）（需要 READ 权限）
 """
 import asyncio
@@ -16,8 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.auth import AuthContext, AuthLevel
-from app.dependencies import require_auth
-from app.mcp.client import MCPClient
+from app.dependencies import require_auth, mcp_client as _mcp_client_singleton
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -95,20 +94,33 @@ def _collect_flat_metrics() -> dict:
 async def _mcp_metrics_generator():
     """SSE 流式生成系统指标（通过 MCP 远程采集）
 
+    通过 sys_info(all) 工具调用获取 mcp-server 上的实时系统指标。
     每个事件均包含 mcp_connected 字段，前端可据此判断数据来源：
       - true  → MCP 连接正常，数据真实有效
       - false → MCP 连接失败，前端应标记为"已断开"并不再追加 0 值点
     """
-    client = MCPClient()
     _prev_net_mcp = {"bytes_sent": 0, "bytes_recv": 0, "ts": 0.0}
     while True:
         try:
             mcp_ok = False
+            raw = {}
             try:
-                result = await client.get_system_metrics()
-                raw = result.get("result", {}) if result.get("ok") else {}
-                mcp_ok = result.get("ok") and bool(raw)
-            except Exception:
+                # 使用全局 mcp_client 单例，复用已建立的连接
+                result = await _mcp_client_singleton.call_tool(
+                    "sys_info", {"metric": "all"}, server_id="default"
+                )
+                if result and not result.get("isError"):
+                    # call_tool 返回 {content: [...], isError: bool}
+                    content_list = result.get("content", [])
+                    if content_list:
+                        text = content_list[0].get("text", "{}") if content_list else "{}"
+                        try:
+                            raw = json.loads(text)
+                        except json.JSONDecodeError:
+                            raw = {}
+                    mcp_ok = bool(raw)
+            except Exception as e:
+                logger.warning(f"[Monitor] MCP sys_info 调用失败: {e}")
                 raw = {}
                 mcp_ok = False
 
@@ -180,7 +192,6 @@ async def get_metrics_history(
     metrics: str | None = Query(None, description="逗号分隔的指标名: cpu,memory,disk,network,all"),
 ):
     """历史指标数据 —— 通过 MCP 拉取 mcp-server 本地 SQLite 缓存"""
-    client = MCPClient()
     args = {}
     if from_ts is not None:
         args["from_ts"] = from_ts
@@ -189,10 +200,16 @@ async def get_metrics_history(
     if metrics is not None:
         args["metrics"] = metrics
 
-    result = await client.call_tool("metrics_history", args)
-    if result.get("ok"):
-        return result["result"]
-    return {"error": result.get("error", "获取历史数据失败"), "data": []}
+    result = await _mcp_client_singleton.call_tool("metrics_history", args, server_id="default")
+    if result and not result.get("isError"):
+        content_list = result.get("content", [])
+        if content_list:
+            text = content_list[0].get("text", "{}")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+    return {"error": "获取历史数据失败", "data": []}
 
 
 @router.get("/monitor/stream")
