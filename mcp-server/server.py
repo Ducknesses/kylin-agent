@@ -32,13 +32,6 @@ TOOLS = {
     "metrics_history": metrics_store.handle,
 }
 
-# ============================================================
-# Pending Confirmation 存储
-# ============================================================
-PENDING_STORE: dict[str, dict] = {}   # confirm_id -> {tool_name, arguments, created_at, ...}
-PENDING_LOCK = threading.Lock()
-PENDING_TIMEOUT = 120  # 秒，超时自动拒绝
-
 # JSON-RPC 2.0 标准错误码
 JSONRPC_ERRORS = {
     "PARSE_ERROR": (-32700, "解析错误"),
@@ -48,8 +41,6 @@ JSONRPC_ERRORS = {
     "INTERNAL_ERROR": (-32603, "内部错误"),
     "COMMAND_BLOCKED": (-32600, "命令被安全策略拦截"),
     "EXECUTION_FAILED": (-32000, "命令执行失败"),
-    "PENDING_EXPIRED": (-32002, "待确认操作已过期"),
-    "PENDING_NOT_FOUND": (-32003, "待确认操作不存在"),
 }
 
 
@@ -132,84 +123,6 @@ def make_jsonrpc_error(code: int, message: str, req_id=None, extra: dict = None)
 def make_jsonrpc_response(result, req_id=None) -> dict:
     """构造 JSON-RPC 2.0 成功响应"""
     return {"jsonrpc": "2.0", "result": result, "id": req_id}
-
-
-def cleanup_expired_pending():
-    """清理过期的待确认操作"""
-    now = time.time()
-    with PENDING_LOCK:
-        expired = [cid for cid, v in PENDING_STORE.items() if now - v.get("created_at", 0) > PENDING_TIMEOUT]
-        for cid in expired:
-            logger.info("[Pending] 清理过期待确认: confirm_id=%s, tool=%s", cid, PENDING_STORE[cid].get("tool_name"))
-            del PENDING_STORE[cid]
-
-
-def handle_pending_confirm(params: dict, req_id=None) -> dict:
-    """
-    处理 tools/pending_confirm 请求
-
-    params: {
-        "confirm_id": "xxx",      # 待确认ID
-        "approved": true/false    # 是否批准
-    }
-    """
-    confirm_id = params.get("confirm_id", "").strip()
-    approved = params.get("approved", False)
-
-    if not confirm_id:
-        return make_jsonrpc_error(*JSONRPC_ERRORS["INVALID_PARAMS"], req_id,
-                                  extra={"detail": "缺少参数: confirm_id"})
-
-    with PENDING_LOCK:
-        pending = PENDING_STORE.get(confirm_id)
-
-    if pending is None:
-        return make_jsonrpc_error(*JSONRPC_ERRORS["PENDING_NOT_FOUND"], req_id,
-                                  extra={"detail": f"待确认操作不存在或已过期: {confirm_id}"})
-
-    # 检查超时
-    if time.time() - pending.get("created_at", 0) > PENDING_TIMEOUT:
-        with PENDING_LOCK:
-            PENDING_STORE.pop(confirm_id, None)
-        return make_jsonrpc_error(*JSONRPC_ERRORS["PENDING_EXPIRED"], req_id,
-                                  extra={"detail": f"待确认操作已过期: {confirm_id}"})
-
-    if not approved:
-        # 用户拒绝 → 从存储移除，返回拒绝状态
-        with PENDING_LOCK:
-            PENDING_STORE.pop(confirm_id, None)
-        logger.info("[Pending] 用户拒绝操作: confirm_id=%s, tool=%s", confirm_id, pending.get("tool_name"))
-        mcp_self_monitor.request_stats["success"] += 1
-        return make_jsonrpc_response({
-            "status": "rejected",
-            "confirm_id": confirm_id,
-            "tool": pending.get("tool_name"),
-            "reason": "用户拒绝了此操作",
-        }, req_id)
-
-    # 用户批准 → 实际执行工具调用
-    tool_name = pending.get("tool_name", "")
-    arguments = pending.get("arguments", {})
-
-    with PENDING_LOCK:
-        PENDING_STORE.pop(confirm_id, None)
-
-    logger.info("[Pending] 用户批准执行: confirm_id=%s, tool=%s, args=%s", confirm_id, tool_name, arguments)
-
-    # 调用工具处理函数
-    try:
-        result = TOOLS[tool_name](arguments)
-        mcp_self_monitor.request_stats["success"] += 1
-        # 包装结果，注明是经确认后执行的
-        result["_confirmed"] = True
-        result["_confirm_id"] = confirm_id
-        return make_jsonrpc_response(result, req_id)
-    except Exception as e:
-        mcp_self_monitor.request_stats["errors"] += 1
-        tb = traceback.format_exc()
-        logger.error("[Pending] 确认后执行异常 tool=%s:\n%s", tool_name, tb)
-        return make_jsonrpc_error(*JSONRPC_ERRORS["INTERNAL_ERROR"], req_id,
-                                  extra={"detail": str(e), "tool": tool_name})
 
 
 def handle_tools_list(req_id=None) -> dict:
@@ -340,12 +253,11 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
     """
     处理单个 JSON-RPC 请求
 
-    method: "tools/call" | "tools/list" | "tools/pending_confirm" | "ping"
+    method: "initialize" | "notifications/initialized" | "tools/call" | "tools/list" | "ping"
     params: {"name": "sys_info", "arguments": {"metric": "cpu"}}  (tools/call)
-    """
-    # 定期清理过期待确认
-    cleanup_expired_pending()
 
+    注意：安全确认已由 backend SafetyGuard 统一处理，mcp-server 层不再做二次确认。
+    """
     # 请求统计
     mcp_self_monitor.request_stats["total"] += 1
 
@@ -369,16 +281,12 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
         }, req_id)
 
     if method == "notifications/initialized":
-        # 标准 MCP 握手完成通知，无需返回数据
         mcp_self_monitor.request_stats["success"] += 1
         return make_jsonrpc_response({}, req_id)
 
     if method == "tools/list":
         mcp_self_monitor.request_stats["success"] += 1
         return handle_tools_list(req_id)
-
-    if method == "tools/pending_confirm":
-        return handle_pending_confirm(params, req_id)
 
     if method == "tools/call":
         tool_name = params.get("name", "")
@@ -398,23 +306,6 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
         logger.info("[Server] 调用工具: %s, 参数: %s", tool_name, arguments)
         try:
             result = TOOLS[tool_name](arguments)
-
-            # 检查插件是否返回了 pending_confirmation
-            if isinstance(result, dict) and result.get("_pending_confirmation"):
-                confirm_id = result.get("confirm_id", "")
-                if confirm_id:
-                    # 存入 PENDING_STORE 等待确认（使用插件返回的 pending_args，确保携带 _skip_pending 标记）
-                    with PENDING_LOCK:
-                        PENDING_STORE[confirm_id] = {
-                            "tool_name": tool_name,
-                            "arguments": result.get("pending_args", arguments),
-                            "created_at": time.time(),
-                        }
-                    logger.info("[Pending] 操作需确认: tool=%s, confirm_id=%s, reason=%s",
-                                tool_name, confirm_id, result.get("reason", ""))
-                    mcp_self_monitor.request_stats["success"] += 1
-                    return make_jsonrpc_response(result, req_id)
-
             mcp_self_monitor.request_stats["success"] += 1
             return make_jsonrpc_response(result, req_id)
         except Exception as e:
@@ -476,7 +367,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                 "available_tools": list(TOOLS.keys()),
             })
         else:
-            self._send_json({"error": "仅支持 POST 到 /mcp/v1/tools/ 接口"}, 404)
+            self._send_json({"error": "仅支持 POST 到 /mcp/v1/ 接口"}, 404)
 
     def do_POST(self):
         """POST 请求处理 JSON-RPC 2.0 调用"""
@@ -647,9 +538,6 @@ def restart_server(new_host=None, new_port=None):
                 "current": {"host": old_host, "port": old_port},
             }
         if old_port == target_port:
-            # SO_REUSEPORT 未能生效（非 Linux 平台降级路径）：
-            # 必须先关闭旧 socket 释放端口，再绑定新 socket。
-            # 为最小化服务中断，关闭与绑定之间不做 sleep。
             logger.warning(
                 "[Server] 端口冲突 %s:%d，SO_REUSEPORT 不可用，关闭旧 socket 后重试绑定...",
                 target_host, target_port,
@@ -662,7 +550,6 @@ def restart_server(new_host=None, new_port=None):
             except OSError as e2:
                 new_sock.close()
                 logger.error("[Server] 重试绑定仍失败 %s:%d - %s", target_host, target_port, e2)
-                # 恢复旧 socket 绑定（重新绑定旧端口）
                 try:
                     restore_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     restore_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -706,8 +593,7 @@ def restart_server(new_host=None, new_port=None):
             "current": {"host": old_host, "port": old_port},
         }
 
-    # 安全关闭旧 socket（此时 new_sock 已生效，关闭旧 socket
-    # 即使失败也不影响新 socket 正常工作）
+    # 安全关闭旧 socket
     try:
         old_sock.close()
     except Exception:
@@ -716,7 +602,6 @@ def restart_server(new_host=None, new_port=None):
     logger.info("[Server] socket 已替换: %s:%d -> %s:%d",
                  old_host, old_port, target_host, target_port)
 
-    # 更新 mcp_self_monitor 中的 server_instance 引用
     mcp_self_monitor.server_instance = server_instance
 
     return {
@@ -787,7 +672,6 @@ def _init_self_monitor():
         metrics_store.cleanup_expired()
         logger.info("[Server] metrics_store.cleanup_expired() 完成 (%.2fs)", time.time() - t0)
 
-        # VACUUM 改用后台线程延迟执行，避免启动时阻塞（大数据库可能耗时数秒）
         threading.Thread(
             target=_delayed_vacuum,
             daemon=True,

@@ -186,23 +186,6 @@ class AgentHarness:
             logger.exception(f"[AgentHarness] MCPClient 异常: {e}")
             mcp_result = {"ok": False, "result": None, "error": "MCP 工具调用异常"}
 
-        # ── 5.5 MCP 级别二次确认检测 ──
-        mcp_result_data = mcp_result.get("result") if isinstance(mcp_result.get("result"), dict) else {}
-        if mcp_result.get("ok") and mcp_result_data.get("_pending_confirmation"):
-            confirm_id = mcp_result_data.get("confirm_id", "unknown")
-            logger.info(
-                f"[AgentHarness] MCP 返回 pending，自动重试: "
-                f"tool={tool_name}, confirm_id={confirm_id}"
-            )
-            retry_params = dict(params)
-            retry_params["_skip_pending"] = True
-            retry_params["skip_pending"] = True  # 兼容 cmd_exec.py 的参数名
-            try:
-                mcp_result = await self.mcp_client.call_tool(tool_name, arguments=retry_params)
-            except Exception as e:
-                logger.exception(f"[AgentHarness] MCP pending 重试异常: {e}")
-                mcp_result = {"ok": False, "result": None, "error": "MCP 二次确认重试异常"}
-
         ctx.tool_calls[-1]["result"] = mcp_result.get("result") if mcp_result.get("ok") else None
         ctx.tool_calls[-1]["status"] = "done" if mcp_result.get("ok") else "mcp_error"
         ctx.tool_calls[-1]["mcp_error"] = mcp_result.get("error") if not mcp_result.get("ok") else None
