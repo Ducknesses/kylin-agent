@@ -332,7 +332,9 @@ class FixPlannerAgent:
     ) -> list[FixOption]:
         """服务异常场景：inactive / failed / stopped → 生成 restart 候选"""
         # 仅当意图暗示服务相关且有目标服务名时触发
+        # 支持 raw_intent 和旧版 intent（向后兼容）
         service_intents = {"service_status_query", "root_cause_analysis", "log_query"}
+        actual_intent = intent
         if intent not in service_intents:
             return []
         if not target_service:

@@ -170,3 +170,55 @@ class ToolRegistry:
             "tool": tool_name,
             "arguments": params,
         }
+
+    # ========================================================================
+    # 风险评级
+    # ========================================================================
+
+    # 工具默认风险等级
+    _DEFAULT_RISK: Dict[str, str] = {
+        "sys_info": "low",
+        "log_reader": "low",
+        "net_monitor": "low",
+        "metrics_history": "low",
+        "service_mgr": "low",
+        "cmd_exec": "medium",
+        "file_guard": "medium",
+    }
+
+    # service_mgr action → risk 映射
+    _SERVICE_MGR_ACTION_RISK: Dict[str, str] = {
+        "status": "low",
+        "is-active": "low",
+        "is-enabled": "low",
+        "start": "medium",
+        "stop": "medium",
+        "restart": "medium",
+    }
+
+    def get_default_risk(self, tool_name: str) -> Optional[str]:
+        """获取工具的默认风险等级。
+
+        Returns:
+            "low" / "medium" / "high" 或 None（未知工具）
+        """
+        # 优先从动态注册的工具中查找
+        tool = self._tools.get(tool_name)
+        if tool:
+            return self._DEFAULT_RISK.get(tool.name, "low")
+        # 回退到静态映射（支持未通过 MCP 动态注册的已知工具名）
+        return self._DEFAULT_RISK.get(tool_name)
+
+    def get_risk_for_action(self, tool_name: str, action: Any) -> Optional[str]:
+        """获取指定工具+action 的风险等级。
+
+        Returns:
+            "low" / "medium" / "high"，或 None（未知工具）
+        """
+        action_str = str(action) if action is not None else ""
+        if tool_name == "service_mgr":
+            if action_str in self._SERVICE_MGR_ACTION_RISK:
+                return self._SERVICE_MGR_ACTION_RISK[action_str]
+            return self.get_default_risk(tool_name)
+        # 其他工具不考虑 action 细分，返回默认风险
+        return self.get_default_risk(tool_name)

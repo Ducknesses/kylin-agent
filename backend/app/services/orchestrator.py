@@ -294,10 +294,10 @@ class Orchestrator:
                 intent_result = await self.intent_agent.detect_with_llm(user_input)
             else:
                 intent_result = self.intent_agent.detect(user_input)
-            ctx.intent = intent_result.get("intent")
+            ctx.intent = intent_result.get("raw_intent", intent_result.get("intent", "unknown"))
             ctx.intent_result = intent_result
-            # 保存 intent_result 供后续 FixPlanner 使用
-            intent = ctx.intent or "unknown"
+            # raw_intent 为分类标签（给机器用），intent 为自然语言描述（给用户看）
+            intent = ctx.intent
             target_service = intent_result.get("target_service")
 
             # ── 4. DiagnoseAgent ──

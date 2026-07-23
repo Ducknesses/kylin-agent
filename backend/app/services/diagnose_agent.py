@@ -57,7 +57,7 @@ class DiagnoseAgent:
         self.knowledge_service = knowledge_service
 
     def plan(self, intent_result: dict) -> dict[str, Any]:
-        intent = intent_result.get("intent", "unknown")
+        intent = intent_result.get("raw_intent", intent_result.get("intent", "unknown"))
         target_service = intent_result.get("target_service")
         entities = intent_result.get("entities", {})
         original_input = intent_result.get("original_input", "")
@@ -77,6 +77,8 @@ class DiagnoseAgent:
         elif intent == "network_query":
             plans = self._plan_network(entities)
             reason = "查询网络状态"
+        elif intent == "system_monitor_query":
+            plans, reason = self._plan_system_monitor(entities)
         elif intent == "service_status_query":
             plans, reason = self._plan_service_status(target_service)
         elif intent == "log_query":
@@ -107,6 +109,22 @@ class DiagnoseAgent:
         if port is not None:
             return [{"tool": "net_monitor", "params": {"metric": "listen", "port": port}}]
         return [{"tool": "net_monitor", "params": {"metric": "all"}}]
+
+    @staticmethod
+    def _plan_system_monitor(entities: dict) -> tuple[list[dict], str]:
+        """实体驱动的系统资源监控计划 —— 根据 entities.resources 生成 sys_info 调用"""
+        resources = entities.get("resources", [])
+        if isinstance(resources, list) and resources:
+            # 单个资源 → 精准查询；多个 → all
+            valid_metrics = {"cpu", "memory", "disk", "load", "network", "uptime"}
+            matched = [r for r in resources if isinstance(r, str) and r.lower() in valid_metrics]
+            if len(matched) == 1:
+                metric = matched[0].lower()
+                return [{"tool": "sys_info", "params": {"metric": metric}}], f"查询系统{metric}指标"
+            if matched:
+                return [{"tool": "sys_info", "params": {"metric": "all"}}], f"查询系统指标: {', '.join(matched)}"
+        # 回退：查询全部
+        return [{"tool": "sys_info", "params": {"metric": "all"}}], "查询系统全部指标"
 
     @staticmethod
     def _plan_service_status(target_service: str | None) -> tuple[list[dict], str]:

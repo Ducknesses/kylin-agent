@@ -112,7 +112,7 @@ class ReporterAgent:
         返回:
             Markdown 格式诊断报告字符串
         """
-        intent = intent_result.get("intent", "unknown") if isinstance(intent_result, dict) else "unknown"
+        intent = intent_result.get("raw_intent", intent_result.get("intent", "unknown")) if isinstance(intent_result, dict) else "unknown"
         obs_list = _extract_obs_results(observations if isinstance(observations, list) else [])
 
         # unknown intent 优先处理——不能让空 observations 分支覆盖
@@ -793,7 +793,7 @@ class ReporterAgent:
         try:
             client = LLMClient()
 
-            intent_name = intent_result.get("intent", "unknown") if isinstance(intent_result, dict) else "unknown"
+            intent_name = intent_result.get("raw_intent", intent_result.get("intent", "unknown")) if isinstance(intent_result, dict) else "unknown"
             target_service = intent_result.get("target_service", "") if isinstance(intent_result, dict) else ""
 
             system_prompt = (

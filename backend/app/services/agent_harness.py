@@ -179,9 +179,12 @@ class AgentHarness:
             # 从 ToolRegistry 获取工具所属的 MCP 服务器 ID
             tool = self.tool_registry.get_tool(tool_name) if self.tool_registry else None
             server_id = tool.server_id if tool and tool.server_id else ""
-            mcp_result = await self.mcp_client.call_tool(
+            raw_mcp_result = await self.mcp_client.call_tool(
                 tool_name, arguments=params, server_id=server_id,
             )
+            # MCPClient 返回 MCP 协议格式 {content: [...], isError: bool}
+            # 统一转换为内部格式 {ok, result, error}
+            mcp_result = self._normalize_mcp_result(raw_mcp_result)
         except Exception as e:
             logger.exception(f"[AgentHarness] MCPClient 异常: {e}")
             mcp_result = {"ok": False, "result": None, "error": "MCP 工具调用异常"}
@@ -264,3 +267,55 @@ class AgentHarness:
                 )
         except Exception:
             logger.warning("[AgentHarness] 审计日志写入失败（已忽略）", exc_info=True)
+
+    @staticmethod
+    def _normalize_mcp_result(raw: dict) -> dict[str, Any]:
+        """将 MCPClient.call_tool 返回的 MCP 协议格式转换为内部统一格式。
+
+        MCPClient 返回 MCP 标准格式:
+            {"content": [...], "isError": false}
+            或 {"error": "..."}  (连接/网络错误)
+            或 {"content": [...], "isError": true}
+
+        内部统一格式:
+            {"ok": true, "result": {...}, "error": null}
+            {"ok": false, "result": null, "error": "..."}
+        """
+        if not isinstance(raw, dict):
+            return {"ok": False, "result": None, "error": "MCP 返回无效格式"}
+
+        # 连接/网络错误
+        if "error" in raw and "content" not in raw:
+            return {"ok": False, "result": None, "error": raw["error"]}
+
+        is_error = raw.get("isError", False)
+        content = raw.get("content", [])
+
+        # 提取文本内容作为 result
+        result_text = None
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    # 尝试解析 JSON（mcp-server 返回的是 JSON 字符串包裹在 content[0].text 中）
+                    import json as _json
+                    try:
+                        result_text = _json.loads(text)
+                    except (_json.JSONDecodeError, TypeError):
+                        result_text = text
+                    break
+            if result_text is None and content:
+                result_text = str(content)
+
+        if is_error:
+            return {
+                "ok": False,
+                "result": None,
+                "error": str(result_text) if result_text else "MCP 工具执行返回错误",
+            }
+
+        return {
+            "ok": True,
+            "result": result_text if result_text is not None else raw.get("result"),
+            "error": None,
+        }
