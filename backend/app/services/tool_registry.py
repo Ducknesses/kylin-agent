@@ -53,6 +53,27 @@ class ToolParamSpec:
 
 
 @dataclass(frozen=True)
+class AuditPolicy:
+    """工具的审计策略配置
+
+    三种模式：
+      - whitelist: 只保留 safe_fields 中的字段，其余丢弃
+      - summary:   调用 summary_builder 函数生成安全摘要，不记录原始参数
+      - full:      完整保留所有参数，只做敏感 key 脱敏（默认/降级模式）
+    """
+    mode: str = "full"                       # "whitelist" | "summary" | "full"
+    safe_fields: tuple[str, ...] = ()        # whitelist 模式下的安全字段
+    summary_builder: str | None = None       # summary 模式的摘要构造器名
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "safe_fields": list(self.safe_fields),
+            "summary_builder": self.summary_builder,
+        }
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     """一个工具的完整定义（不可变）"""
     name: str
@@ -63,6 +84,7 @@ class ToolSpec:
     action_risk_overrides: Mapping[str, RiskLevel] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    audit_policy: AuditPolicy = field(default_factory=AuditPolicy)
 
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容的 dict（用于保存到配置文件）"""
@@ -86,6 +108,7 @@ class ToolSpec:
             "default_risk": self.default_risk,
             "action_field": self.action_field,
             "action_risk_overrides": dict(self.action_risk_overrides),
+            "audit_policy": self.audit_policy.to_dict(),
             "params": params_dict,
         }
 
@@ -174,6 +197,29 @@ def _parse_tool_spec(name: str, data: dict[str, object]) -> ToolSpec:
                 constraints=_readonly_constraints(pconstraints) if pconstraints else None,
             )
 
+    # 解析 audit_policy
+    audit_policy = AuditPolicy()  # 默认 full
+    ap_raw = data.get("audit_policy")
+    if isinstance(ap_raw, dict):
+        mode = str(ap_raw.get("mode", "full"))
+        if mode not in ("whitelist", "summary", "full"):
+            logger.warning("工具 '%s' audit_policy mode 无效: %s，回退 full", name, mode)
+            mode = "full"
+        safe_fields_raw = ap_raw.get("safe_fields", [])
+        safe_fields: tuple[str, ...] = ()
+        if isinstance(safe_fields_raw, list):
+            safe_fields = tuple(str(sf) for sf in safe_fields_raw)
+        summary_builder = ap_raw.get("summary_builder")
+        if summary_builder is not None:
+            summary_builder = str(summary_builder)
+            if not summary_builder:
+                summary_builder = None
+        audit_policy = AuditPolicy(
+            mode=mode,
+            safe_fields=safe_fields,
+            summary_builder=summary_builder,
+        )
+
     return ToolSpec(
         name=name,
         description=description,
@@ -181,6 +227,7 @@ def _parse_tool_spec(name: str, data: dict[str, object]) -> ToolSpec:
         default_risk=default_risk,  # type: ignore[arg-type]
         action_field=action_field,
         action_risk_overrides=MappingProxyType(action_risk_overrides),
+        audit_policy=audit_policy,
     )
 
 
@@ -349,7 +396,7 @@ class ToolRegistry:
                         return False
                 new_overrides[action] = risk  # type: ignore[assignment]
 
-        # 创建新的不可变 ToolSpec
+        # 创建新的不可变 ToolSpec（保留原有 audit_policy）
         new_spec = ToolSpec(
             name=spec.name,
             description=spec.description,
@@ -357,6 +404,7 @@ class ToolRegistry:
             default_risk=new_default,
             action_field=spec.action_field,
             action_risk_overrides=MappingProxyType(new_overrides),
+            audit_policy=spec.audit_policy,
         )
         self._registry[tool_name] = new_spec
         logger.info(
@@ -675,23 +723,120 @@ class ToolRegistry:
     # 审计
     # ========================================================================
 
+    def get_tool_audit_policy(self, tool_name: str) -> Optional[Dict[str, object]]:
+        """获取工具的审计策略"""
+        spec = self._registry.get(tool_name)
+        if spec is None:
+            return None
+        return spec.audit_policy.to_dict()
+
+    def update_tool_audit_policy(
+        self,
+        tool_name: str,
+        mode: Optional[str] = None,
+        safe_fields: Optional[List[str]] = None,
+        summary_builder: Optional[str] = None,
+    ) -> bool:
+        """更新工具的审计策略（内存中），需调用 save_config 持久化
+
+        Args:
+            tool_name: 工具名称
+            mode: 审计模式 ("whitelist" / "summary" / "full")
+            safe_fields: whitelist 模式下的安全字段列表
+            summary_builder: summary 模式的摘要构造器名 ("cmd_exec_summary")
+
+        Returns:
+            True 更新成功，False 工具不存在或参数无效
+        """
+        spec = self._registry.get(tool_name)
+        if spec is None:
+            logger.warning("更新审计策略失败: 工具 '%s' 不在注册表中", tool_name)
+            return False
+
+        new_mode = spec.audit_policy.mode
+        new_safe_fields = spec.audit_policy.safe_fields
+        new_summary_builder = spec.audit_policy.summary_builder
+
+        if mode is not None:
+            if mode not in ("whitelist", "summary", "full"):
+                logger.warning("无效的 audit mode: %s", mode)
+                return False
+            new_mode = mode
+
+        if safe_fields is not None:
+            # 校验 safe_fields 都在 params 中
+            valid_fields: list[str] = []
+            for sf in safe_fields:
+                if sf in spec.params:
+                    valid_fields.append(sf)
+                else:
+                    logger.warning(
+                        "工具 '%s' safe_field '%s' 不在 params 中，已跳过", tool_name, sf
+                    )
+            new_safe_fields = tuple(valid_fields)
+
+        if summary_builder is not None:
+            if summary_builder and summary_builder != "cmd_exec_summary":
+                logger.warning("未知的 summary_builder: %s", summary_builder)
+                return False
+            new_summary_builder = summary_builder if summary_builder else None
+
+        new_ap = AuditPolicy(
+            mode=new_mode,
+            safe_fields=new_safe_fields,
+            summary_builder=new_summary_builder,
+        )
+
+        new_spec = ToolSpec(
+            name=spec.name,
+            description=spec.description,
+            params=spec.params,
+            default_risk=spec.default_risk,
+            action_field=spec.action_field,
+            action_risk_overrides=spec.action_risk_overrides,
+            audit_policy=new_ap,
+        )
+        self._registry[tool_name] = new_spec
+        logger.info(
+            "工具 '%s' 审计策略已更新: mode=%s, safe_fields=%s, summary_builder=%s",
+            tool_name, new_mode, list(new_safe_fields), new_summary_builder,
+        )
+        return True
+
     def build_audit_metadata(self, tool_name: str, params: Mapping[str, object]) -> dict[str, object]:
         """构建审计安全元数据
 
-        注册表工具：对 params 做通用脱敏（审计策略待后续重构统一实现）
-        动态 MCP 工具：对所有参数做通用脱敏
+        按审计策略三模式处理：
+          - whitelist: 只保留 safe_fields 中的字段，对结果做敏感脱敏
+          - summary:   调用对应的 summary_builder 生成安全摘要，对结果做敏感脱敏
+          - full:      完整保留所有字段，只做敏感 key 脱敏
 
-        特殊处理：cmd_exec 使用 build_cmd_exec_summary 做安全摘要
+        动态 MCP 工具回退到 full 模式（通用脱敏）。
         """
         from app.services.audit_service import sanitize_sensitive_data
 
-        # cmd_exec 特殊摘要
-        if tool_name == "cmd_exec" and tool_name in self._registry:
-            return sanitize_sensitive_data(build_cmd_exec_summary(params))  # type: ignore[return-value]
+        spec = self._registry.get(tool_name)
+        if spec is not None:
+            ap = spec.audit_policy
+            params_dict = dict(params)
 
-        # 注册表工具：通用脱敏
-        if tool_name in self._registry:
-            return sanitize_sensitive_data(dict(params))  # type: ignore[return-value]
+            if ap.mode == "whitelist":
+                # 只保留白名单字段
+                filtered: dict[str, object] = {}
+                for sf in ap.safe_fields:
+                    if sf in params_dict:
+                        filtered[sf] = params_dict[sf]
+                return sanitize_sensitive_data(filtered)  # type: ignore[return-value]
+
+            if ap.mode == "summary":
+                if ap.summary_builder == "cmd_exec_summary":
+                    return sanitize_sensitive_data(build_cmd_exec_summary(params))  # type: ignore[return-value]
+                # 未知 summary_builder → 回退 full
+                logger.warning("工具 '%s' 未知 summary_builder: %s，回退 full", tool_name, ap.summary_builder)
+                return sanitize_sensitive_data(params_dict)  # type: ignore[return-value]
+
+            # mode == "full"
+            return sanitize_sensitive_data(params_dict)  # type: ignore[return-value]
 
         # 回退到动态 MCP 工具：通用脱敏
         if tool_name in self._tools:

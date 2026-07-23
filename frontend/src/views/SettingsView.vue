@@ -161,7 +161,14 @@
         </div>
       </el-tab-pane>
 
-      <!-- ============== Tab 3: 权限配置 ============== -->
+      <!-- ============== Tab 3: 工具配置 ============== -->
+      <el-tab-pane label="工具配置" name="tools">
+        <div class="tab-content">
+          <ToolsSettings />
+        </div>
+      </el-tab-pane>
+
+      <!-- ============== Tab 4: 权限配置 ============== -->
       <el-tab-pane label="权限配置" name="permission">
         <div class="tab-content">
           <el-tabs v-model="permSubTab" type="card">
@@ -368,6 +375,7 @@ import { ElMessage } from 'element-plus'
 import http from '@/api/http'
 import { useWsStore, getDefaultWsUrl, getDefaultApiUrl, parseUrl, buildUrl } from '@/stores/wsStore'
 import { wsClient } from '@/api/ws'
+import ToolsSettings from '@/components/ToolsSettings.vue'
 
 // ==================== 连接设置逻辑 ====================
 const wsStore = useWsStore()

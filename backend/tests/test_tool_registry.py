@@ -417,7 +417,7 @@ class TestBuildAuditMetadata:
     def registry(self) -> ToolRegistry:
         return ToolRegistry()
 
-    # A. service_mgr — 敏感字段 password 值被脱敏，非敏感字段保留原值
+    # A. service_mgr whitelist — 只保留 action/service，其余字段丢弃
     def test_service_mgr_filters_password(self, registry):
         meta = registry.build_audit_metadata("service_mgr", {
             "action": "restart",
@@ -425,24 +425,24 @@ class TestBuildAuditMetadata:
             "password": "secret",
             "extra": "ignored",
         })
-        # 非敏感字段保留
+        # 白名单字段保留
         assert meta.get("action") == "restart"
         assert meta.get("service") == "nginx"
-        assert meta.get("extra") == "ignored"
-        # 敏感 key 值被脱敏
-        assert meta.get("password") == "[REDACTED]"
+        # 非白名单字段被丢弃
+        assert "extra" not in meta
+        assert "password" not in meta
 
-    # B. sys_info — 敏感字段 secret 值被脱敏
+    # B. sys_info whitelist — 只保留 metric
     def test_sys_info_only_metric(self, registry):
         meta = registry.build_audit_metadata("sys_info", {
             "metric": "cpu",
             "secret": "should_not_appear",
         })
         assert meta.get("metric") == "cpu"
-        # 敏感 key 被脱敏但保留 key
-        assert meta.get("secret") == "[REDACTED]"
+        # secret 不在白名单中，被丢弃
+        assert "secret" not in meta
 
-    # C. log_reader — 通用脱敏，所有字段保留，仅敏感 key 脱敏
+    # C. log_reader whitelist — 只保留 service、lines
     def test_log_reader_only_service_lines(self, registry):
         meta = registry.build_audit_metadata("log_reader", {
             "service": "nginx",
@@ -452,21 +452,21 @@ class TestBuildAuditMetadata:
         })
         assert meta.get("service") == "nginx"
         assert meta.get("lines") == 100
-        # 非敏感字段保留（审计策略待后续重构统一处理）
-        assert meta.get("source") == "/var/log/syslog"
-        assert meta.get("keyword") == "error"
+        # 非白名单字段被丢弃
+        assert "source" not in meta
+        assert "keyword" not in meta
 
-    # D. net_monitor — 通用脱敏，所有字段保留
+    # D. net_monitor whitelist — 只保留 metric
     def test_net_monitor_only_metric(self, registry):
         meta = registry.build_audit_metadata("net_monitor", {
             "metric": "connections",
             "port": 80,
         })
         assert meta.get("metric") == "connections"
-        # 审计策略待后续重构，当前通用脱敏保留所有字段
-        assert meta.get("port") == 80
+        # port 不在白名单中，被丢弃
+        assert "port" not in meta
 
-    # E. file_guard — 敏感 key 脱敏，非敏感字段保留
+    # E. file_guard whitelist — 只保留 action、path
     def test_file_guard_only_action_path(self, registry):
         meta = registry.build_audit_metadata("file_guard", {
             "action": "write",
@@ -476,10 +476,9 @@ class TestBuildAuditMetadata:
         })
         assert meta.get("action") == "write"
         assert meta.get("path") == "/tmp/test.txt"
-        # content 不是敏感 key，保留原值
-        assert meta.get("content") == "secret content"
-        # password 是敏感 key，被脱敏
-        assert meta.get("password") == "[REDACTED]"
+        # 非白名单字段被丢弃
+        assert "content" not in meta
+        assert "password" not in meta
 
     # F. cmd_exec — 完整 command 不出现在 metadata；含安全摘要字段
     def test_cmd_exec_safe_summary_no_full_command(self, registry):
