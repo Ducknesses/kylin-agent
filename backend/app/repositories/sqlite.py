@@ -136,7 +136,12 @@ class SQLiteMessageRepository(MessageRepository):
             return None
 
     async def delete_session(self, session_id: str) -> bool:
-        """删除会话及其所有关联消息（先删消息再删会话，保证外键约束）"""
+        """删除会话及其所有关联消息（先删消息再删会话，保证外键约束）
+
+        级联清理：
+        - chat_messages（已通过 SQLAlchemy relationship 关联）
+        - audit_chain（通过 session_id 字符串关联，无 FK 约束）
+        """
         await self._ensure_tables()
         try:
             async with self._get_session() as session:
@@ -148,6 +153,11 @@ class SQLiteMessageRepository(MessageRepository):
                 from sqlalchemy import delete
                 await session.execute(
                     delete(ChatMessage).where(ChatMessage.session_id == session_id)
+                )
+                # 级联清理审计记录（audit_chain.session_id 无外键约束，需手动清理）
+                from app.models.audit import AuditChain
+                await session.execute(
+                    delete(AuditChain).where(AuditChain.session_id == session_id)
                 )
                 # 删除会话
                 await session.delete(existing)
