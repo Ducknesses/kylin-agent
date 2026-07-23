@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat, sessions, monitor, audit, config as config_api, actions
+from app.api import chat, sessions, monitor, audit, config as config_api, actions, mcp_servers
 from app.core.database import init_engine
 from app.core.logging_config import setup_logging
 from config import settings
@@ -46,7 +46,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("数据库未就绪，跳过白名单配置预加载（使用内置默认值）")
 
+    # 初始化 MCP 服务器连接
+    if db_ready:
+        logger.info("正在初始化 MCP 服务器连接...")
+        try:
+            from app.dependencies import init_mcp_servers
+            await init_mcp_servers()
+        except Exception as e:
+            logger.error(f"MCP 服务器初始化失败: {e}")
+
     yield
+
+    # 关闭 MCP 连接
+    logger.info("正在断开 MCP 服务器连接...")
+    try:
+        from app.dependencies import shutdown_mcp_servers
+        await shutdown_mcp_servers()
+    except Exception as e:
+        logger.error(f"MCP 服务器关闭失败: {e}")
+
     logger.info("应用关闭")
 
 
@@ -74,6 +92,7 @@ app.include_router(monitor.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(config_api.router, prefix="/api")
 app.include_router(actions.router, prefix="/api")
+app.include_router(mcp_servers.router)
 
 
 @app.get("/health")

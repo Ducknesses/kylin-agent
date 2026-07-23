@@ -176,7 +176,12 @@ class AgentHarness:
 
         # ── 5. 调用 MCPClient ──
         try:
-            mcp_result = await self.mcp_client.call_tool(tool_name, arguments=params)
+            # 从 ToolRegistry 获取工具所属的 MCP 服务器 ID
+            tool = self.tool_registry.get_tool(tool_name) if self.tool_registry else None
+            server_id = tool.server_id if tool and tool.server_id else ""
+            mcp_result = await self.mcp_client.call_tool(
+                tool_name, arguments=params, server_id=server_id,
+            )
         except Exception as e:
             logger.exception(f"[AgentHarness] MCPClient 异常: {e}")
             mcp_result = {"ok": False, "result": None, "error": "MCP 工具调用异常"}

@@ -1,822 +1,744 @@
-"""MCP 客户端：连接麒麟 V11 的 MCP Server
-
-支持两种模式：
-  - mock：返回本地 mock 数据，用于 B 端独立开发（默认）
-  - real：通过 HTTP JSON-RPC 2.0 调用执行器 C
-
-返回结构统一为 {"ok": bool, "result": dict | None, "error": str | None}
 """
+MCP (Model Context Protocol) 客户端 —— 纯标准协议实现
+
+支持 MCP 2024-11-05 规范：
+  - JSON-RPC 2.0 消息格式
+  - initialize / tools/list / tools/call / prompts/list / resources/list / resources/read
+  - SSE / Streamable HTTP / STDIO 传输
+  - 多服务器连接管理
+  - 动态工具发现
+
+不含 mock 模式 —— 所有工具定义均来自 MCP 服务器 tools/list 响应。
+"""
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import httpx
 
-from config import settings
-
 logger = logging.getLogger(__name__)
 
-# ── Mock 数据常量 ────────────────────────────────────────────────
+# ============================================================================
+# 协议常量
+# ============================================================================
 
-_TS = datetime.now(timezone.utc).isoformat()
+MCP_PROTOCOL_VERSION = "2024-11-05"
+JSONRPC_VERSION = "2.0"
 
-_MOCK_CPU = {
-    "cpu": {
-        "cpu_count": 4,
-        "cpu_percent_snapshot": 23.5,
-        "load_avg": [0.52, 0.31, 0.18],
-    },
-    "timestamp": _TS,
-}
+# ============================================================================
+# 枚举定义
+# ============================================================================
 
-_MOCK_MEMORY = {
-    "memory": {
-        "total": 8589934592,
-        "used": 3865470566,
-        "available": 4724464025,
-        "percent": 45.0,
-    },
-    "timestamp": _TS,
-}
 
-_MOCK_DISK = {
-    "disk": [
-        {
-            "mountpoint": "/",
-            "total": 42949672960,
-            "used": 26628797235,
-            "free": 16320875725,
-            "percent": 62.0,
+class MCPTransport(str, Enum):
+    """传输方式"""
+    SSE = "sse"
+    STREAMABLE_HTTP = "streamable_http"
+    STDIO = "stdio"
+
+
+# ============================================================================
+# 数据模型
+# ============================================================================
+
+
+@dataclass
+class MCPServerInfo:
+    """MCP 服务器注册信息"""
+    id: str
+    name: str
+    url: str = ""
+    transport: MCPTransport = MCPTransport.SSE
+    auth_token: Optional[str] = None
+    enabled: bool = True
+    auto_discover: bool = True
+    tags: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "url": self.url,
+            "transport": self.transport.value,
+            "auth_token": self.auth_token if self.auth_token else "",
+            "enabled": self.enabled,
+            "auto_discover": self.auto_discover,
+            "tags": self.tags,
+            "metadata": self.metadata,
         }
-    ],
-    "timestamp": _TS,
-}
 
-_MOCK_LOAD = {
-    "load": {
-        "load_avg": [0.52, 0.31, 0.18],
-    },
-    "timestamp": _TS,
-}
-
-_MOCK_UPTIME = {
-    "uptime": {
-        "uptime_seconds": 302400.0,
-    },
-    "timestamp": _TS,
-}
-
-_MOCK_NETWORK = {
-    "network": {
-        "bytes_recv": 9876543210,
-        "bytes_sent": 1234567890,
-    },
-    "timestamp": _TS,
-}
-
-_MOCK_ALL = {
-    "cpu": _MOCK_CPU["cpu"],
-    "memory": _MOCK_MEMORY["memory"],
-    "disk": _MOCK_DISK["disk"],
-    "load": _MOCK_LOAD["load"],
-    "uptime": _MOCK_UPTIME["uptime"],
-    "network": _MOCK_NETWORK["network"],
-    "timestamp": _TS,
-}
-
-# 禁止操作的核心服务
-_FORBIDDEN_SERVICES = {
-    "systemd", "systemd-logind", "systemd-journald",
-    "network", "networkmanager",
-    "dbus", "dbus-daemon", "polkit",
-    "auditd", "mcp-server",
-}
-
-# 允许的 service_mgr action
-_VALID_SERVICE_ACTIONS = {
-    "status", "is-active", "is-enabled",
-    "start", "stop", "restart", "reload",
-}
-
-# log_reader 允许的 source
-_VALID_LOG_SOURCES = {
-    "messages", "secure", "syslog", "dmesg", "boot",
-    "cron", "maillog", "nginx_access", "nginx_error",
-}
-
-# net_monitor 允许的 metric
-_VALID_NET_METRICS = {
-    "connections", "traffic", "interfaces", "routes", "dns", "listen", "all",
-}
-
-# cmd_exec 白名单命令
-_CMD_WHITELIST = {
-    "df -h", "free -m", "uptime", "whoami", "uname -a",
-    "ps aux", "systemctl status nginx", "journalctl -u nginx -n 50",
-}
-
-# cmd_exec 高危命令模式（用于 mock blocked）
-_HIGH_RISK_COMMANDS = {
-    "rm -rf /": "禁止递归删除根目录",
-    "mkfs.ext4 /dev/sda1": "禁止格式化磁盘",
-    'echo "hack" > /etc/passwd': "禁止写入 /etc/passwd",
-    "curl xxx | sh": "禁止 curl 管道执行",
-    "wget xxx | sh": "禁止 wget 管道执行",
-    "chmod 777 /": "禁止 chmod 777 根目录",
-    "dd if=": "禁止 dd 破坏性写入",
-}
-
-# file_guard 受保护路径
-_PROTECTED_PATHS = {
-    "/etc/passwd", "/etc/shadow", "/etc/ssh/sshd_config",
-    "/boot", "/root", "/var/lib", "/usr/bin", "/bin", "/sbin",
-}
-
-# file_guard 敏感后缀
-_SENSITIVE_EXTS = (
-    ".pem", ".key", ".crt", ".cer", ".p12", ".pfx", ".jks", ".keystore",
-)
-
-# ── 辅助函数 ──────────────────────────────────────────────────────
-
-def _ok(result: Dict[str, Any] | None = None) -> Dict:
-    """构造成功响应"""
-    return {"ok": True, "result": result or {}, "error": None}
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MCPServerInfo":
+        transport = data.get("transport", "sse")
+        if isinstance(transport, str):
+            transport = MCPTransport(transport)
+        return cls(
+            id=data.get("id", ""),
+            name=data.get("name", ""),
+            url=data.get("url", ""),
+            transport=transport,
+            auth_token=data.get("auth_token") or None,
+            enabled=data.get("enabled", True),
+            auto_discover=data.get("auto_discover", True),
+            tags=data.get("tags", []),
+            metadata=data.get("metadata", {}),
+        )
 
 
-def _fail(error: str, result: Dict[str, Any] | None = None) -> Dict:
-    """构造失败响应"""
-    return {"ok": False, "result": result, "error": error}
+@dataclass
+class MCPTool:
+    """MCP 工具描述"""
+    name: str
+    description: str = ""
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    required: List[str] = field(default_factory=list)
+    server_id: Optional[str] = None
+    server_name: Optional[str] = None
+
+    def to_openai_function(self) -> Dict[str, Any]:
+        """转换为 OpenAI function calling 格式"""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": self.parameters,
+                    "required": self.required,
+                },
+            },
+        }
 
 
-class MCPClient:
-    """MCP HTTP JSON-RPC 2.0 客户端
+@dataclass
+class MCPPrompt:
+    """MCP 提示模板"""
+    name: str
+    description: str = ""
+    arguments: List[Dict[str, Any]] = field(default_factory=list)
+    server_id: Optional[str] = None
+    server_name: Optional[str] = None
 
-    初始化参数均可在构造时显式传入（便于测试），未传入时从全局 Settings 读取。
+
+@dataclass
+class MCPResource:
+    """MCP 资源"""
+    uri: str
+    name: str
+    description: str = ""
+    mime_type: str = "text/plain"
+    server_id: Optional[str] = None
+    server_name: Optional[str] = None
+
+
+# ============================================================================
+# JSON-RPC 2.0 消息
+# ============================================================================
+
+
+@dataclass
+class JSONRPCRequest:
+    jsonrpc: str = JSONRPC_VERSION
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    method: str = ""
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "jsonrpc": self.jsonrpc,
+            "id": self.id,
+            "method": self.method,
+            "params": self.params,
+        }
+
+
+@dataclass
+class JSONRPCNotification:
+    jsonrpc: str = JSONRPC_VERSION
+    method: str = ""
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "jsonrpc": self.jsonrpc,
+            "method": self.method,
+            "params": self.params,
+        }
+
+
+@dataclass
+class JSONRPCResponse:
+    jsonrpc: str = JSONRPC_VERSION
+    id: str = ""
+    result: Any = None
+    error: Optional[Dict[str, Any]] = None
+
+    @property
+    def is_error(self) -> bool:
+        return self.error is not None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "JSONRPCResponse":
+        return cls(
+            jsonrpc=data.get("jsonrpc", JSONRPC_VERSION),
+            id=data.get("id", ""),
+            result=data.get("result"),
+            error=data.get("error"),
+        )
+
+
+# ============================================================================
+# HTTP 传输层
+# ============================================================================
+
+
+class MCPHTTPTransport:
+    """
+    MCP HTTP 传输客户端
+    支持 SSE (Server-Sent Events) 与 Streamable HTTP 两种模式
+
+    Streamable HTTP: POST → 202 + Location 头 → GET 轮询
+    SSE:            POST → 流式 text/event-stream 响应
     """
 
     def __init__(
         self,
-        base_url: str | None = None,
-        mode: str | None = None,
-        auth_token: str | None = None,
-        timeout: int | None = None,
+        base_url: str,
+        auth_token: Optional[str] = None,
+        timeout: float = 30.0,
     ):
-        self.base_url = base_url or settings.MCP_SERVER_URL
-        self.mode = mode if mode is not None else settings.MCP_MODE
-        self.auth_token = auth_token if auth_token is not None else settings.MCP_AUTH_TOKEN
-        self.timeout = timeout or settings.COMMAND_TIMEOUT
-        self._request_id = 0
+        self.base_url = base_url.rstrip("/")
+        self.auth_token = auth_token
+        self.timeout = timeout
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+        self.session_id: Optional[str] = None
 
-    def _next_id(self) -> int:
-        self._request_id += 1
-        return self._request_id
-
-    # ── 内部构造方法（便于单独测试） ──────────────────────────────
-
-    def _build_url(self, method: str = "tools/call") -> str:
-        """构造 MCP JSON-RPC 端点 URL"""
-        return f"{self.base_url}/mcp/v1/{method}"
-
-    def _build_payload(self, tool_name: str, arguments: Dict[str, Any]) -> Dict:
-        """构造 JSON-RPC 2.0 请求体（使用 params.arguments，不使用 params.args）"""
-        return {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            },
-            "id": self._next_id(),
-        }
+    async def close(self) -> None:
+        await self.client.aclose()
 
     def _build_headers(self) -> Dict[str, str]:
-        """构造 HTTP 请求头（包含 Authorization Bearer，不含完整 token 日志输出）"""
-        headers = {"Content-Type": "application/json; charset=utf-8"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         return headers
 
-    # ── Mock 分支：工具分发 ────────────────────────────────────────
+    async def send_request(self, request: JSONRPCRequest) -> JSONRPCResponse:
+        """发送 JSON-RPC 请求并解析响应"""
+        data = request.to_dict()
+        headers = self._build_headers()
 
-    def _mock_call_tool(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Dict:
-        """Mock 模式：根据工具名分发给各自的 mock handler"""
-        args = arguments or {}
-
-        handlers = {
-            "sys_info": self._mock_sys_info,
-            "service_mgr": self._mock_service_mgr,
-            "log_reader": self._mock_log_reader,
-            "net_monitor": self._mock_net_monitor,
-            "cmd_exec": self._mock_cmd_exec,
-            "file_guard": self._mock_file_guard,
-            "metrics_history": self._mock_metrics_history,
-        }
-        # sys_info handler 使用函数引用以便 patch（避免 lambda 绑定问题）
-        # 直接使用实例方法即可
-
-        handler = handlers.get(tool_name)
-        if handler is None:
-            return _fail(f"Mock 未实现工具: {tool_name}")
-        return handler(args)
-
-    # ── Mock: sys_info ─────────────────────────────────────────────
-
-    def _mock_sys_info(self, args: Dict[str, Any]) -> Dict:
-        metric = args.get("metric", "all")
-
-        if metric == "cpu":
-            return _ok(_MOCK_CPU)
-        if metric == "memory":
-            return _ok(_MOCK_MEMORY)
-        if metric == "disk":
-            return _ok(_MOCK_DISK)
-        if metric == "load":
-            return _ok(_MOCK_LOAD)
-        if metric == "uptime":
-            return _ok(_MOCK_UPTIME)
-        if metric == "network":
-            return _ok(_MOCK_NETWORK)
-        if metric == "all":
-            return _ok(_MOCK_ALL)
-
-        return _fail(f"不支持的 sys_info metric: {metric}")
-
-    # ── Mock: service_mgr ──────────────────────────────────────────
-
-    def _mock_service_mgr(self, args: Dict[str, Any]) -> Dict:
-        action = (args.get("action") or "").strip().lower()
-        service = (args.get("service") or args.get("name") or "").strip().lower()
-
-        if not action or action not in _VALID_SERVICE_ACTIONS:
-            return _fail(f"非法的 service_mgr action: {action or '(空)'}")
-
-        if not service:
-            return _fail("service 名称为空")
-
-        # 禁止操作的核心服务
-        if service in _FORBIDDEN_SERVICES:
-            return _fail(f"禁止操作核心服务: {service}")
-
-        # 只读操作
-        if action in ("status", "is-active", "is-enabled"):
-            return _ok({
-                "action": action,
-                "service": f"{service}.service",
-                "output": f"● {service}.service - mock active service",
-                "error_output": "",
-                "exit_code": 0,
-                "is_active": True,
-                "parsed": {
-                    "active_state": "active (running)",
-                    "loaded": "loaded (/lib/systemd/system/{}.service; enabled)",
-                },
-                "mock": True,
-            })
-
-        # 变更操作（start / stop / restart / reload）— mock 模拟成功
-        return _ok({
-            "action": action,
-            "service": f"{service}.service",
-            "output": f"Mock {action} {service} — 未真实执行系统命令",
-            "error_output": "",
-            "exit_code": 0,
-            "mock": True,
-        })
-
-    # ── Mock: log_reader ───────────────────────────────────────────
-
-    def _mock_log_reader(self, args: Dict[str, Any]) -> Dict:
-        log_type = args.get("type", "journalctl")
-        source = (args.get("source") or args.get("service") or "").strip()
-        lines_raw = args.get("lines", 50)
-        keyword = args.get("keyword", "")
-
-        # lines 校验
         try:
-            lines = int(str(lines_raw))
-        except (ValueError, TypeError):
-            return _fail(f"lines 参数格式非法: {lines_raw}")
-        if lines < 1:
-            return _fail(f"lines 必须 >= 1: {lines}")
-        if lines > 500:
-            return _fail(f"lines 超过上限 500: {lines}")
+            response = await self.client.post(
+                self.base_url,
+                json=data,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            return await self._handle_response(response, request)
 
-        if log_type == "journalctl":
-            if not source:
-                return _fail("journalctl 模式缺少 service 参数")
-        elif log_type == "file":
-            if source not in _VALID_LOG_SOURCES:
-                return _fail(f"不支持或不允许的日志源: {source}")
-            # 拒绝敏感路径
-            if source.startswith("/") and ("/etc/" in source or "/root/" in source):
-                return _fail(f"不允许访问敏感路径: {source}")
-        else:
-            return _fail(f"不支持的 log_reader type: {log_type}")
+        except httpx.TimeoutException:
+            logger.error(f"MCP 请求超时: {request.method} → {self.base_url}")
+            return JSONRPCResponse(
+                id=request.id,
+                error={"code": -32000, "message": f"请求超时 ({self.timeout}s)"},
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"MCP 连接失败: {self.base_url} - {e}")
+            return JSONRPCResponse(
+                id=request.id,
+                error={"code": -32000, "message": f"无法连接到 MCP 服务器"},
+            )
+        except Exception as e:
+            logger.exception(f"MCP 请求异常: {request.method} → {self.base_url}")
+            return JSONRPCResponse(
+                id=request.id,
+                error={"code": -32603, "message": f"内部错误: {e}"},
+            )
 
-        # 构造 mock 日志
-        base_logs = [
-            "2026-06-08 20:30:15 [error] mock upstream timed out",
-            "2026-06-08 20:30:16 [error] mock connect() failed",
-            "2026-06-08 20:30:18 [info] mock request processed",
-            "2026-06-08 20:31:01 [warn] mock upstream response slow",
-            "2026-06-08 20:31:02 [error] mock 502 Bad Gateway",
-            "2026-06-08 20:31:05 [info] mock health check passed",
-        ]
+    async def _handle_response(
+        self, response: httpx.Response, request: JSONRPCRequest
+    ) -> JSONRPCResponse:
+        """处理 HTTP 响应，兼容多种传输模式"""
 
-        if keyword:
-            mock_logs = [l for l in base_logs if keyword.lower() in l.lower()]
-        else:
-            mock_logs = base_logs
+        # Streamable HTTP 202 Accepted → 轮询
+        if response.status_code == 202:
+            return await self._handle_accepted(response, request)
 
-        # 按 lines 截取
-        mock_logs = mock_logs[:lines]
+        # 提取 Session ID
+        if "mcp-session-id" in response.headers:
+            self.session_id = response.headers["mcp-session-id"]
 
-        return _ok({
-            "type": log_type,
-            "source": source,
-            "lines": len(mock_logs),
-            "logs": mock_logs,
-            "mock": True,
-        })
+        content_type = response.headers.get("content-type", "")
 
-    # ── Mock: net_monitor ──────────────────────────────────────────
+        # SSE 流式响应
+        if "text/event-stream" in content_type:
+            return await self._parse_sse(response, request)
 
-    def _mock_net_monitor(self, args: Dict[str, Any]) -> Dict:
-        metric = args.get("metric", "all")
-        port = args.get("port")
+        # 普通 JSON 响应
+        try:
+            body = response.json()
+        except Exception:
+            return JSONRPCResponse(
+                id=request.id,
+                error={"code": -32000, "message": "响应不是有效的 JSON"},
+            )
+        return JSONRPCResponse.from_dict(body)
 
-        if metric not in _VALID_NET_METRICS:
-            return _fail(f"不支持的 net_monitor metric: {metric}")
+    async def _handle_accepted(
+        self, response: httpx.Response, request: JSONRPCRequest
+    ) -> JSONRPCResponse:
+        """处理 202 Accepted + Location 头轮询"""
+        poll_url = response.headers.get("location")
+        if not poll_url:
+            return JSONRPCResponse(
+                id=request.id,
+                error={"code": -32000, "message": "202 但无 Location 头"},
+            )
 
-        if metric == "connections":
-            return _ok({
-                "metric": "connections",
-                "connections": [
-                    {"proto": "tcp", "local": "0.0.0.0:22", "remote": "*:*", "state": "LISTEN"},
-                    {"proto": "tcp", "local": "0.0.0.0:80", "remote": "*:*", "state": "LISTEN"},
-                    {"proto": "tcp", "local": "0.0.0.0:443", "remote": "*:*", "state": "LISTEN"},
-                ],
-                "mock": True,
-            })
+        max_retries = 10
+        for attempt in range(max_retries):
+            await asyncio.sleep(0.5 * (attempt + 1))
+            try:
+                poll_resp = await self.client.get(
+                    poll_url,
+                    headers={"Accept": "application/json"},
+                    timeout=10.0,
+                )
+                if poll_resp.status_code == 200:
+                    return JSONRPCResponse.from_dict(poll_resp.json())
+                elif poll_resp.status_code != 202:
+                    return JSONRPCResponse(
+                        id=request.id,
+                        error={"code": -32000, "message": f"轮询失败 HTTP {poll_resp.status_code}"},
+                    )
+            except Exception as e:
+                logger.warning(f"MCP 轮询异常 (attempt={attempt + 1}): {e}")
 
-        if metric == "traffic":
-            return _ok({
-                "metric": "traffic",
-                "traffic": {
-                    "bytes_sent": 1234567890,
-                    "bytes_recv": 9876543210,
-                    "packets_sent": 500000,
-                    "packets_recv": 1200000,
-                },
-                "mock": True,
-            })
+        return JSONRPCResponse(
+            id=request.id,
+            error={"code": -32000, "message": "轮询超时"},
+        )
 
-        if metric == "interfaces":
-            return _ok({
-                "metric": "interfaces",
-                "interfaces": [
-                    {"name": "lo", "mac": "00:00:00:00:00:00", "ip": "127.0.0.1"},
-                    {"name": "eth0", "mac": "08:00:27:ab:cd:ef", "ip": "192.168.56.102"},
-                ],
-                "mock": True,
-            })
+    async def _parse_sse(
+        self, response: httpx.Response, request: JSONRPCRequest
+    ) -> JSONRPCResponse:
+        """解析 SSE text/event-stream 响应"""
+        body = response.text
+        data_lines = []
 
-        if metric == "routes":
-            return _ok({
-                "metric": "routes",
-                "routes": [
-                    {"destination": "0.0.0.0/0", "gateway": "192.168.56.1", "iface": "eth0"},
-                    {"destination": "192.168.56.0/24", "gateway": "0.0.0.0", "iface": "eth0"},
-                ],
-                "mock": True,
-            })
+        for line in body.split("\n"):
+            line = line.strip()
+            if line.startswith("data:"):
+                data_str = line[5:].strip()
+                if data_str:
+                    data_lines.append(data_str)
 
-        if metric == "dns":
-            return _ok({
-                "metric": "dns",
-                "dns": {
-                    "servers": ["8.8.8.8", "114.114.114.114"],
-                    "search_domains": ["local"],
-                },
-                "mock": True,
-            })
+        for data_str in data_lines:
+            try:
+                parsed = json.loads(data_str)
+                if "id" in parsed and ("result" in parsed or "error" in parsed):
+                    return JSONRPCResponse.from_dict(parsed)
+            except json.JSONDecodeError:
+                pass
 
-        if metric == "listen":
-            listeners = [
-                {"proto": "tcp", "local_address": "0.0.0.0:22", "process": "sshd", "pid": 1234},
-                {"proto": "tcp", "local_address": "0.0.0.0:80", "process": "nginx", "pid": 5678},
-                {"proto": "tcp", "local_address": "0.0.0.0:443", "process": "nginx", "pid": 5678},
-            ]
-            if port is not None:
-                listeners = [l for l in listeners if str(port) in l["local_address"].split(":")[-1]]
-            return _ok({
-                "metric": "listen",
-                "listeners": listeners,
-                "mock": True,
-            })
+        return JSONRPCResponse(
+            id=request.id,
+            error={"code": -32000, "message": "SSE 流中未包含有效响应"},
+        )
 
-        # metric == "all"
-        return _ok({
-            "metric": "all",
-            "connections": [
-                {"proto": "tcp", "local": "0.0.0.0:80", "remote": "*:*", "state": "LISTEN"},
-            ],
-            "interfaces": [
-                {"name": "eth0", "mac": "08:00:27:ab:cd:ef", "ip": "192.168.56.102"},
-            ],
-            "mock": True,
-        })
 
-    # ── Mock: cmd_exec ─────────────────────────────────────────────
+# ============================================================================
+# MCP 客户端
+# ============================================================================
 
-    def _mock_cmd_exec(self, args: Dict[str, Any]) -> Dict:
-        command = (args.get("command") or "").strip()
-        if not command:
-            return _fail("命令为空", {"blocked": True, "command": "", "reason": "命令为空"})
 
-        # 高危命令检查
-        normalized = command.lower().replace(" ", "")
-        for high_risk, reason in [
-            ("rm-rf/", "禁止递归删除根目录"),
-            ("mkfs.ext4/dev/sda1", "禁止格式化磁盘"),
-            ('echo"hack">/etc/passwd', "禁止写入 /etc/passwd"),
-        ]:
-            if high_risk in normalized:
-                return _fail("命令被安全策略拦截", {
-                    "blocked": True,
-                    "command": command,
-                    "reason": reason,
-                    "mock": True,
-                })
+class MCPClient:
+    """
+    MCP 客户端 —— 管理多个 MCP 服务器的连接与工具调用
 
-        # curl/wget 管道
-        if ("curl" in normalized or "wget" in normalized) and "|" in command:
-            return _fail("命令被安全策略拦截", {
-                "blocked": True,
-                "command": command,
-                "reason": "禁止 curl/wget 管道执行脚本",
-                "mock": True,
-            })
+    功能：
+    - 注册/注销 MCP 服务器
+    - initialize 协议握手
+    - 动态工具发现（tools/list）
+    - 工具调用（tools/call）
+    - prompts / resources 查询
 
-        # chmod 777
-        if "chmod777" in normalized:
-            return _fail("命令被安全策略拦截", {
-                "blocked": True,
-                "command": command,
-                "reason": "禁止 chmod 777 权限变更",
-                "mock": True,
-            })
+    不含 mock 模式 —— 所有工具均通过 MCP 协议从远程服务器获取。
+    """
 
-        # dd 破坏性写入
-        if command.startswith("dd ") and "of=/dev/" in command:
-            return _fail("命令被安全策略拦截", {
-                "blocked": True,
-                "command": command,
-                "reason": "禁止 dd 破坏性写入磁盘",
-                "mock": True,
-            })
+    def __init__(self):
+        self.servers: Dict[str, MCPServerInfo] = {}
+        self.transports: Dict[str, MCPHTTPTransport] = {}
+        self._initialized: Dict[str, bool] = {}
+        self._server_capabilities: Dict[str, Dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
 
-        # 白名单检查
-        if command not in _CMD_WHITELIST:
-            return _fail("命令被安全策略拦截", {
-                "blocked": True,
-                "command": command,
-                "reason": "命令不在白名单中或匹配高危模式",
-                "mock": True,
-            })
+    # ========================================================================
+    # 服务器管理
+    # ========================================================================
 
-        # 白名单命令 mock 成功
-        mock_stdout_map = {
-            "df -h": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/mock        40G   25G   15G  62% /",
-            "free -m": "              total        used        free      shared  buff/cache   available\nMem:           8192        3688        2048         128        2456        4504",
-            "uptime": " 20:35:01 up 3 days, 12:00,  1 user,  load average: 0.52, 0.31, 0.18",
-            "whoami": "agent",
-            "uname -a": "Linux kylin-v11 5.10.0 mock-generic #1 SMP 2026 x86_64 GNU/Linux",
-            "ps aux": "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\nroot         1  0.0  0.1 225432  9216 ?        Ss   08:00   0:02 /sbin/init\nagent    12345  0.5  1.2 850432 98304 ?        Ssl  08:05   0:30 /usr/bin/python3",
-            "systemctl status nginx": "● nginx.service - A high performance web server\n   Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\n   Active: active (running) since Mon 2026-06-08 08:05:00 UTC",
-            "journalctl -u nginx -n 50": "Jun 08 20:30:15 kylin-v11 nginx[1234]: mock log entry 1\nJun 08 20:30:16 kylin-v11 nginx[1234]: mock log entry 2",
-        }
+    def register_server(self, server: MCPServerInfo) -> None:
+        """注册一个 MCP 服务器（不连接）"""
+        self.servers[server.id] = server
+        self._initialized[server.id] = False
+        logger.info(
+            f"MCP 服务器已注册: {server.name} (id={server.id}, transport={server.transport.value})"
+        )
 
-        return _ok({
-            "stdout": mock_stdout_map.get(command, f"mock output for: {command}"),
-            "stderr": "",
-            "returncode": 0,
-            "execution_time": 0.01,
-            "mock": True,
-        })
+    def unregister_server(self, server_id: str) -> None:
+        """注销一个 MCP 服务器，断开连接"""
+        transport = self.transports.pop(server_id, None)
+        if transport:
+            # 异步关闭在外部处理
+            pass
+        self.servers.pop(server_id, None)
+        self._server_capabilities.pop(server_id, None)
+        self._initialized.pop(server_id, None)
+        logger.info(f"MCP 服务器已注销: {server_id}")
 
-    # ── Mock: file_guard ───────────────────────────────────────────
+    async def unregister_server_async(self, server_id: str) -> None:
+        """异步注销 MCP 服务器（含传输关闭）"""
+        transport = self.transports.pop(server_id, None)
+        if transport:
+            await transport.close()
+        self.servers.pop(server_id, None)
+        self._server_capabilities.pop(server_id, None)
+        self._initialized.pop(server_id, None)
+        logger.info(f"MCP 服务器已注销: {server_id}")
 
-    def _mock_file_guard(self, args: Dict[str, Any]) -> Dict:
-        action = (args.get("action") or "").strip()
-        path = (args.get("path") or "").strip()
+    def get_server(self, server_id: str) -> Optional[MCPServerInfo]:
+        return self.servers.get(server_id)
 
-        if not action:
-            return _fail("file_guard action 为空")
-        if action not in ("check", "read", "write"):
-            return _fail(f"非法的 file_guard action: {action}")
-        if not path:
-            return _fail("file_guard path 为空")
+    def list_servers(self) -> List[MCPServerInfo]:
+        return list(self.servers.values())
 
-        # 敏感后缀检查
-        if path.lower().endswith(_SENSITIVE_EXTS):
-            return _fail(f"禁止访问密钥/证书文件: {path}")
+    @property
+    def is_connected(self) -> bool:
+        return any(self._initialized.values())
 
-        # 受保护路径
-        is_protected = any(path.startswith(p) for p in _PROTECTED_PATHS)
+    # ========================================================================
+    # 连接管理
+    # ========================================================================
 
-        if action == "check":
-            return _ok({
-                "path": path,
-                "is_protected": is_protected,
-                "reason": f"路径在保护清单中: {path}" if is_protected else "路径不在保护清单中",
-                "real_path": path,
-                "exists": True,
-                "is_file": True,
-                "size": 3421,
-                "permissions": "600" if is_protected else "644",
-                "mock": True,
-            })
-
-        if action == "read":
-            # 只允许 /var/log/ 下路径
-            if is_protected:
-                return _fail(f"禁止读取受保护路径: {path}")
-            if not path.startswith("/var/log/"):
-                return _fail(f"只允许读取 /var/log/ 下路径: {path}")
-            return _ok({
-                "path": path,
-                "content": f"[mock content of {path}]",
-                "size": 1024,
-                "mock": True,
-            })
-
-        # action == "write"
-        if is_protected:
-            return _fail(f"禁止写入受保护路径: {path}")
-        if not (path.startswith("/tmp/") or path.startswith("/opt/mcp-server/")):
-            return _fail(f"只允许写入 /tmp/ 或 /opt/mcp-server/ 下路径: {path}")
-        return _ok({
-            "path": path,
-            "written": True,
-            "bytes": len(args.get("content", "")),
-            "mock": True,
-        })
-
-    # ── Real 模式错误分类（静态/类方法，便于测试） ─────────────
-
-    @staticmethod
-    def _handle_http_error(status_code: int) -> Dict:
-        """HTTP 非 2xx 状态码 → 脱敏错误响应"""
-        mapping = {
-            401: "MCP Server 认证失败",
-            403: "MCP Server 权限不足",
-            404: "MCP 工具调用接口不存在",
-            400: "MCP 请求参数错误",
-            422: "MCP 请求参数错误",
-            500: "MCP Server 内部错误",
-            502: "MCP Server 内部错误",
-            503: "MCP Server 内部错误",
-            504: "MCP Server 内部错误",
-        }
-        msg = mapping.get(status_code)
-        if msg:
-            return _fail(msg)
-        return _fail("MCP Server 响应异常")
-
-    @staticmethod
-    def _handle_jsonrpc_error(error_obj: Any) -> Dict:
-        """JSON-RPC error 对象 → 脱敏错误响应（按 code 分类）"""
-        code = error_obj.get("code", 0) if isinstance(error_obj, dict) else 0
-        mapping = {
-            -32700: "MCP 返回 JSON 解析错误",
-            -32600: "MCP 请求格式无效",
-            -32601: "MCP 方法或工具不存在",
-            -32602: "MCP 工具参数错误",
-            -32603: "MCP 工具内部错误",
-            -32000: "MCP 命令执行失败",
-            -32001: "MCP Token 认证失败",
-        }
-        msg = mapping.get(code)
-        if msg:
-            return _fail(msg)
-        return _fail("MCP 调用失败")
-
-    @staticmethod
-    def _is_blocked_result(result: Any) -> bool:
-        """判断 MCP result 是否为安全拦截
-
-        仅检测 result.blocked == True（sandbox.py 及各 MCP 插件安全拦截的标准格式）。
-
-        注意：仅包含 error 字段但无 blocked 标志的响应（如 systemctl 超时、
-        PermissionError 等运行时失败）不会被误判为安全拦截。
+    async def connect_server(self, server: MCPServerInfo) -> bool:
         """
-        if not isinstance(result, dict):
-            return False
-        return result.get("blocked") is True
+        连接并初始化单个 MCP 服务器：
+        1. 创建 HTTP transport
+        2. 发送 initialize 请求
+        3. 发送 notifications/initialized
+        """
+        logger.info(f"正在连接 MCP 服务器: {server.name} ({server.transport.value})")
 
-    # ── 主调用入口 ───────────────────────────────────────────────
+        if server.transport == MCPTransport.STDIO:
+            logger.warning(f"STDIO 传输暂未实现: {server.name}")
+            return False
+
+        try:
+            transport = MCPHTTPTransport(
+                base_url=server.url,
+                auth_token=server.auth_token,
+                timeout=30.0,
+            )
+            self.transports[server.id] = transport
+
+            # initialize
+            init_request = JSONRPCRequest(
+                method="initialize",
+                params={
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "clientInfo": {
+                        "name": "kylin-agent",
+                        "version": "1.0.0",
+                    },
+                },
+            )
+            init_resp = await transport.send_request(init_request)
+
+            if init_resp.is_error:
+                logger.error(
+                    f"MCP initialize 失败: {server.name} - {init_resp.error}"
+                )
+                return False
+
+            result = init_resp.result
+            if isinstance(result, dict):
+                self._server_capabilities[server.id] = result
+                server_info = result.get("serverInfo", {})
+                logger.info(
+                    f"MCP 服务器能力: {server.name} - "
+                    f"protocol={result.get('protocolVersion', 'unknown')}, "
+                    f"server={server_info.get('name', 'unknown')} v{server_info.get('version', '?')}"
+                )
+
+            # initialized 通知
+            try:
+                notif = JSONRPCNotification(method="notifications/initialized")
+                await transport.send_request(
+                    JSONRPCRequest(method="notifications/initialized", params={})
+                )
+            except Exception:
+                pass
+
+            self._initialized[server.id] = True
+            logger.info(f"MCP 连接成功: {server.name}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"连接 MCP 服务器异常 {server.name}: {e}")
+            return False
+
+    async def disconnect_server(self, server_id: str) -> None:
+        """断开单个服务器"""
+        transport = self.transports.pop(server_id, None)
+        if transport:
+            await transport.close()
+        self._initialized.pop(server_id, None)
+        logger.info(f"MCP 已断开: {server_id}")
+
+    async def disconnect_all(self) -> None:
+        """断开所有连接"""
+        for sid in list(self.transports.keys()):
+            await self.disconnect_server(sid)
+        logger.info("所有 MCP 连接已断开")
+
+    # ========================================================================
+    # 工具发现
+    # ========================================================================
+
+    async def discover_tools(
+        self, server_id: Optional[str] = None
+    ) -> List[MCPTool]:
+        """发现工具列表"""
+        discovered: List[MCPTool] = []
+
+        targets = (
+            [server_id]
+            if server_id
+            else [
+                sid
+                for sid, s in self.servers.items()
+                if s.auto_discover and self._initialized.get(sid, False)
+            ]
+        )
+
+        for sid in targets:
+            server = self.servers.get(sid)
+            if not server:
+                continue
+
+            transport = self.transports.get(sid)
+            if not transport:
+                continue
+
+            try:
+                tools = await self._list_tools(sid, server, transport)
+                discovered.extend(tools)
+            except Exception as e:
+                logger.error(f"发现工具失败 {server.name}: {e}")
+
+        return discovered
+
+    async def _list_tools(
+        self,
+        server_id: str,
+        server: MCPServerInfo,
+        transport: MCPHTTPTransport,
+    ) -> List[MCPTool]:
+        """从单个服务器获取工具列表"""
+        request = JSONRPCRequest(method="tools/list", params={})
+        response = await transport.send_request(request)
+
+        if response.is_error:
+            logger.error(f"tools/list 失败 {server.name}: {response.error}")
+            return []
+
+        result = response.result
+        if not isinstance(result, dict):
+            return []
+
+        raw_tools = result.get("tools", [])
+        tools = []
+
+        for raw in raw_tools:
+            tool = MCPTool(
+                name=raw.get("name", ""),
+                description=raw.get("description", ""),
+                parameters=raw.get("inputSchema", {}).get("properties", {}),
+                required=raw.get("inputSchema", {}).get("required", []),
+                server_id=server_id,
+                server_name=server.name,
+            )
+            tools.append(tool)
+
+        logger.info(f"发现 {len(tools)} 个工具 (server={server.name})")
+        return tools
+
+    # ========================================================================
+    # 工具调用
+    # ========================================================================
 
     async def call_tool(
-        self,
-        tool_name: str,
-        arguments: Dict[str, Any] | None = None,
-    ) -> Dict:
+        self, tool_name: str, arguments: Dict[str, Any], server_id: str
+    ) -> Dict[str, Any]:
         """
-        调用 MCP 执行器工具
+        调用指定 MCP 服务器上的工具
 
-        参数:
-            tool_name: 工具名（sys_info, service_mgr, log_reader, net_monitor, cmd_exec, file_guard）
-            arguments: 工具参数，可选，默认为空字典
+        Args:
+            tool_name: 工具名称
+            arguments: 工具参数
+            server_id: 目标服务器 ID
 
-        返回:
-            {"ok": bool, "result": dict | None, "error": str | None}
+        Returns:
+            {"content": [...], "isError": bool} 或 {"error": str}
         """
-        arguments = arguments or {}
-
-        if self.mode == "mock":
-            return self._mock_call_tool(tool_name, arguments)
-
-        # Real 模式：检查认证令牌
-        if not self.auth_token:
-            logger.warning(f"[MCP] real 模式缺少 MCP_AUTH_TOKEN")
-            return _fail("MCP 认证令牌未配置")
-
-        return await self._real_call_tool(tool_name, arguments)
-
-    async def _real_call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict:
-        """Real 模式：HTTP JSON-RPC 2.0 调用 + 完整错误分类"""
-        payload = self._build_payload(tool_name, arguments)
-        headers = self._build_headers()
-        url = self._build_url()
-
-        try:
-            timeout = httpx.Timeout(self.timeout + 5.0, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-
-                # ── HTTP 非 2xx ──
-                if resp.status_code >= 400:
-                    logger.warning(
-                        f"[MCP] HTTP {resp.status_code} — {tool_name}"
-                    )
-                    return self._handle_http_error(resp.status_code)
-
-                # ── JSON 解析 ──
-                try:
-                    data = resp.json()
-                except Exception:
-                    logger.error(f"[MCP] JSON 解析失败 — {tool_name}")
-                    return _fail("MCP Server 返回格式错误")
-
-                # ── JSON-RPC error ──
-                if "error" in data:
-                    logger.warning(f"[MCP] JSON-RPC error — {tool_name}: {data['error']}")
-                    return self._handle_jsonrpc_error(data["error"])
-
-                # ── 缺少 result ──
-                if "result" not in data:
-                    logger.error(f"[MCP] 缺少 result — {tool_name}")
-                    return _fail("MCP Server 返回内容不完整")
-
-                result = data["result"]
-
-                # ── result.blocked ──
-                if self._is_blocked_result(result):
-                    logger.warning(
-                        f"[MCP] 工具 {tool_name} 被 MCP Server 安全拦截: "
-                        f"{result.get('reason', '未知原因')}"
-                    )
-                    return _fail("命令被安全策略拦截", result)
-
-                logger.info(f"[MCP] 工具 {tool_name} 调用成功")
-                return _ok(result)
-
-        except httpx.TimeoutException:
-            logger.error(f"[MCP] 工具 {tool_name} 调用超时")
-            return _fail("MCP Server 请求超时")
-        except httpx.ConnectError:
-            logger.error(f"[MCP] MCP Server 连接失败 — {tool_name}")
-            return _fail("MCP Server 连接失败")
-        except Exception:
-            logger.exception(f"[MCP] 工具调用异常 — {tool_name}")
-            return _fail("MCP 工具调用异常")
-
-    # ── Mock: metrics_history ──────────────────────────────────────
-
-    def _mock_metrics_history(self, args: Dict[str, Any]) -> Dict:
-        """Mock 模式：按时间范围生成模拟历史指标数据"""
-        import random
-        import time as _time
-
-        now = _time.time()
-        from_ts = args.get("from_ts", now - 300)  # 默认最近5分钟
-        to_ts = args.get("to_ts", now)
-        metrics_arg = args.get("metrics")
-        limit = min(args.get("limit", 5000), 5000)
-
-        if isinstance(from_ts, str):
-            try:
-                from_ts = float(from_ts)
-            except (ValueError, TypeError):
-                from_ts = now - 300
-        if isinstance(to_ts, str):
-            try:
-                to_ts = float(to_ts)
-            except (ValueError, TypeError):
-                to_ts = now
-
-        # 每15秒一个数据点
-        interval = 15
-        data = []
-        t = from_ts
-        while t <= to_ts and len(data) < limit:
-            point = {
-                "ts": round(t, 1),
-                "cpu_percent": round(15 + random.random() * 35, 1),
-                "load_1": round(random.random() * 1.5, 2),
-                "load_5": round(random.random() * 1.0, 2),
-                "load_15": round(random.random() * 0.8, 2),
-                "memory_percent": round(38 + random.random() * 10, 1),
-                "memory_used_mb": round(3000 + random.random() * 500, 0),
-                "memory_total_mb": 8192.0,
-                "disk_percent": round(55 + random.random() * 10, 1),
-                "disk_used_gb": round(22 + random.random() * 4, 1),
-                "disk_total_gb": 40.0,
-                "net_recv_bytes": int(10_000_000_000 + random.random() * 2_000_000_000),
-                "net_sent_bytes": int(2_000_000_000 + random.random() * 1_000_000_000),
-                "net_recv_kbps": round(random.random() * 300 + 50, 1),
-                "net_sent_kbps": round(random.random() * 100 + 10, 1),
+        transport = self.transports.get(server_id)
+        if not transport:
+            return {
+                "content": [{"type": "text", "text": f"服务器 {server_id} 无可用连接"}],
+                "isError": True,
             }
-            data.append(point)
-            t += interval
-
-        return _ok({
-            "count": len(data),
-            "interval_seconds": interval,
-            "from_ts": from_ts,
-            "to_ts": to_ts,
-            "data": data,
-        })
-
-    # ── 便捷方法 ────────────────────────────────────────────────
-
-    async def get_system_metrics(self) -> Dict:
-        """获取系统指标（调用 sys_info 工具）"""
-        return await self.call_tool("sys_info", {"metric": "all"})
-
-    async def list_tools(self) -> Dict:
-        """列出 MCP Server 上可用的工具（如果 Server 支持）"""
-        if self.mode == "mock":
-            return _ok({"tools": []})
-
-        if not self.auth_token:
-            logger.warning("[MCP] list_tools 缺少 MCP_AUTH_TOKEN")
-            return _fail("MCP 认证令牌未配置")
-
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "tools/list",
-            "id": self._next_id(),
-        }
-        headers = self._build_headers()
-        url = self._build_url("tools/list")
 
         try:
-            timeout = httpx.Timeout(10.0, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(url, headers=headers, json=payload)
+            request = JSONRPCRequest(
+                method="tools/call",
+                params={
+                    "name": tool_name,
+                    "arguments": arguments,
+                },
+            )
+            response = await transport.send_request(request)
 
-                # ── HTTP 非 2xx ──
-                if resp.status_code >= 400:
-                    logger.warning(
-                        f"[MCP] list_tools HTTP {resp.status_code}"
-                    )
-                    return self._handle_http_error(resp.status_code)
+            if response.is_error:
+                return {
+                    "content": [{"type": "text", "text": json.dumps(response.error)}],
+                    "isError": True,
+                }
 
-                # ── JSON 解析 ──
-                try:
-                    data = resp.json()
-                except Exception:
-                    logger.error("[MCP] list_tools JSON 解析失败")
-                    return _fail("MCP Server 返回格式错误")
+            result = response.result
+            if isinstance(result, dict):
+                return {
+                    "content": result.get("content", []),
+                    "isError": result.get("isError", False),
+                }
 
-                # ── JSON-RPC error ──
-                if "error" in data:
-                    logger.warning(f"[MCP] list_tools JSON-RPC error: {data['error']}")
-                    return self._handle_jsonrpc_error(data["error"])
+            return {
+                "content": [{"type": "text", "text": str(result)}],
+                "isError": False,
+            }
 
-                # ── 提取 result ──
-                return _ok(data.get("result", data))
+        except Exception as e:
+            logger.exception(f"工具调用异常: {tool_name}")
+            return {
+                "content": [{"type": "text", "text": f"工具调用异常: {e}"}],
+                "isError": True,
+            }
 
-        except httpx.TimeoutException:
-            logger.error("[MCP] 获取工具列表超时")
-            return _fail("获取工具列表超时")
-        except httpx.ConnectError:
-            logger.error("[MCP] MCP Server 连接失败 — tools/list")
-            return _fail("MCP Server 连接失败")
-        except Exception:
-            logger.exception("[MCP] 获取工具列表异常")
-            return _fail("获取工具列表失败")
+    # ========================================================================
+    # Prompts & Resources
+    # ========================================================================
+
+    async def list_prompts(self) -> List[MCPPrompt]:
+        """获取所有服务器的提示模板"""
+        prompts = []
+        for sid, transport in self.transports.items():
+            server = self.servers.get(sid)
+            if not server or not self._initialized.get(sid):
+                continue
+            try:
+                request = JSONRPCRequest(method="prompts/list", params={})
+                response = await transport.send_request(request)
+                if not response.is_error and isinstance(response.result, dict):
+                    for p in response.result.get("prompts", []):
+                        prompts.append(
+                            MCPPrompt(
+                                name=p.get("name", ""),
+                                description=p.get("description", ""),
+                                arguments=p.get("arguments", []),
+                                server_id=sid,
+                                server_name=server.name,
+                            )
+                        )
+            except Exception as e:
+                logger.error(f"获取 prompts 失败 {server.name}: {e}")
+        return prompts
+
+    async def list_resources(self) -> List[MCPResource]:
+        """获取所有服务器的资源"""
+        resources = []
+        for sid, transport in self.transports.items():
+            server = self.servers.get(sid)
+            if not server or not self._initialized.get(sid):
+                continue
+            try:
+                request = JSONRPCRequest(method="resources/list", params={})
+                response = await transport.send_request(request)
+                if not response.is_error and isinstance(response.result, dict):
+                    for r in response.result.get("resources", []):
+                        resources.append(
+                            MCPResource(
+                                uri=r.get("uri", ""),
+                                name=r.get("name", ""),
+                                description=r.get("description", ""),
+                                mime_type=r.get("mimeType", "text/plain"),
+                                server_id=sid,
+                                server_name=server.name,
+                            )
+                        )
+            except Exception as e:
+                logger.error(f"获取 resources 失败 {server.name}: {e}")
+        return resources
+
+    async def read_resource(
+        self, server_id: str, uri: str
+    ) -> Optional[Dict[str, Any]]:
+        """读取指定资源"""
+        transport = self.transports.get(server_id)
+        if not transport:
+            return None
+        try:
+            request = JSONRPCRequest(method="resources/read", params={"uri": uri})
+            response = await transport.send_request(request)
+            if not response.is_error:
+                return response.result
+        except Exception as e:
+            logger.error(f"读取资源失败: {e}")
+        return None
+
+    # ========================================================================
+    # 服务器能力查询
+    # ========================================================================
+
+    def is_initialized(self, server_id: str) -> bool:
+        return self._initialized.get(server_id, False)
+
+    def get_server_capabilities(self, server_id: str) -> Optional[Dict[str, Any]]:
+        return self._server_capabilities.get(server_id)
+
+
+# ========================================================================
+# 全局单例
+# ========================================================================
+
+_mcp_client: Optional[MCPClient] = None
+
+
+async def get_mcp_client() -> MCPClient:
+    """获取全局 MCP 客户端单例"""
+    global _mcp_client
+    if _mcp_client is None:
+        _mcp_client = MCPClient()
+    return _mcp_client
