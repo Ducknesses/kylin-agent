@@ -194,6 +194,8 @@ class MCPServerManager:
         # 更新字段
         for key, value in updates.items():
             if value is not None and hasattr(server, key):
+                if key == "transport" and isinstance(value, str):
+                    value = MCPTransport(value)
                 setattr(server, key, value)
 
         # 重连
@@ -286,6 +288,7 @@ class MCPServerManager:
             "name": server.name,
             "url": server.url,
             "transport": server.transport.value,
+            "auth_token": server.auth_token or "",
             "enabled": server.enabled,
             "connected": server.id in self._client.transports,
             "initialized": self._client.is_initialized(server.id),

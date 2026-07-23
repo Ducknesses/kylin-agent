@@ -48,6 +48,7 @@ class MCPServerStatus(BaseModel):
     name: str
     url: str
     transport: str
+    auth_token: Optional[str] = None
     enabled: bool
     connected: bool
     initialized: bool

@@ -22,13 +22,9 @@
             <el-icon><Timer /></el-icon>
             <span>审计日志</span>
           </el-menu-item>
-          <el-menu-item index="/config">
-            <el-icon><Lock /></el-icon>
-            <span>权限配置</span>
-          </el-menu-item>
-          <el-menu-item index="#" @click="settingsVisible = true">
+          <el-menu-item index="/settings">
             <el-icon><Setting /></el-icon>
-            <span>连接设置</span>
+            <span>系统设置</span>
           </el-menu-item>
         </el-menu>
       </el-aside>
@@ -36,19 +32,19 @@
         <router-view />
       </el-main>
     </el-container>
-    <ConnectionSettings v-model="settingsVisible" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { Setting, Lock } from '@element-plus/icons-vue'
-import ConnectionSettings from '@/components/ConnectionSettings.vue'
 
 const route = useRoute()
-const activeMenu = computed(() => route.path)
-const settingsVisible = ref(false)
+const activeMenu = computed(() => {
+  // /config 重定向到 /settings，菜单高亮跟随
+  if (route.path === '/config') return '/settings'
+  return route.path
+})
 </script>
 
 <style scoped>
