@@ -398,6 +398,7 @@ async def _run_agent_flow(
             f"[WebSocket] orchestration 总超时 ({TOTAL_TIMEOUT}s): session={session_id}, "
             f"trace_id={effective_trace_id}"
         )
+        manager.cancel_session(session_id)
         try:
             await websocket.send_json({
                 "type": "error", "trace_id": effective_trace_id,
