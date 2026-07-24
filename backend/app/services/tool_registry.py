@@ -19,7 +19,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Literal, Mapping, Optional
 
 from app.mcp.client import MCPTool
 from app.schemas.action import RiskLevel
@@ -75,7 +75,11 @@ class AuditPolicy:
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """一个工具的完整定义（不可变）"""
+    """一个工具的完整定义（不可变）
+
+    保留此类以兼容现有测试和调用方（agent_harness, action_service 等）。
+    内部由 UnifiedToolDefinition 构建而来。
+    """
     name: str
     description: str
     params: Mapping[str, ToolParamSpec]
@@ -111,6 +115,152 @@ class ToolSpec:
             "audit_policy": self.audit_policy.to_dict(),
             "params": params_dict,
         }
+
+
+# ── 新增：统一工具定义模型 ────────────────────────────────────────────
+
+
+@dataclass
+class UnifiedToolDefinition:
+    """统一的工具定义（合并 ToolSpec + MCPTool 元信息）
+
+    这是 Phase 1 的核心数据结构，替代原有的 _registry + _tools 双存储。
+    同时支持静态配置文件定义和 MCP 动态发现。
+    """
+    name: str
+    description: str
+    params: Mapping[str, ToolParamSpec]
+    default_risk: RiskLevel                          # low / medium / high
+    action_field: str | None = None
+    action_risk_overrides: Mapping[str, RiskLevel] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    audit_policy: AuditPolicy = field(default_factory=AuditPolicy)
+    source: Literal["static", "mcp"] = "static"      # 工具来源
+    server_id: str = ""                               # MCP 服务器 ID（动态工具）
+    status: Literal["available", "unavailable"] = "available"
+    # MCP 原始参数定义（仅动态工具，用于 OpenAI function calling 补充）
+    mcp_parameters: Dict[str, Any] = field(default_factory=dict)
+    mcp_required: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        """序列化为 API 响应格式（含 source / server_id / status）"""
+        params_dict: dict[str, object] = {}
+        for pname, pdef in self.params.items():
+            pd: dict[str, object] = {
+                "type": pdef.type,
+                "required": pdef.required,
+            }
+            if pdef.enum:
+                pd["enum"] = list(pdef.enum)
+            if pdef.description:
+                pd["description"] = pdef.description
+            if pdef.constraints:
+                pd["constraints"] = dict(pdef.constraints)
+            params_dict[pname] = pd
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "default_risk": self.default_risk,
+            "action_field": self.action_field,
+            "action_risk_overrides": dict(self.action_risk_overrides),
+            "audit_policy": self.audit_policy.to_dict(),
+            "params": params_dict,
+            "source": self.source,
+            "server_id": self.server_id,
+            "status": self.status,
+        }
+
+    def to_tool_spec(self) -> ToolSpec:
+        """转换为 ToolSpec（向后兼容）"""
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            params=self.params,
+            default_risk=self.default_risk,
+            action_field=self.action_field,
+            action_risk_overrides=self.action_risk_overrides,
+            audit_policy=self.audit_policy,
+        )
+
+    @classmethod
+    def from_tool_spec(
+        cls,
+        spec: ToolSpec,
+        source: Literal["static", "mcp"] = "static",
+        server_id: str = "",
+        status: Literal["available", "unavailable"] = "available",
+    ) -> "UnifiedToolDefinition":
+        """从 ToolSpec 创建 UnifiedToolDefinition"""
+        return cls(
+            name=spec.name,
+            description=spec.description,
+            params=spec.params,
+            default_risk=spec.default_risk,
+            action_field=spec.action_field,
+            action_risk_overrides=spec.action_risk_overrides,
+            audit_policy=spec.audit_policy,
+            source=source,
+            server_id=server_id,
+            status=status,
+        )
+
+    @classmethod
+    def from_mcp_tool(
+        cls,
+        tool: MCPTool,
+        overrides: Optional[dict[str, object]] = None,
+    ) -> "UnifiedToolDefinition":
+        """从 MCPTool 创建 UnifiedToolDefinition（动态工具）
+
+        如果 overrides 中包含来自 JSON 的预定义元信息（risk/audit），则合并使用。
+        否则使用默认值 low/full。
+        """
+        overrides = overrides or {}
+        default_risk = str(overrides.get("default_risk", "low"))
+        audit_policy = AuditPolicy()
+        ap_raw = overrides.get("audit_policy")
+        if isinstance(ap_raw, dict):
+            audit_policy = AuditPolicy(
+                mode=str(ap_raw.get("mode", "full")),
+                safe_fields=tuple(ap_raw.get("safe_fields", []) if isinstance(ap_raw.get("safe_fields"), list) else []),
+                summary_builder=ap_raw.get("summary_builder"),
+            )
+
+        # 从 MCPTool.parameters 构建 ToolParamSpec
+        params: dict[str, ToolParamSpec] = {}
+        for pname, pdef in tool.parameters.items():
+            if not isinstance(pdef, dict):
+                continue
+            penum_raw = pdef.get("enum")
+            penum: tuple[str, ...] = ()
+            if isinstance(penum_raw, list):
+                penum = tuple(str(e) for e in penum_raw)
+            pconstraints_raw = pdef.get("constraints")
+            pconstraints = None
+            if isinstance(pconstraints_raw, dict):
+                pconstraints = {str(k): int(v) for k, v in pconstraints_raw.items()}
+            params[pname] = ToolParamSpec(
+                type=str(pdef.get("type", "string")),
+                required=pname in tool.required,
+                enum=penum,
+                description=str(pdef.get("description", "")),
+                constraints=_readonly_constraints(pconstraints) if pconstraints else None,
+            )
+
+        return cls(
+            name=tool.name,
+            description=tool.description,
+            params=MappingProxyType(params),
+            default_risk=default_risk,  # type: ignore[arg-type]
+            audit_policy=audit_policy,
+            source="mcp",
+            server_id=tool.server_id or "",
+            status="available",
+            mcp_parameters=tool.parameters,
+            mcp_required=tool.required,
+        )
 
 
 # ── JSON 配置文件加载 ──────────────────────────────────────────────────
@@ -274,9 +424,8 @@ class ToolRegistry:
     """
     MCP 工具注册表 —— 运行时查询工具元信息与参数校验
 
-    同时管理：
-      - 配置文件工具定义（self._registry）：从 JSON 文件加载，用户可修改风险等级
-      - 动态 MCP 工具（self._tools）：从 MCP 服务器动态发现的工具
+    Phase 1 重构：统一 _registry + _tools 双存储为单一 _definitions 字典。
+    每个条目都是 UnifiedToolDefinition，包含 source / server_id / status。
 
     使用方式：
         registry = ToolRegistry()
@@ -294,16 +443,14 @@ class ToolRegistry:
         参数:
             config_path: 工具定义 JSON 配置文件路径，默认 data/tool_definitions.json
         """
-        # 工具定义注册表 {tool_name: ToolSpec} —— 从 JSON 加载
-        self._registry: Dict[str, ToolSpec] = {}
+        # 统一工具定义存储 {tool_name: UnifiedToolDefinition}
+        self._definitions: Dict[str, UnifiedToolDefinition] = {}
+        # ToolSpec 缓存（向后兼容：保持 get_tool_spec 返回同一对象）
+        self._spec_cache: Dict[str, ToolSpec] = {}
         # 配置文件路径
         self._config_path: str = config_path or _DEFAULT_CONFIG_PATH
-        # {tool_name: MCPTool} —— 动态 MCP 工具
-        self._tools: Dict[str, MCPTool] = {}
         # {server_id: [tool_name, ...]}
         self._tools_by_server: Dict[str, List[str]] = {}
-        # 静态工具名（在 _registry 中但不在 _tools 中）→ 提供该工具的 server_id
-        self._static_tool_to_server: Dict[str, str] = {}
 
         # 从配置文件加载
         self._load_config()
@@ -313,24 +460,56 @@ class ToolRegistry:
     # ========================================================================
 
     def _load_config(self) -> None:
-        """从 JSON 配置文件加载工具定义"""
+        """从 JSON 配置文件加载工具定义到统一存储"""
         try:
-            self._registry = _load_from_json(self._config_path)
+            raw_specs = _load_from_json(self._config_path)
         except Exception:
             logger.exception("加载工具定义配置文件失败")
-            self._registry = {}
+            raw_specs = {}
+
+        new_defs: Dict[str, UnifiedToolDefinition] = {}
+        for name, spec in raw_specs.items():
+            # 保留已有的动态工具元信息（如果存在）
+            existing = self._definitions.get(name)
+            if existing is not None and existing.source == "mcp":
+                # 动态工具存在同名的静态定义：用静态定义覆盖 risk/audit，但保留 mcp 来源信息
+                new_defs[name] = UnifiedToolDefinition(
+                    name=spec.name,
+                    description=spec.description,
+                    params=spec.params,
+                    default_risk=spec.default_risk,
+                    action_field=spec.action_field,
+                    action_risk_overrides=spec.action_risk_overrides,
+                    audit_policy=spec.audit_policy,
+                    source=existing.source,
+                    server_id=existing.server_id,
+                    status=existing.status,
+                    mcp_parameters=existing.mcp_parameters,
+                    mcp_required=existing.mcp_required,
+                )
+                # 更新 spec 缓存
+                self._spec_cache[name] = spec
+            else:
+                new_defs[name] = UnifiedToolDefinition.from_tool_spec(spec)
+                self._spec_cache[name] = spec
+
+        self._definitions = new_defs
+        logger.info("从配置文件加载了 %d 个工具定义到统一注册表", len(self._definitions))
 
     def reload(self) -> None:
         """重新加载配置文件（热加载）"""
         self._load_config()
-        logger.info("工具定义已重新加载，当前 %d 个工具", len(self._registry))
+        logger.info("工具定义已重新加载，当前 %d 个工具", len(self._definitions))
 
     def save_config(self) -> None:
-        """将当前注册表持久化到 JSON 配置文件"""
+        """将当前注册表持久化到 JSON 配置文件
+
+        只持久化静态工具和已配置 audit/risk 的动态工具。
+        """
         try:
             tools_dict: dict[str, object] = {}
-            for name, spec in self._registry.items():
-                tools_dict[name] = spec.to_dict()
+            for name, defn in self._definitions.items():
+                tools_dict[name] = defn.to_dict()
 
             data: dict[str, object] = {
                 "version": 1,
@@ -358,6 +537,8 @@ class ToolRegistry:
     ) -> bool:
         """更新工具的风险等级（内存中），需调用 save_config 持久化
 
+        现在同时支持静态工具和动态 MCP 工具。
+
         Args:
             tool_name: 工具名称
             default_risk: 新的默认风险等级 ("low" / "medium" / "high")
@@ -366,13 +547,13 @@ class ToolRegistry:
         Returns:
             True 更新成功，False 工具不存在或参数无效
         """
-        spec = self._registry.get(tool_name)
-        if spec is None:
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             logger.warning("更新风险失败: 工具 '%s' 不在注册表中", tool_name)
             return False
 
-        new_default = spec.default_risk
-        new_overrides = dict(spec.action_risk_overrides)
+        new_default = defn.default_risk
+        new_overrides = dict(defn.action_risk_overrides)
 
         if default_risk is not None:
             if default_risk not in ("low", "medium", "high"):
@@ -386,8 +567,8 @@ class ToolRegistry:
                     logger.warning("无效的 action risk '%s': %s", action, risk)
                     return False
                 # 如果有 action_field，校验 action 是否在 enum 中
-                if spec.action_field:
-                    action_param = spec.params.get(spec.action_field)
+                if defn.action_field:
+                    action_param = defn.params.get(defn.action_field)
                     if action_param and action_param.enum and action not in action_param.enum:
                         logger.warning(
                             "action '%s' 不在工具 '%s' 允许的 action enum 中: %s",
@@ -396,17 +577,21 @@ class ToolRegistry:
                         return False
                 new_overrides[action] = risk  # type: ignore[assignment]
 
-        # 创建新的不可变 ToolSpec（保留原有 audit_policy）
-        new_spec = ToolSpec(
-            name=spec.name,
-            description=spec.description,
-            params=spec.params,
+        # 更新统一定义
+        self._definitions[tool_name] = UnifiedToolDefinition(
+            name=defn.name,
+            description=defn.description,
+            params=defn.params,
             default_risk=new_default,
-            action_field=spec.action_field,
+            action_field=defn.action_field,
             action_risk_overrides=MappingProxyType(new_overrides),
-            audit_policy=spec.audit_policy,
+            audit_policy=defn.audit_policy,
+            source=defn.source,
+            server_id=defn.server_id,
+            status=defn.status,
+            mcp_parameters=defn.mcp_parameters,
+            mcp_required=defn.mcp_required,
         )
-        self._registry[tool_name] = new_spec
         logger.info(
             "工具 '%s' 风险等级已更新: default_risk=%s, overrides=%s",
             tool_name, new_default, new_overrides,
@@ -414,37 +599,45 @@ class ToolRegistry:
         return True
 
     def get_all_tool_definitions(self) -> List[Dict[str, object]]:
-        """获取所有工具定义的完整信息（供前端展示/修改）"""
+        """获取所有工具定义的完整信息（静态 + 动态，供前端展示/修改）
+
+        Phase 2.1: 现在返回 _definitions 中的全部工具，包含 source / server_id / status。
+        """
         result: List[Dict[str, object]] = []
-        for spec in self._registry.values():
-            result.append(spec.to_dict())
+        for defn in self._definitions.values():
+            result.append(defn.to_dict())
         return result
 
     def get_tool_definition(self, tool_name: str) -> Optional[Dict[str, object]]:
         """获取单个工具定义"""
-        spec = self._registry.get(tool_name)
-        if spec is None:
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             return None
-        return spec.to_dict()
+        return defn.to_dict()
 
     # ========================================================================
     # 动态注册 / 注销
     # ========================================================================
 
     def register_from_server(self, server_id: str, tools: List[MCPTool]) -> None:
-        """从 MCP 服务器注册（或刷新）工具列表"""
+        """从 MCP 服务器注册（或刷新）工具列表
+
+        Phase 1.2: 合并到统一 _definitions 存储。
+        如果 JSON 中已有同名工具的元信息定义，合并（使用 JSON 中的 risk/audit 覆盖默认值）；
+        如果没有，用默认 low/full 创建。
+        """
         # 先清除该服务器的旧工具
         old_names = self._tools_by_server.pop(server_id, [])
         for name in old_names:
-            self._tools.pop(name, None)
+            if name in self._definitions and self._definitions[name].source == "mcp":
+                self._definitions.pop(name, None)
 
         # 注册新工具
         names = []
         for tool in tools:
             # 处理工具名冲突：追加 server_id 后缀
             unique_name = tool.name
-            if unique_name in self._tools or unique_name in self._registry:
-                # 已有同名工具（注册表或动态工具），追加后缀
+            if unique_name in self._definitions:
                 unique_name = f"{tool.name}__{server_id}"
                 tool = MCPTool(
                     name=unique_name,
@@ -454,12 +647,30 @@ class ToolRegistry:
                     server_id=server_id,
                     server_name=tool.server_name,
                 )
-                # 记录注册表工具名 → server_id 映射
-                base_name = unique_name.rsplit("__", 1)[0]
-                if base_name in self._registry:
-                    self._static_tool_to_server[base_name] = server_id
 
-            self._tools[unique_name] = tool
+            # 检查 JSON 中是否有同名工具的预定义元信息（历史持久化配置）
+            existing_defn = self._definitions.get(unique_name)
+            overrides = {}
+            if existing_defn is not None and existing_defn.source == "static":
+                # 静态定义优先级最高：使用 JSON 配置的 risk/audit
+                overrides = {
+                    "default_risk": existing_defn.default_risk,
+                    "audit_policy": existing_defn.audit_policy,
+                    "action_risk_overrides": dict(existing_defn.action_risk_overrides),
+                    "action_field": existing_defn.action_field,
+                }
+            elif tool.meta:
+                # 第二优先级：MCP 服务器提供的 _meta 元信息
+                meta_overrides: dict[str, object] = {}
+                if "suggested_risk" in tool.meta:
+                    meta_overrides["default_risk"] = tool.meta["suggested_risk"]
+                if "action_risk_overrides" in tool.meta:
+                    meta_overrides["action_risk_overrides"] = tool.meta["action_risk_overrides"]
+                if meta_overrides:
+                    overrides = meta_overrides
+
+            defn = UnifiedToolDefinition.from_mcp_tool(tool, overrides=overrides if overrides else None)
+            self._definitions[unique_name] = defn
             names.append(unique_name)
 
         self._tools_by_server[server_id] = names
@@ -468,14 +679,29 @@ class ToolRegistry:
         )
 
     def unregister_server(self, server_id: str) -> None:
-        """注销服务器的所有工具"""
+        """注销服务器的所有工具
+
+        Phase 1.2: 标记工具为 unavailable 而非删除，保留用户配置。
+        """
         tool_names = self._tools_by_server.pop(server_id, [])
         for name in tool_names:
-            self._tools.pop(name, None)
-            base_name = name.rsplit("__", 1)[0]
-            for k in list(self._tools.keys()):
-                if k.startswith(f"{base_name}__") and self._tools[k].server_id == server_id:
-                    self._tools.pop(k, None)
+            defn = self._definitions.get(name)
+            if defn is not None and defn.source == "mcp":
+                # 标记为 unavailable 而非删除
+                self._definitions[name] = UnifiedToolDefinition(
+                    name=defn.name,
+                    description=defn.description,
+                    params=defn.params,
+                    default_risk=defn.default_risk,
+                    action_field=defn.action_field,
+                    action_risk_overrides=defn.action_risk_overrides,
+                    audit_policy=defn.audit_policy,
+                    source=defn.source,
+                    server_id=defn.server_id,
+                    status="unavailable",
+                    mcp_parameters=defn.mcp_parameters,
+                    mcp_required=defn.mcp_required,
+                )
 
         if tool_names:
             logger.info(
@@ -487,74 +713,100 @@ class ToolRegistry:
     # ========================================================================
 
     def exists(self, tool_name: str) -> bool:
-        """判断工具是否存在（注册表或动态）"""
-        return tool_name in self._registry or tool_name in self._tools
+        """判断工具是否存在"""
+        return tool_name in self._definitions
 
     def get_tool(self, tool_name: str) -> Optional[MCPTool]:
-        """根据名称获取动态 MCP 工具"""
-        return self._tools.get(tool_name)
+        """根据名称获取动态 MCP 工具（重建 MCPTool）"""
+        defn = self._definitions.get(tool_name)
+        if defn is None:
+            return None
+        if defn.source == "mcp":
+            return MCPTool(
+                name=defn.name,
+                description=defn.description,
+                parameters=defn.mcp_parameters,
+                required=defn.mcp_required,
+                server_id=defn.server_id,
+            )
+        return None
 
     def get_tools_for_server(self, server_id: str) -> List[MCPTool]:
         """获取指定服务器的所有工具"""
         tool_names = self._tools_by_server.get(server_id, [])
-        return [self._tools[n] for n in tool_names if n in self._tools]
+        result: List[MCPTool] = []
+        for name in tool_names:
+            defn = self._definitions.get(name)
+            if defn is not None:
+                result.append(MCPTool(
+                    name=defn.name,
+                    description=defn.description,
+                    parameters=defn.mcp_parameters,
+                    required=defn.mcp_required,
+                    server_id=defn.server_id,
+                ))
+        return result
 
     def list_all(self) -> List[MCPTool]:
         """列出所有已注册动态工具"""
-        return list(self._tools.values())
+        result: List[MCPTool] = []
+        for defn in self._definitions.values():
+            if defn.source == "mcp":
+                result.append(MCPTool(
+                    name=defn.name,
+                    description=defn.description,
+                    parameters=defn.mcp_parameters,
+                    required=defn.mcp_required,
+                    server_id=defn.server_id,
+                ))
+        return result
 
     def count(self) -> int:
         """已注册动态工具总数"""
-        return len(self._tools)
+        return sum(1 for d in self._definitions.values() if d.source == "mcp")
 
     def get_tool_names(self) -> List[str]:
-        """获取所有工具名称列表（注册表 + 动态）"""
-        names = list(self._registry.keys())
-        names.extend(self._tools.keys())
-        return names
+        """获取所有工具名称列表"""
+        return list(self._definitions.keys())
 
     def get_tool_spec(self, tool_name: str) -> Optional[ToolSpec]:
-        """返回工具规格（不可变副本）"""
-        return self._registry.get(tool_name)
+        """返回工具规格（向后兼容，缓存转换结果保证对象同一性）"""
+        defn = self._definitions.get(tool_name)
+        if defn is None:
+            return None
+        # 缓存：同一工具名总是返回同一个 ToolSpec 对象
+        if tool_name not in self._spec_cache:
+            self._spec_cache[tool_name] = defn.to_tool_spec()
+        return self._spec_cache[tool_name]
 
     def get_tool_info(self, tool_name: str) -> Optional[Dict[str, object]]:
         """返回工具元信息（兼容旧版 dict 接口）"""
-        spec = self._registry.get(tool_name)
-        if spec is None:
-            # 尝试动态工具
-            tool = self._tools.get(tool_name)
-            if tool is not None:
-                return {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "risk_level": "low",
-                    "params": {
-                        k: {"type": v.get("type", "string"), "required": k in tool.required, "enum": v.get("enum"), "constraints": None}
-                        for k, v in tool.parameters.items()
-                    },
-                }
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             return None
+
+        params_info: dict[str, object] = {}
+        for k, v in defn.params.items():
+            params_info[k] = {
+                "type": v.type,
+                "required": v.required,
+                "enum": list(v.enum) or None,
+                "constraints": dict(v.constraints) if v.constraints else None,
+            }
+
         return {
-            "name": spec.name,
-            "description": spec.description,
-            "risk_level": spec.default_risk,
-            "params": {
-                k: {
-                    "type": v.type,
-                    "required": v.required,
-                    "enum": list(v.enum) or None,
-                    "constraints": dict(v.constraints) if v.constraints else None,
-                }
-                for k, v in spec.params.items()
-            },
+            "name": defn.name,
+            "description": defn.description,
+            "risk_level": defn.default_risk,
+            "params": params_info,
         }
 
     def get_param_info(self, tool_name: str, param_name: str) -> Optional[Dict[str, Any]]:
         """获取工具参数的详细信息"""
-        spec = self._registry.get(tool_name)
-        if spec is None:
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             return None
-        p = spec.params.get(param_name)
+        p = defn.params.get(param_name)
         if p is None:
             return None
         return {
@@ -568,25 +820,15 @@ class ToolRegistry:
         """获取工具所属 MCP 服务器的 server_id
 
         查找顺序：
-        1. 动态工具（_tools）→ 直接取其 server_id
-        2. 注册表工具（_registry）→ 查 _static_tool_to_server 映射
-        3. 回退：查所有已注册服务器中是否有匹配的工具名
-        4. 返回空字符串（调用方自行处理降级）
-
-        返回空字符串时，MCPClient.call_tool 会返回 "无可用连接" 错误。
+        1. 统一定义中取 server_id
+        2. 回退：查所有已注册服务器中是否有匹配的工具名
+        3. 返回空字符串（调用方自行处理降级）
         """
-        # 1. 动态工具
-        tool = self._tools.get(tool_name)
-        if tool is not None and tool.server_id:
-            return tool.server_id
+        defn = self._definitions.get(tool_name)
+        if defn is not None and defn.server_id:
+            return defn.server_id
 
-        # 2. 注册表工具 → 映射表
-        if tool_name in self._registry:
-            mapped = self._static_tool_to_server.get(tool_name, "")
-            if mapped:
-                return mapped
-
-        # 3. 回退：遍历所有服务器找匹配工具
+        # 回退：遍历所有服务器找匹配工具
         for sid, tool_names in self._tools_by_server.items():
             for name in tool_names:
                 if name == tool_name or name.startswith(f"{tool_name}__"):
@@ -603,14 +845,17 @@ class ToolRegistry:
         动态构建 OpenAI function calling 格式的工具列表
 
         LLM 每次调用时实时查询，确保工具列表始终是最新的。
-        包含注册表工具定义和动态 MCP 工具。
+        从统一定义构建，只包含 available 状态的工具。
         """
         functions = []
-        # 注册表工具 → OpenAI function 格式
-        for spec in self._registry.values():
+        for defn in self._definitions.values():
+            # 跳过不可用的动态工具
+            if defn.source == "mcp" and defn.status == "unavailable":
+                continue
+
             properties = {}
             required_list = []
-            for pname, pdef in spec.params.items():
+            for pname, pdef in defn.params.items():
                 prop = {"type": pdef.type, "description": pdef.description or pname}
                 if pdef.enum:
                     prop["enum"] = list(pdef.enum)
@@ -620,8 +865,8 @@ class ToolRegistry:
             functions.append({
                 "type": "function",
                 "function": {
-                    "name": spec.name,
-                    "description": spec.description,
+                    "name": defn.name,
+                    "description": defn.description,
                     "parameters": {
                         "type": "object",
                         "properties": properties,
@@ -629,14 +874,37 @@ class ToolRegistry:
                     },
                 },
             })
-        # 动态 MCP 工具 → OpenAI function 格式
-        for tool in self._tools.values():
-            functions.append(tool.to_openai_function())
         return functions
 
-    # ========================================================================
-    # 参数校验
-    # ========================================================================
+    def build_tool_prompt_section(self) -> str:
+        """动态生成 Agent system prompt 中的工具说明段
+
+        用于注入到 diagnose_agent / fix_planner_agent 等 Agent 的 system prompt 中。
+        每个工具产出格式：- tool_name: description（param1: enum描述, param2: 说明...）
+        """
+        lines: list[str] = []
+        for defn in self._definitions.values():
+            # 跳过不可用的动态工具
+            if defn.source == "mcp" and defn.status == "unavailable":
+                continue
+
+            param_parts: list[str] = []
+            for pname, pdef in defn.params.items():
+                desc = pdef.description or pname
+                if pdef.enum:
+                    desc += f" ({'/'.join(pdef.enum)})"
+                if pdef.required:
+                    param_parts.append(f"{pname}（必填）: {desc}")
+                else:
+                    param_parts.append(f"{pname}（可选）: {desc}")
+
+            if param_parts:
+                lines.append(f"- {defn.name}: {defn.description}\n  {', '.join(param_parts)}")
+            else:
+                lines.append(f"- {defn.name}: {defn.description}")
+
+        return "\n".join(lines)
+
 
     def validate_params(
         self, tool_name: str, params: Dict[str, Any]
@@ -644,41 +912,29 @@ class ToolRegistry:
         """
         校验参数枚举和约束，返回 {"valid": bool, "errors": list[str]}
 
-        优先使用注册表定义校验，回退到 MCP 工具的 required 检查。
+        使用统一定义中的 params 校验。
         """
-        spec = self._registry.get(tool_name)
-        if spec is not None:
-            errors: list[str] = []
-            for pname, pdef in spec.params.items():
-                has_value = pname in params and params[pname] is not None
-                if pdef.required and not has_value:
-                    errors.append(f"缺少必填参数: {pname}")
-                    continue
-                if not has_value:
-                    continue
-                value = params[pname]
-                if pdef.enum and value not in pdef.enum:
-                    errors.append(f"参数 {pname} 值 '{value}' 不在允许范围内: {list(pdef.enum)}")
-                if pdef.constraints and isinstance(value, (int, float)):
-                    c = pdef.constraints
-                    if "min" in c and value < c["min"]:
-                        errors.append(f"参数 {pname} 值 {value} 小于最小值 {c['min']}")
-                    if "max" in c and value > c["max"]:
-                        errors.append(f"参数 {pname} 值 {value} 大于最大值 {c['max']}")
-            return {"valid": len(errors) == 0, "errors": errors}
-
-        # 回退到 MCP 工具的简单 required 检查
-        tool = self._tools.get(tool_name)
-        if not tool:
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             return {"valid": False, "errors": [f"未知工具: {tool_name}"]}
 
-        if not isinstance(params, dict):
-            return {"valid": False, "errors": ["参数必须是字典"]}
-
-        errors = []
-        for key in tool.required:
-            if key not in params:
-                errors.append(f"缺少必填参数: {key}")
+        errors: list[str] = []
+        for pname, pdef in defn.params.items():
+            has_value = pname in params and params[pname] is not None
+            if pdef.required and not has_value:
+                errors.append(f"缺少必填参数: {pname}")
+                continue
+            if not has_value:
+                continue
+            value = params[pname]
+            if pdef.enum and value not in pdef.enum:
+                errors.append(f"参数 {pname} 值 '{value}' 不在允许范围内: {list(pdef.enum)}")
+            if pdef.constraints and isinstance(value, (int, float)):
+                c = pdef.constraints
+                if "min" in c and value < c["min"]:
+                    errors.append(f"参数 {pname} 值 {value} 小于最小值 {c['min']}")
+                if "max" in c and value > c["max"]:
+                    errors.append(f"参数 {pname} 值 {value} 大于最大值 {c['max']}")
         return {"valid": len(errors) == 0, "errors": errors}
 
     def resolve(
@@ -700,24 +956,19 @@ class ToolRegistry:
         Returns:
             "low" / "medium" / "high" 或 None（未知工具）
         """
-        spec = self._registry.get(tool_name)
-        if spec is not None:
-            return spec.default_risk
-        # 回退到动态工具：默认 low
-        tool = self._tools.get(tool_name)
-        if tool:
-            return "low"
+        defn = self._definitions.get(tool_name)
+        if defn is not None:
+            return defn.default_risk
         return None
 
     def get_risk_for_action(self, tool_name: str, action: Any) -> Optional[str]:
         """对带 action 参数的工具，按 action 返回具体风险"""
-        spec = self._registry.get(tool_name)
-        if spec is not None:
-            if isinstance(action, str) and spec.action_field:
-                return spec.action_risk_overrides.get(action, spec.default_risk)
-            return spec.default_risk
-        # 回退到动态工具
-        return self.get_default_risk(tool_name)
+        defn = self._definitions.get(tool_name)
+        if defn is not None:
+            if isinstance(action, str) and defn.action_field:
+                return defn.action_risk_overrides.get(action, defn.default_risk)
+            return defn.default_risk
+        return None
 
     # ========================================================================
     # 审计
@@ -725,10 +976,10 @@ class ToolRegistry:
 
     def get_tool_audit_policy(self, tool_name: str) -> Optional[Dict[str, object]]:
         """获取工具的审计策略"""
-        spec = self._registry.get(tool_name)
-        if spec is None:
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             return None
-        return spec.audit_policy.to_dict()
+        return defn.audit_policy.to_dict()
 
     def update_tool_audit_policy(
         self,
@@ -739,6 +990,8 @@ class ToolRegistry:
     ) -> bool:
         """更新工具的审计策略（内存中），需调用 save_config 持久化
 
+        现在同时支持静态工具和动态 MCP 工具。
+
         Args:
             tool_name: 工具名称
             mode: 审计模式 ("whitelist" / "summary" / "full")
@@ -748,14 +1001,14 @@ class ToolRegistry:
         Returns:
             True 更新成功，False 工具不存在或参数无效
         """
-        spec = self._registry.get(tool_name)
-        if spec is None:
+        defn = self._definitions.get(tool_name)
+        if defn is None:
             logger.warning("更新审计策略失败: 工具 '%s' 不在注册表中", tool_name)
             return False
 
-        new_mode = spec.audit_policy.mode
-        new_safe_fields = spec.audit_policy.safe_fields
-        new_summary_builder = spec.audit_policy.summary_builder
+        new_mode = defn.audit_policy.mode
+        new_safe_fields = defn.audit_policy.safe_fields
+        new_summary_builder = defn.audit_policy.summary_builder
 
         if mode is not None:
             if mode not in ("whitelist", "summary", "full"):
@@ -767,7 +1020,7 @@ class ToolRegistry:
             # 校验 safe_fields 都在 params 中
             valid_fields: list[str] = []
             for sf in safe_fields:
-                if sf in spec.params:
+                if sf in defn.params:
                     valid_fields.append(sf)
                 else:
                     logger.warning(
@@ -787,16 +1040,20 @@ class ToolRegistry:
             summary_builder=new_summary_builder,
         )
 
-        new_spec = ToolSpec(
-            name=spec.name,
-            description=spec.description,
-            params=spec.params,
-            default_risk=spec.default_risk,
-            action_field=spec.action_field,
-            action_risk_overrides=spec.action_risk_overrides,
+        self._definitions[tool_name] = UnifiedToolDefinition(
+            name=defn.name,
+            description=defn.description,
+            params=defn.params,
+            default_risk=defn.default_risk,
+            action_field=defn.action_field,
+            action_risk_overrides=defn.action_risk_overrides,
             audit_policy=new_ap,
+            source=defn.source,
+            server_id=defn.server_id,
+            status=defn.status,
+            mcp_parameters=defn.mcp_parameters,
+            mcp_required=defn.mcp_required,
         )
-        self._registry[tool_name] = new_spec
         logger.info(
             "工具 '%s' 审计策略已更新: mode=%s, safe_fields=%s, summary_builder=%s",
             tool_name, new_mode, list(new_safe_fields), new_summary_builder,
@@ -815,9 +1072,9 @@ class ToolRegistry:
         """
         from app.services.audit_service import sanitize_sensitive_data
 
-        spec = self._registry.get(tool_name)
-        if spec is not None:
-            ap = spec.audit_policy
+        defn = self._definitions.get(tool_name)
+        if defn is not None:
+            ap = defn.audit_policy
             params_dict = dict(params)
 
             if ap.mode == "whitelist":
@@ -837,9 +1094,5 @@ class ToolRegistry:
 
             # mode == "full"
             return sanitize_sensitive_data(params_dict)  # type: ignore[return-value]
-
-        # 回退到动态 MCP 工具：通用脱敏
-        if tool_name in self._tools:
-            return sanitize_sensitive_data(dict(params))  # type: ignore[return-value]
 
         raise ValueError(f"找不到对应工具: {tool_name}")

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.auth import AuthContext, AuthLevel
-from app.dependencies import action_service, fix_option_store, require_auth, tool_registry
+from app.dependencies import action_service, fix_option_store, require_auth, server_manager, tool_registry
 from app.schemas.action import (
     ActionConfirmRequest,
     ActionConfirmResponse,
@@ -223,3 +223,27 @@ async def update_tool_audit(
     tool_registry.save_config()
     logger.info("用户修改了工具 '%s' 的审计策略: mode=%s", tool_name, req.mode)
     return tool_registry.get_tool_definition(tool_name)
+
+
+# ── 工具刷新接口 ─────────────────────────────────────────────────────────
+
+
+@router.post("/tools/definitions/refresh")
+async def refresh_tool_definitions(
+    auth: AuthContext = Depends(require_auth(AuthLevel.ADMIN)),
+):
+    """手动触发 MCP 工具重新发现
+
+    调用 mcp_server_manager.connect_all_and_discover() 并返回发现结果。
+    需要 ADMIN 权限。
+    """
+    result = await server_manager.connect_all_and_discover()
+    if result["success"] == 0 and result["total"] > 0:
+        raise HTTPException(status_code=502, detail="所有 MCP 服务器连接失败，请检查服务器状态")
+    return {
+        "message": "工具列表已刷新",
+        "total_servers": result["total"],
+        "success_count": result["success"],
+        "details": result.get("results", []),
+        "available_tools": tool_registry.get_tool_names(),
+    }

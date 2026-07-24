@@ -226,17 +226,14 @@ class DiagnoseAgent:
         try:
             client = LLMClient()
             tool_names = self._get_tool_names()
+            tool_section = self._get_tool_prompt_section()
             system_prompt = (
                 "你是一个诊断规划器。根据意图识别结果，生成需要调用的工具列表。\n"
                 "只输出 JSON 数组，不输出任何解释文字。\n"
                 "每项包含 tool（工具名）和 params（参数字典）。\n"
                 f"可用工具：{', '.join(tool_names)}\n"
                 "工具参数说明：\n"
-                "- sys_info: metric (cpu/memory/disk/load/network/uptime/all)\n"
-                "- service_mgr: action (status/start/stop/restart), service (服务名)\n"
-                "- log_reader: type (journalctl), service (服务名), lines (行数 1-500)\n"
-                "- net_monitor: metric (connections/traffic/interfaces/routes/dns/listen/all), port (可选)\n"
-                "- cmd_exec: command (命令字符串，限只读命令)\n"
+                f"{tool_section}\n"
                 "禁止生成 rm、mkfs、chmod 777、dd、curl pipe 等危险命令。"
             )
             user_prompt = json.dumps(intent_result, ensure_ascii=False)
@@ -334,3 +331,16 @@ class DiagnoseAgent:
         if self.tool_registry is not None:
             return self.tool_registry.get_tool_names()
         return ["sys_info", "service_mgr", "log_reader", "net_monitor", "cmd_exec"]
+
+    def _get_tool_prompt_section(self) -> str:
+        """从 ToolRegistry 动态生成工具参数说明"""
+        if self.tool_registry is not None and hasattr(self.tool_registry, "build_tool_prompt_section"):
+            return self.tool_registry.build_tool_prompt_section()
+        # 降级：返回硬编码说明
+        return (
+            "- sys_info: metric (cpu/memory/disk/load/network/uptime/all)\n"
+            "- service_mgr: action (status/start/stop/restart), service (服务名)\n"
+            "- log_reader: type (journalctl), service (服务名), lines (行数 1-500)\n"
+            "- net_monitor: metric (connections/traffic/interfaces/routes/dns/listen/all), port (可选)\n"
+            "- cmd_exec: command (命令字符串，限只读命令)"
+        )

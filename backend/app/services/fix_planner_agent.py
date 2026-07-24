@@ -496,13 +496,16 @@ class FixPlannerAgent:
         self, intent: str, observations: list[dict[str, object]],
         report: str, target_service: str | None,
     ) -> dict[str, str]:
-        tool_descs = self._describe_allowed_tools()
+        tool_names = self._describe_allowed_tools()
+        tool_section = self._get_tool_prompt_section()
         system = (
             "你是运维修复方案规划器。根据诊断结果生成修复候选。\n"
             "只输出 JSON 对象，不输出解释/Markdown/思维过程。\n"
             '格式: {"options": [{"title":"...","description":"...","tool":"...","params":{...},"rollback":"..."}]}\n'
             "规则: 1.只用给定工具 2.不生成高风险操作(rm -rf/mkfs/dd/shutdown/curl|sh等) 3.最多3个候选 4.rollback仅作说明文本\n"
-            f"可用工具: {tool_descs}\n"
+            f"可用工具: {tool_names}\n"
+            "工具参数说明：\n"
+            f"{tool_section}\n"
             "禁止生成 option_id/risk_level/requires_confirm\n"
         )
         obs_summary = []
@@ -521,6 +524,19 @@ class FixPlannerAgent:
         if self.tool_registry is not None:
             return ", ".join(self.tool_registry.get_tool_names())
         return "sys_info, service_mgr, log_reader, net_monitor, cmd_exec"
+
+    def _get_tool_prompt_section(self) -> str:
+        """从 ToolRegistry 动态生成工具参数说明"""
+        if self.tool_registry is not None and hasattr(self.tool_registry, "build_tool_prompt_section"):
+            return self.tool_registry.build_tool_prompt_section()
+        # 降级：返回硬编码说明
+        return (
+            "- sys_info: metric (cpu/memory/disk/load/network/uptime/all)\n"
+            "- service_mgr: action (status/start/stop/restart), service (服务名)\n"
+            "- log_reader: type (journalctl), service (服务名), lines (行数 1-500)\n"
+            "- net_monitor: metric (connections/traffic/interfaces/routes/dns/listen/all), port (可选)\n"
+            "- cmd_exec: command (命令字符串，限只读命令)"
+        )
 
     @staticmethod
     def _parse_llm_candidates(raw: str) -> list[dict]:

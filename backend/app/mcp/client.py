@@ -101,6 +101,7 @@ class MCPTool:
     required: List[str] = field(default_factory=list)
     server_id: Optional[str] = None
     server_name: Optional[str] = None
+    meta: Dict[str, Any] = field(default_factory=dict)  # _meta 扩展属性（suggested_risk, category 等）
 
     def to_openai_function(self) -> Dict[str, Any]:
         """转换为 OpenAI function calling 格式"""
@@ -581,6 +582,7 @@ class MCPClient:
                 required=raw.get("inputSchema", {}).get("required", []),
                 server_id=server_id,
                 server_name=server.name,
+                meta=raw.get("_meta", {}),
             )
             tools.append(tool)
 

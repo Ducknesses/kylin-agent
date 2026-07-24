@@ -2,18 +2,26 @@
   <div class="tools-settings">
     <div class="toolbar">
       <el-button type="primary" @click="fetchTools" :loading="loading">刷新列表</el-button>
-      <span class="tool-count">共 {{ tools.length }} 个工具</span>
+      <el-button type="success" @click="refreshMCP" :loading="refreshing" :icon="RefreshIcon">
+        重新发现 MCP 工具
+      </el-button>
+      <span class="tool-count">共 {{ tools.length }} 个工具（静态 {{ staticCount }} / 动态 {{ dynamicCount }}）</span>
     </div>
 
     <div v-if="tools.length === 0 && !loading" class="empty">暂无工具定义</div>
 
-    <el-collapse v-model="expandedTools" accordion v-loading="loading">
+    <el-collapse v-model="expandedTools" v-loading="loading">
       <el-collapse-item v-for="tool in tools" :key="tool.name" :name="tool.name">
         <template #title>
           <div class="collapse-title">
             <span class="tool-name">{{ tool.name }}</span>
             <el-tag :type="riskTag(tool.default_risk)" size="small">{{ tool.default_risk }}</el-tag>
             <el-tag size="small" type="info">{{ tool.audit_policy?.mode || 'full' }}</el-tag>
+            <el-tag :type="sourceTag(tool.source)" size="small" effect="plain">{{ sourceLabel(tool.source) }}</el-tag>
+            <el-tag v-if="tool.source === 'mcp'" :type="tool.status === 'available' ? 'success' : 'danger'" size="small" effect="dark">
+              {{ tool.status === 'available' ? '在线' : '离线' }}
+            </el-tag>
+            <span v-if="tool.server_id" class="server-hint">{{ tool.server_id }}</span>
           </div>
         </template>
 
@@ -95,15 +103,21 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, computed, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
 import http from '@/api/http'
 
 const tools = ref([])
 const loading = ref(false)
+const refreshing = ref(false)
 const expandedTools = ref('')
+const RefreshIcon = Refresh
 
 onMounted(() => fetchTools())
+
+const staticCount = computed(() => tools.value.filter(t => t.source === 'static').length)
+const dynamicCount = computed(() => tools.value.filter(t => t.source === 'mcp').length)
 
 async function fetchTools() {
   loading.value = true
@@ -115,7 +129,35 @@ async function fetchTools() {
   } finally { loading.value = false }
 }
 
+async function refreshMCP() {
+  refreshing.value = true
+  try {
+    const res = await http.post('/tools/definitions/refresh')
+    ElMessage.success(`MCP 工具发现完成: ${res.data.success_count}/${res.data.total_servers} 服务器已连接，共 ${res.data.available_tools?.length || 0} 个工具可用`)
+    await fetchTools()
+    // 如果有详情，展示工具发现摘要
+    const details = res.data.details || []
+    const newTools = details.filter(d => d.success && d.tools_count > 0)
+    if (newTools.length > 0) {
+      ElMessageBox.alert(
+        newTools.map(d => `• ${d.server_id}: 发现 ${d.tools_count} 个工具`).join('\n'),
+        '工具发现摘要',
+        { confirmButtonText: '好的', type: 'info' }
+      )
+    }
+    const failed = details.filter(d => !d.success)
+    if (failed.length > 0) {
+      ElMessage.warning(`${failed.length} 个服务器连接失败，请检查 MCP 服务器状态`)
+    }
+  } catch (e) {
+    ElMessage.error('MCP 工具发现失败: ' + (e.response?.data?.detail || e.message))
+  } finally { refreshing.value = false }
+}
+
 function riskTag(r) { return {low:'success',medium:'warning',high:'danger'}[r]||'info' }
+
+function sourceTag(s) { return s === 'static' ? '' : 'success' }
+function sourceLabel(s) { return s === 'static' ? '静态定义' : 'MCP 发现' }
 
 function pList(tool) {
   if (!tool.params) return []
@@ -167,11 +209,12 @@ function removeSF(tool, idx) {
 
 <style scoped>
 .tools-settings { padding: 0; }
-.toolbar { margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+.toolbar { margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .tool-count { color: #6b7280; font-size: 13px; }
 .empty { text-align: center; color: #9ca3af; padding: 40px 0; }
-.collapse-title { display: flex; align-items: center; gap: 10px; width: 100%; }
+.collapse-title { display: flex; align-items: center; gap: 10px; width: 100%; flex-wrap: wrap; }
 .tool-name { font-weight: 600; font-size: 14px; font-family: monospace; color: #1f2937; }
+.server-hint { font-size: 11px; color: #6b7280; background: #f3f4f6; padding: 1px 8px; border-radius: 4px; }
 .tool-detail { padding: 8px 0; }
 .detail-section { margin-bottom: 16px; }
 .detail-label { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; }

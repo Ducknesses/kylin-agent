@@ -32,6 +32,55 @@ TOOLS = {
     "metrics_history": metrics_store.handle,
 }
 
+# 工具元信息 —— 每个工具的 suggested_risk / category，用于客户端自动注册时提供默认安全配置
+TOOL_META = {
+    "sys_info": {
+        "suggested_risk": "low",
+        "category": "monitor",
+    },
+    "service_mgr": {
+        "suggested_risk": "low",
+        "category": "service",
+        "action_risk_overrides": {
+            "status": "low",
+            "is-active": "low",
+            "is-enabled": "low",
+            "start": "medium",
+            "stop": "medium",
+            "restart": "medium",
+        },
+    },
+    "log_reader": {
+        "suggested_risk": "low",
+        "category": "diagnostic",
+    },
+    "net_monitor": {
+        "suggested_risk": "low",
+        "category": "monitor",
+    },
+    "cmd_exec": {
+        "suggested_risk": "medium",
+        "category": "exec",
+    },
+    "file_guard": {
+        "suggested_risk": "medium",
+        "category": "file",
+        "action_risk_overrides": {
+            "check": "low",
+            "read": "low",
+            "write": "medium",
+        },
+    },
+    "mcp_self_monitor": {
+        "suggested_risk": "low",
+        "category": "monitor",
+    },
+    "metrics_history": {
+        "suggested_risk": "low",
+        "category": "monitor",
+    },
+}
+
 # JSON-RPC 2.0 标准错误码
 JSONRPC_ERRORS = {
     "PARSE_ERROR": (-32700, "解析错误"),
@@ -246,6 +295,11 @@ def handle_tools_list(req_id=None) -> dict:
             },
         },
     ]
+    # 附加 _meta 扩展属性
+    for td in tool_defs:
+        meta = TOOL_META.get(td["name"])
+        if meta:
+            td["_meta"] = meta
     return make_jsonrpc_response({"tools": tool_defs}, req_id)
 
 
