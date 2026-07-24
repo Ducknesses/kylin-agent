@@ -37,10 +37,12 @@ TOOL_META = {
     "sys_info": {
         "suggested_risk": "low",
         "category": "monitor",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["metric"]},
     },
     "service_mgr": {
         "suggested_risk": "low",
         "category": "service",
+        "action_field": "action",
         "action_risk_overrides": {
             "status": "low",
             "is-active": "low",
@@ -49,35 +51,43 @@ TOOL_META = {
             "stop": "medium",
             "restart": "medium",
         },
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["action", "service"]},
     },
     "log_reader": {
         "suggested_risk": "low",
         "category": "diagnostic",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["service", "lines"]},
     },
     "net_monitor": {
         "suggested_risk": "low",
         "category": "monitor",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["metric"]},
     },
     "cmd_exec": {
         "suggested_risk": "medium",
         "category": "exec",
+        "audit_policy": {"mode": "summary", "summary_builder": "cmd_exec_summary"},
     },
     "file_guard": {
         "suggested_risk": "medium",
         "category": "file",
+        "action_field": "action",
         "action_risk_overrides": {
             "check": "low",
             "read": "low",
             "write": "medium",
         },
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["action", "path"]},
     },
     "mcp_self_monitor": {
         "suggested_risk": "low",
         "category": "monitor",
+        "audit_policy": {"mode": "full", "safe_fields": []},
     },
     "metrics_history": {
         "suggested_risk": "low",
         "category": "monitor",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["from_ts", "to_ts", "metrics"]},
     },
 }
 

@@ -473,6 +473,7 @@ class MCPClient:
                 logger.error(
                     f"MCP initialize 失败: {server.name} - {init_resp.error}"
                 )
+                del self.transports[server.id]
                 return False
 
             result = init_resp.result
@@ -500,6 +501,7 @@ class MCPClient:
 
         except Exception as e:
             logger.exception(f"连接 MCP 服务器异常 {server.name}: {e}")
+            self.transports.pop(server.id, None)
             return False
 
     async def disconnect_server(self, server_id: str) -> None:

@@ -196,8 +196,9 @@ async def update_tool_risk(
     )
     if not success:
         raise HTTPException(status_code=404, detail=f"工具 '{tool_name}' 不存在或参数无效")
+    # save_config 已废弃 —— 修改仅在内存中生效，未来接入 SQLite 持久化
     tool_registry.save_config()
-    logger.info("用户修改了工具 '%s' 的风险等级: default_risk=%s, overrides=%s",
+    logger.info("用户修改了工具 '%s' 的风险等级（内存）: default_risk=%s, overrides=%s",
                 tool_name, req.default_risk, req.action_risk_overrides)
     return tool_registry.get_tool_definition(tool_name)
 
@@ -220,8 +221,9 @@ async def update_tool_audit(
     )
     if not success:
         raise HTTPException(status_code=404, detail=f"工具 '{tool_name}' 不存在或参数无效")
+    # save_config 已废弃 —— 修改仅在内存中生效，未来接入 SQLite 持久化
     tool_registry.save_config()
-    logger.info("用户修改了工具 '%s' 的审计策略: mode=%s", tool_name, req.mode)
+    logger.info("用户修改了工具 '%s' 的审计策略（内存）: mode=%s", tool_name, req.mode)
     return tool_registry.get_tool_definition(tool_name)
 
 

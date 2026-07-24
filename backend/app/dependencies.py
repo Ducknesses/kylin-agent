@@ -120,8 +120,9 @@ async def init_mcp_servers() -> None:
         await server_manager.load_from_db()
         # 连接所有启用的服务器
         await server_manager.connect_all_and_discover()
+        total = len(tool_registry.get_tool_names())
         logger.info(
-            f"[dependencies] MCP 初始化完成: {tool_registry.count()} 个工具可用"
+            f"[dependencies] MCP 初始化完成: {total} 个工具可用（纯动态模式）"
         )
     except Exception as e:
         logger.error(f"[dependencies] MCP 初始化失败: {e}")

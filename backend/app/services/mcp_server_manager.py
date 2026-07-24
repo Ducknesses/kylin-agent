@@ -290,7 +290,7 @@ class MCPServerManager:
             "transport": server.transport.value,
             "auth_token": server.auth_token or "",
             "enabled": server.enabled,
-            "connected": server.id in self._client.transports,
+            "connected": server.id in self._client.transports and self._client.is_initialized(server.id),
             "initialized": self._client.is_initialized(server.id),
             "tools_count": len(tools),
             "tools": [
