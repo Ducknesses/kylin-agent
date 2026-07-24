@@ -195,7 +195,7 @@ def handle_tools_list(req_id=None) -> dict:
                 "properties": {
                     "metric": {
                         "type": "string",
-                        "description": "查询指标类型",
+                        "description": "查询指标类型（单选，多个指标请使用 'all'）",
                         "enum": ["cpu", "memory", "disk", "load", "uptime", "network", "all"],
                         "default": "all",
                     },
@@ -249,7 +249,7 @@ def handle_tools_list(req_id=None) -> dict:
                 "properties": {
                     "metric": {
                         "type": "string",
-                        "description": "监控指标类型",
+                        "description": "监控指标类型（单选，多个指标请使用 'all'）",
                         "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
                         "default": "all",
                     },
