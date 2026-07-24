@@ -69,15 +69,7 @@ def _check_protected_paths(cmd: str) -> tuple:
     for path in config.PROTECTED_PATHS:
         # 检查命令中是否包含完整路径或其前缀
         if path in cmd:
-            # 额外检查：判断是读操作还是写操作
-            # 白名单中只有 cat/head/tail/ls 可读，其余操作禁止访问保护路径
-            cmd_parts = cmd.strip().split()
-            if cmd_parts:
-                base_cmd = os.path.basename(cmd_parts[0])
-                read_only_cmds = ("cat", "head", "tail", "ls", "file")
-                if base_cmd not in read_only_cmds:
-                    return False, path
-            # 即使是读操作，也检查保护路径（完全禁止访问）
+            # 受保护路径完全禁止访问（读/写均拦截，sandbox 统一管控）
             return False, path
 
     # 检查敏感扩展名（.pem, .key 等）

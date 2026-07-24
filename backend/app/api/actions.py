@@ -13,6 +13,8 @@ PUT  /api/tools/definitions/{tool_name}/audit — 修改审计策略（需要 AD
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from typing import Literal
+
 from pydantic import BaseModel
 
 from app.core.auth import AuthContext, AuthLevel
@@ -33,7 +35,10 @@ router = APIRouter()
 class OptionStatusItem(BaseModel):
     """单个修复选项的状态摘要"""
     option_id: str
-    status: str
+    status: Literal[
+        "executed", "failed", "blocked", "rolled_back",
+        "expired", "confirm_required", "executing",
+    ]
     risk_level: str
     message: str | None = None
     result_summary: str | None = None

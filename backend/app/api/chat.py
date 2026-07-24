@@ -325,7 +325,7 @@ async def _handle_message(websocket: WebSocket, session_id: str, raw: str, role:
 
     # 低危：Day5 Agent 主流程（Orchestrator.handle_chat）
     # role 由调用方从 AuthContext 解析传入，不再硬编码 viewer
-    await _run_agent_flow(websocket, session_id, user_input, role, trace_id=trace_id)
+    await _run_agent_flow(websocket, session_id, user_input, role, trace_id=trace_id, safety_result=safety)
 
 
 # ── 旧风险路径已删除 ─────────────────────────────────────────────────
@@ -340,6 +340,7 @@ async def _run_agent_flow(
     role: str,
     confirmed: bool = False,
     trace_id: str | None = None,
+    safety_result: dict | None = None,
 ) -> None:
     """执行 Orchestrator 主流程：逐帧发送到 WebSocket，并逐帧持久化。
 
@@ -355,6 +356,7 @@ async def _run_agent_flow(
     agen = _orchestrator.handle_chat(
         session_id=session_id, user_input=user_input, role=role,
         confirmed=confirmed, trace_id=trace_id,
+        safety_result=safety_result,
     )
 
     async def _consume_frames() -> None:

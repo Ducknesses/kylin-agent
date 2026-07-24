@@ -86,6 +86,7 @@ def _get_non_negative_float_env(name: str, default: float) -> float:
 
 
 # ── 白名单规则：从 JSON 文件加载，文件不存在时使用内置默认值 ──────
+# ⚠️ 修改以下默认值时，请同步更新 whitelist_rules.json
 
 _WHITELIST_DEFAULTS = {
     "allowed_users": ["agent-read", "agent-op", "agent-admin", "agent"],
