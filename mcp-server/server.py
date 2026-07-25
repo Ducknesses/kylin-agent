@@ -32,12 +32,64 @@ TOOLS = {
     "metrics_history": metrics_store.handle,
 }
 
-# ============================================================
-# Pending Confirmation 存储
-# ============================================================
-PENDING_STORE: dict[str, dict] = {}   # confirm_id -> {tool_name, arguments, created_at, ...}
-PENDING_LOCK = threading.Lock()
-PENDING_TIMEOUT = 120  # 秒，超时自动拒绝
+# 工具元信息 —— 每个工具的 suggested_risk / category，用于客户端自动注册时提供默认安全配置
+TOOL_META = {
+    "sys_info": {
+        "suggested_risk": "low",
+        "category": "monitor",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["metric"]},
+    },
+    "service_mgr": {
+        "suggested_risk": "low",
+        "category": "service",
+        "action_field": "action",
+        "action_risk_overrides": {
+            "status": "low",
+            "is-active": "low",
+            "is-enabled": "low",
+            "start": "medium",
+            "stop": "medium",
+            "restart": "medium",
+        },
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["action", "service"]},
+    },
+    "log_reader": {
+        "suggested_risk": "low",
+        "category": "diagnostic",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["service", "lines"]},
+    },
+    "net_monitor": {
+        "suggested_risk": "low",
+        "category": "monitor",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["metric"]},
+    },
+    "cmd_exec": {
+        "suggested_risk": "medium",
+        "category": "exec",
+        "audit_policy": {"mode": "summary", "summary_builder": "cmd_exec_summary"},
+    },
+    "file_guard": {
+        "suggested_risk": "medium",
+        "category": "file",
+        "action_field": "action",
+        "action_risk_overrides": {
+            "check": "low",
+            "read": "low",
+            "write": "medium",
+        },
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["action", "path"]},
+    },
+    "mcp_self_monitor": {
+        "suggested_risk": "low",
+        "category": "monitor",
+        "audit_policy": {"mode": "full", "safe_fields": []},
+    },
+    "metrics_history": {
+        "suggested_risk": "low",
+        "category": "monitor",
+        "audit_policy": {"mode": "whitelist", "safe_fields": ["from_ts", "to_ts", "metrics"]},
+    },
+}
 
 # JSON-RPC 2.0 标准错误码
 JSONRPC_ERRORS = {
@@ -48,8 +100,6 @@ JSONRPC_ERRORS = {
     "INTERNAL_ERROR": (-32603, "内部错误"),
     "COMMAND_BLOCKED": (-32600, "命令被安全策略拦截"),
     "EXECUTION_FAILED": (-32000, "命令执行失败"),
-    "PENDING_EXPIRED": (-32002, "待确认操作已过期"),
-    "PENDING_NOT_FOUND": (-32003, "待确认操作不存在"),
 }
 
 
@@ -134,158 +184,144 @@ def make_jsonrpc_response(result, req_id=None) -> dict:
     return {"jsonrpc": "2.0", "result": result, "id": req_id}
 
 
-def cleanup_expired_pending():
-    """清理过期的待确认操作"""
-    now = time.time()
-    with PENDING_LOCK:
-        expired = [cid for cid, v in PENDING_STORE.items() if now - v.get("created_at", 0) > PENDING_TIMEOUT]
-        for cid in expired:
-            logger.info("[Pending] 清理过期待确认: confirm_id=%s, tool=%s", cid, PENDING_STORE[cid].get("tool_name"))
-            del PENDING_STORE[cid]
-
-
-def handle_pending_confirm(params: dict, req_id=None) -> dict:
-    """
-    处理 tools/pending_confirm 请求
-
-    params: {
-        "confirm_id": "xxx",      # 待确认ID
-        "approved": true/false    # 是否批准
-    }
-    """
-    confirm_id = params.get("confirm_id", "").strip()
-    approved = params.get("approved", False)
-
-    if not confirm_id:
-        return make_jsonrpc_error(*JSONRPC_ERRORS["INVALID_PARAMS"], req_id,
-                                  extra={"detail": "缺少参数: confirm_id"})
-
-    with PENDING_LOCK:
-        pending = PENDING_STORE.get(confirm_id)
-
-    if pending is None:
-        return make_jsonrpc_error(*JSONRPC_ERRORS["PENDING_NOT_FOUND"], req_id,
-                                  extra={"detail": f"待确认操作不存在或已过期: {confirm_id}"})
-
-    # 检查超时
-    if time.time() - pending.get("created_at", 0) > PENDING_TIMEOUT:
-        with PENDING_LOCK:
-            PENDING_STORE.pop(confirm_id, None)
-        return make_jsonrpc_error(*JSONRPC_ERRORS["PENDING_EXPIRED"], req_id,
-                                  extra={"detail": f"待确认操作已过期: {confirm_id}"})
-
-    if not approved:
-        # 用户拒绝 → 从存储移除，返回拒绝状态
-        with PENDING_LOCK:
-            PENDING_STORE.pop(confirm_id, None)
-        logger.info("[Pending] 用户拒绝操作: confirm_id=%s, tool=%s", confirm_id, pending.get("tool_name"))
-        mcp_self_monitor.request_stats["success"] += 1
-        return make_jsonrpc_response({
-            "status": "rejected",
-            "confirm_id": confirm_id,
-            "tool": pending.get("tool_name"),
-            "reason": "用户拒绝了此操作",
-        }, req_id)
-
-    # 用户批准 → 实际执行工具调用
-    tool_name = pending.get("tool_name", "")
-    arguments = pending.get("arguments", {})
-
-    with PENDING_LOCK:
-        PENDING_STORE.pop(confirm_id, None)
-
-    logger.info("[Pending] 用户批准执行: confirm_id=%s, tool=%s, args=%s", confirm_id, tool_name, arguments)
-
-    # 调用工具处理函数
-    try:
-        result = TOOLS[tool_name](arguments)
-        mcp_self_monitor.request_stats["success"] += 1
-        # 包装结果，注明是经确认后执行的
-        result["_confirmed"] = True
-        result["_confirm_id"] = confirm_id
-        return make_jsonrpc_response(result, req_id)
-    except Exception as e:
-        mcp_self_monitor.request_stats["errors"] += 1
-        tb = traceback.format_exc()
-        logger.error("[Pending] 确认后执行异常 tool=%s:\n%s", tool_name, tb)
-        return make_jsonrpc_error(*JSONRPC_ERRORS["INTERNAL_ERROR"], req_id,
-                                  extra={"detail": str(e), "tool": tool_name})
-
-
 def handle_tools_list(req_id=None) -> dict:
-    """列出所有可用工具及其参数定义"""
-    tool_defs = {
-        "sys_info": {
+    """列出所有可用工具及其参数定义 — MCP 2024-11-05 标准格式"""
+    tool_defs = [
+        {
+            "name": "sys_info",
             "description": "获取系统信息（CPU、内存、磁盘、负载）",
-            "parameters": {
-                "metric": "cpu|memory|disk|load|uptime|all",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "查询指标类型（单选，多个指标请使用 'all'）",
+                        "enum": ["cpu", "memory", "disk", "load", "uptime", "network", "all"],
+                        "default": "all",
+                    },
+                },
             },
         },
-        "service_mgr": {
+        {
+            "name": "service_mgr",
             "description": "管理系统服务",
-            "parameters": {
-                "action": "status|start|stop|restart",
-                "service": "服务名称",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作类型",
+                        "enum": ["status", "start", "stop", "restart", "is-active", "is-enabled"],
+                    },
+                    "service": {
+                        "type": "string",
+                        "description": "服务名称",
+                    },
+                },
+                "required": ["action", "service"],
             },
         },
-        "log_reader": {
+        {
+            "name": "log_reader",
             "description": "读取系统日志，支持关键词过滤",
-            "parameters": {
-                "type": "journalctl|file",
-                "source": "日志来源（别名或路径）",
-                "lines": "行数",
-                "service": "服务名（journalctl模式）",
-                "since": "时间范围",
-                "keyword": "关键词过滤（可选）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "日志读取方式",
+                        "enum": ["journalctl", "file"],
+                    },
+                    "source": {"type": "string", "description": "日志来源（别名或路径）"},
+                    "lines": {"type": "integer", "description": "读取行数", "default": 100},
+                    "service": {"type": "string", "description": "服务名（journalctl模式）"},
+                    "since": {"type": "string", "description": "时间范围，如 1h / 30m"},
+                    "keyword": {"type": "string", "description": "关键词过滤（可选）"},
+                },
+                "required": ["type", "source"],
             },
         },
-        "net_monitor": {
+        {
+            "name": "net_monitor",
             "description": "网络监控信息（连接/流量/网卡/路由/DNS/监听端口）",
-            "parameters": {
-                "metric": "connections|traffic|interfaces|routes|dns|listen|all",
-                "port": "端口号（listen模式筛选，可选）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "监控指标类型（单选，多个指标请使用 'all'）",
+                        "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
+                        "default": "all",
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "端口号（listen模式筛选，可选）",
+                    },
+                },
             },
         },
-        "cmd_exec": {
+        {
+            "name": "cmd_exec",
             "description": "在沙箱中安全执行系统命令",
-            "parameters": {
-                "command": "要执行的命令",
-                "timeout": "超时秒数（默认30）",
-                "user": "执行用户（默认agent-read）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的命令"},
+                    "timeout": {"type": "integer", "description": "超时秒数", "default": 30},
+                    "user": {"type": "string", "description": "执行用户", "default": "agent-read"},
+                },
+                "required": ["command"],
             },
         },
-        "file_guard": {
+        {
+            "name": "file_guard",
             "description": "文件安全检查、读取与安全写入（带审计日志）",
-            "parameters": {
-                "action": "check|read|write",
-                "path": "文件路径",
-                "content": "写入内容（write 操作）",
-                "max_size": "最大读取字节数（默认1MB）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作类型",
+                        "enum": ["check", "read", "write"],
+                    },
+                    "path": {"type": "string", "description": "文件路径"},
+                    "content": {"type": "string", "description": "写入内容（write 操作）"},
+                    "max_size": {"type": "integer", "description": "最大读取字节数", "default": 1048576},
+                },
+                "required": ["action", "path"],
             },
         },
-        "metrics_history": {
+        {
+            "name": "metrics_history",
             "description": "查询系统历史指标数据（CPU、内存、磁盘、网络），按时间范围返回历史读数",
-            "parameters": {
-                "from_ts": "开始时间戳（Unix秒，可选，默认5分钟前）",
-                "to_ts": "结束时间戳（Unix秒，可选，默认当前时间）",
-                "metrics": "逗号分隔的指标名: cpu,memory,disk,network,all（可选，默认all）",
-                "limit": "最大返回条数（默认5000，最大10000）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_ts": {"type": "number", "description": "开始时间戳（Unix秒），默认5分钟前"},
+                    "to_ts": {"type": "number", "description": "结束时间戳（Unix秒），默认当前时间"},
+                    "metrics": {"type": "string", "description": "逗号分隔的指标名: cpu,memory,disk,network,all"},
+                    "limit": {"type": "integer", "description": "最大返回条数", "default": 5000},
+                },
             },
         },
-    }
-    return make_jsonrpc_response({"tools": list(TOOLS.keys()), "definitions": tool_defs}, req_id)
+    ]
+    # 附加 _meta 扩展属性
+    for td in tool_defs:
+        meta = TOOL_META.get(td["name"])
+        if meta:
+            td["_meta"] = meta
+    return make_jsonrpc_response({"tools": tool_defs}, req_id)
 
 
 def process_request(method: str, params: dict, req_id=None) -> dict:
     """
     处理单个 JSON-RPC 请求
 
-    method: "tools/call" | "tools/list" | "tools/pending_confirm" | "ping"
+    method: "initialize" | "notifications/initialized" | "tools/call" | "tools/list" | "ping"
     params: {"name": "sys_info", "arguments": {"metric": "cpu"}}  (tools/call)
-    """
-    # 定期清理过期待确认
-    cleanup_expired_pending()
 
+    注意：安全确认已由 backend SafetyGuard 统一处理，mcp-server 层不再做二次确认。
+    """
     # 请求统计
     mcp_self_monitor.request_stats["total"] += 1
 
@@ -294,12 +330,27 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
         mcp_self_monitor.request_stats["success"] += 1
         return make_jsonrpc_response({"pong": True, "version": "1.0.0", "tools_count": len(TOOLS)}, req_id)
 
+    if method == "initialize":
+        mcp_self_monitor.request_stats["success"] += 1
+        return make_jsonrpc_response({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "KylinOS MCP Server",
+                "version": "1.0.0",
+            },
+            "capabilities": {
+                "tools": {},
+                "resources": {},
+            },
+        }, req_id)
+
+    if method == "notifications/initialized":
+        mcp_self_monitor.request_stats["success"] += 1
+        return make_jsonrpc_response({}, req_id)
+
     if method == "tools/list":
         mcp_self_monitor.request_stats["success"] += 1
         return handle_tools_list(req_id)
-
-    if method == "tools/pending_confirm":
-        return handle_pending_confirm(params, req_id)
 
     if method == "tools/call":
         tool_name = params.get("name", "")
@@ -319,23 +370,6 @@ def process_request(method: str, params: dict, req_id=None) -> dict:
         logger.info("[Server] 调用工具: %s, 参数: %s", tool_name, arguments)
         try:
             result = TOOLS[tool_name](arguments)
-
-            # 检查插件是否返回了 pending_confirmation
-            if isinstance(result, dict) and result.get("_pending_confirmation"):
-                confirm_id = result.get("confirm_id", "")
-                if confirm_id:
-                    # 存入 PENDING_STORE 等待确认（使用插件返回的 pending_args，确保携带 _skip_pending 标记）
-                    with PENDING_LOCK:
-                        PENDING_STORE[confirm_id] = {
-                            "tool_name": tool_name,
-                            "arguments": result.get("pending_args", arguments),
-                            "created_at": time.time(),
-                        }
-                    logger.info("[Pending] 操作需确认: tool=%s, confirm_id=%s, reason=%s",
-                                tool_name, confirm_id, result.get("reason", ""))
-                    mcp_self_monitor.request_stats["success"] += 1
-                    return make_jsonrpc_response(result, req_id)
-
             mcp_self_monitor.request_stats["success"] += 1
             return make_jsonrpc_response(result, req_id)
         except Exception as e:
@@ -397,7 +431,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                 "available_tools": list(TOOLS.keys()),
             })
         else:
-            self._send_json({"error": "仅支持 POST 到 /mcp/v1/tools/ 接口"}, 404)
+            self._send_json({"error": "仅支持 POST 到 /mcp/v1/ 接口"}, 404)
 
     def do_POST(self):
         """POST 请求处理 JSON-RPC 2.0 调用"""
@@ -411,10 +445,11 @@ class MCPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # 检查路径
-        if self.path not in ("/mcp/v1/tools/call", "/mcp/v1/tools/list", "/mcp/v1/rpc", "/jsonrpc"):
+        # 检查路径 — 兼容 MCP 客户端发到根路径的习惯
+        ALLOWED_PATHS = ("/mcp/v1/tools/call", "/mcp/v1/tools/list", "/mcp/v1/rpc", "/jsonrpc", "/", "")
+        if self.path not in ALLOWED_PATHS and not self.path.startswith("/mcp/v1/"):
             self._send_json(
-                {"error": "未找到接口，请使用 /mcp/v1/tools/call"},
+                {"error": "未找到接口，请使用 /mcp/v1/tools/call 或根路径"},
                 404,
             )
             return
@@ -567,9 +602,6 @@ def restart_server(new_host=None, new_port=None):
                 "current": {"host": old_host, "port": old_port},
             }
         if old_port == target_port:
-            # SO_REUSEPORT 未能生效（非 Linux 平台降级路径）：
-            # 必须先关闭旧 socket 释放端口，再绑定新 socket。
-            # 为最小化服务中断，关闭与绑定之间不做 sleep。
             logger.warning(
                 "[Server] 端口冲突 %s:%d，SO_REUSEPORT 不可用，关闭旧 socket 后重试绑定...",
                 target_host, target_port,
@@ -582,7 +614,6 @@ def restart_server(new_host=None, new_port=None):
             except OSError as e2:
                 new_sock.close()
                 logger.error("[Server] 重试绑定仍失败 %s:%d - %s", target_host, target_port, e2)
-                # 恢复旧 socket 绑定（重新绑定旧端口）
                 try:
                     restore_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     restore_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -626,8 +657,7 @@ def restart_server(new_host=None, new_port=None):
             "current": {"host": old_host, "port": old_port},
         }
 
-    # 安全关闭旧 socket（此时 new_sock 已生效，关闭旧 socket
-    # 即使失败也不影响新 socket 正常工作）
+    # 安全关闭旧 socket
     try:
         old_sock.close()
     except Exception:
@@ -636,7 +666,6 @@ def restart_server(new_host=None, new_port=None):
     logger.info("[Server] socket 已替换: %s:%d -> %s:%d",
                  old_host, old_port, target_host, target_port)
 
-    # 更新 mcp_self_monitor 中的 server_instance 引用
     mcp_self_monitor.server_instance = server_instance
 
     return {
@@ -707,7 +736,6 @@ def _init_self_monitor():
         metrics_store.cleanup_expired()
         logger.info("[Server] metrics_store.cleanup_expired() 完成 (%.2fs)", time.time() - t0)
 
-        # VACUUM 改用后台线程延迟执行，避免启动时阻塞（大数据库可能耗时数秒）
         threading.Thread(
             target=_delayed_vacuum,
             daemon=True,

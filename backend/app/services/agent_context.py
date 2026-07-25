@@ -32,6 +32,9 @@ class AgentContext:
     intent: str | None = None
     risk_level: str | None = None
 
+    # ── 预计算的 safety 结果（由 chat 层传入，避免 orchestrator 重复调用 analyze_user_input） ──
+    safety_result: dict | None = None
+
     # ── 完整的意图识别结果（用于中危工具确认后恢复报告生成） ──
     intent_result: dict | None = None
 

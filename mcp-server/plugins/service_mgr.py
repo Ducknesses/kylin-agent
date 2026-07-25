@@ -1,4 +1,7 @@
-"""服务管理插件：systemctl status/start/stop/restart"""
+"""服务管理插件：systemctl status/start/stop/restart
+
+所有安全确认已由 backend SafetyGuard 统一处理，本插件仅负责执行。
+"""
 import logging
 import os
 import subprocess
@@ -145,24 +148,7 @@ def handle(arguments: dict) -> dict:
         logger.warning("[ServiceMgr] %s", error_msg)
         return {"blocked": True, "error": error_msg, "allowed_services": config.ALLOWED_SERVICES}
 
-    # 变更操作需要 pending_confirmation
-    MEDIUM_ACTIONS = {"start", "stop", "restart", "reload"}
-    skip_pending = arguments.get("_skip_pending", False)
-    if action in MEDIUM_ACTIONS and not skip_pending:
-        import uuid
-        confirm_id = f"mcp_pending_{uuid.uuid4().hex[:12]}"
-        logger.info("[ServiceMgr] 变更操作需确认: action=%s, service=%s, confirm_id=%s", action, service, confirm_id)
-        return {
-            "_pending_confirmation": True,
-            "confirm_id": confirm_id,
-            "tool": "service_mgr",
-            "action": action,
-            "service": service,
-            "reason": f"服务变更操作需要确认: {action} {service}",
-            "pending_args": {"action": action, "service": service, "_skip_pending": True},
-        }
-
-    # 执行操作（只读：status / is-active / is-enabled）
+    # 执行操作
     service_full = service.replace(".service", "") + ".service"
     result = _execute_systemctl(action, service_full)
 

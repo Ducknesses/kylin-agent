@@ -39,6 +39,10 @@ class FakeToolRegistry:
     def exists(self, tool_name: str) -> bool:
         return tool_name in self._TOOLS
 
+    def get_tool_server_id(self, tool_name: str) -> str:
+        """模拟 server_id 查找：测试用固定 ID"""
+        return "test-server" if tool_name in self._TOOLS else ""
+
     def validate_params(self, tool_name: str, params: dict) -> dict:
         if tool_name not in self._TOOLS:
             return {"valid": False, "errors": [f"未知工具: {tool_name}"]}
@@ -86,29 +90,37 @@ class FakeSafetyGuard:
 
 
 class FakeMCPClient:
-    """模拟 MCPClient，可预设返回值或抛异常"""
+    """模拟 MCPClient，可预设返回值或抛异常
+    返回 MCP 协议格式 {content: [...], isError: bool}，与真实 MCPClient.call_tool 一致
+    """
 
     def __init__(self, mock_result: dict | None = None, should_raise: bool = False):
-        self.mock_result = mock_result or {"ok": True, "result": {"cpu_percent": 23.5}, "error": None}
+        self._mock_result = mock_result or {"cpu_percent": 23.5}
         self.should_raise = should_raise
         self.calls = []
 
-    async def call_tool(self, tool_name: str, arguments: dict | None = None) -> dict:
+    async def call_tool(self, tool_name: str, arguments: dict | None = None, server_id: str = "") -> dict:
         self.calls.append((tool_name, arguments))
         if self.should_raise:
             raise RuntimeError("MCP 连接失败")
-        return self.mock_result
+        import json as _json
+        return {
+            "content": [{"type": "text", "text": _json.dumps(self._mock_result, ensure_ascii=False)}],
+            "isError": False,
+        }
 
 
 class FakeMCPClientFail:
-    """模拟 MCPClient 返回失败"""
+    """模拟 MCPClient 返回失败
+    返回 MCP 协议格式（连接级错误） {error: str}，由 _normalize_mcp_result 处理
+    """
 
     def __init__(self):
         self.calls = []
 
-    async def call_tool(self, tool_name: str, arguments: dict | None = None) -> dict:
+    async def call_tool(self, tool_name: str, arguments: dict | None = None, server_id: str = "") -> dict:
         self.calls.append((tool_name, arguments))
-        return {"ok": False, "result": None, "error": "MCP Server 请求超时"}
+        return {"error": "MCP Server 请求超时"}
 
 
 class FakeMCPClientRaise:
@@ -117,7 +129,7 @@ class FakeMCPClientRaise:
     def __init__(self):
         self.calls = []
 
-    async def call_tool(self, tool_name: str, arguments: dict | None = None) -> dict:
+    async def call_tool(self, tool_name: str, arguments: dict | None = None, server_id: str = "") -> dict:
         self.calls.append((tool_name, arguments))
         raise ConnectionError("MCP Server 连接失败")
 
@@ -566,19 +578,20 @@ class FakeMCPClientWithSensitive:
     def __init__(self):
         self.calls = []
 
-    async def call_tool(self, tool_name: str, arguments: dict | None = None) -> dict:
+    async def call_tool(self, tool_name: str, arguments: dict | None = None, server_id: str = "") -> dict:
         self.calls.append((tool_name, arguments))
+        import json as _json
+        sensitive_result = {
+            "cpu_percent": 50,
+            "auth_header": "Authorization: Bearer sk-secret123",
+            "config": "token=abc123",
+            "creds": {"password": "admin123", "secret_key": "xxx"},
+            "nested": [{"access_token": "yyy"}, "Bearer xyz789"],
+            "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dummy",
+        }
         return {
-            "ok": True,
-            "result": {
-                "cpu_percent": 50,
-                "auth_header": "Authorization: Bearer sk-secret123",
-                "config": "token=abc123",
-                "creds": {"password": "admin123", "secret_key": "xxx"},
-                "nested": [{"access_token": "yyy"}, "Bearer xyz789"],
-                "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dummy",
-            },
-            "error": None,
+            "content": [{"type": "text", "text": _json.dumps(sensitive_result, ensure_ascii=False)}],
+            "isError": False,
         }
 
 

@@ -15,12 +15,15 @@
     </div>
     <div :class="['charts-grid', { 'has-maximized': maximizedChart }]" :style="gridStyle">
       <div
-        v-for="chart in CHART_LIST"
+        v-for="chart in visibleCharts"
         :key="chart.key"
         :ref="el => setChartRef(el, chart.key)"
         :class="['chart-box', { maximized: maximizedChart === chart.key }]"
       >
         <div class="chart-toolbar">
+          <span class="chart-source-tag" v-if="!chart.hasHistory">
+            <el-tag size="small" type="warning" effect="plain">实时</el-tag>
+          </span>
           <el-button
             link
             size="small"
@@ -42,28 +45,137 @@ import { FullScreen, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import http from '@/api/http'
 
-// 图表配置常量（静态数据，大写命名约定表示常量）
-const CHART_LIST = [
-  { key: 'cpu', title: 'CPU 使用率', color: '#3b82f6' },
-  { key: 'mem', title: '内存 使用率', color: '#10b981' },
-  { key: 'disk', title: '磁盘 使用率', color: '#f59e0b' },
-  { key: 'net', title: '网络 IO', color: '#8b5cf6' }
-]
+// ============================================================
+// 图表注册表 — 可拓展的图表配置
+// 每个图表项可独立定义数据源、历史支持、渲染方式
+// ============================================================
+const CHART_REGISTRY = Object.freeze([
+  {
+    key: 'cpu',
+    title: 'CPU 使用率',
+    color: '#3b82f6',
+    dataSource: 'sse_realtime',   // SSE 实时推送 + 本地缓存
+    hasHistory: true,              // 支持从 metrics_store 拉取历史数据
+    chartType: 'line',
+    yAxisName: '%',
+    minY: 0, maxY: 100,
+    series: [
+      { name: 'CPU', field: 'cpu', showSymbol: false, smooth: true }
+    ]
+  },
+  {
+    key: 'mem',
+    title: '内存 使用率',
+    color: '#10b981',
+    dataSource: 'sse_realtime',
+    hasHistory: true,
+    chartType: 'line',
+    yAxisName: '%',
+    minY: 0, maxY: 100,
+    series: [
+      { name: '内存', field: 'mem', showSymbol: false, smooth: true }
+    ]
+  },
+  {
+    key: 'disk',
+    title: '磁盘 使用率',
+    color: '#f59e0b',
+    dataSource: 'sse_realtime',
+    hasHistory: true,
+    chartType: 'line',
+    yAxisName: '%',
+    minY: 0, maxY: 100,
+    series: [
+      { name: '磁盘', field: 'disk', showSymbol: false, smooth: true }
+    ]
+  },
+  {
+    key: 'net',
+    title: '网络 IO',
+    color: '#8b5cf6',
+    dataSource: 'sse_realtime',
+    hasHistory: true,
+    chartType: 'multi-line',
+    yAxisName: 'KB/s',
+    minY: 0, maxY: undefined,
+    series: [
+      { name: '接收', field: 'netIn', showSymbol: false, smooth: true, color: '#8b5cf6' },
+      { name: '发送', field: 'netOut', showSymbol: false, smooth: true, color: '#06b6d4' }
+    ]
+  },
+  // ──── 扩展图表：利用现有 MCP 工具实时轮询 ────
+  {
+    key: 'net_conn',
+    title: '网络连接数',
+    color: '#ef4444',
+    dataSource: 'mcp_poll',        // 轮询 MCP 工具获取实时快照
+    mcpTool: 'net_monitor',
+    mcpArgs: { metric: 'connections' },
+    hasHistory: false,             // 不支持历史数据，降级为显示窗口
+    pollIntervalMs: 10000,         // 10s 轮询间隔
+    chartType: 'line',
+    yAxisName: '个',
+    minY: 0, maxY: undefined,
+    series: [
+      { name: '连接数', field: 'net_conn_count', showSymbol: false, smooth: true }
+    ]
+  },
+  {
+    key: 'mcp_qps',
+    title: 'MCP 请求统计 (QPS)',
+    color: '#8b5cf6',
+    dataSource: 'mcp_poll',
+    mcpTool: 'mcp_self_monitor',
+    mcpArgs: { metric: 'requests' },
+    hasHistory: false,
+    pollIntervalMs: 10000,
+    chartType: 'multi-line',
+    yAxisName: '次',
+    minY: 0, maxY: undefined,
+    series: [
+      { name: '成功', field: 'mcp_success', showSymbol: false, smooth: true, color: '#10b981' },
+      { name: '错误', field: 'mcp_errors', showSymbol: false, smooth: true, color: '#ef4444' }
+    ]
+  },
+  {
+    key: 'mcp_mem',
+    title: 'MCP 进程内存',
+    color: '#f59e0b',
+    dataSource: 'mcp_poll',
+    mcpTool: 'mcp_self_monitor',
+    mcpArgs: { metric: 'resources' },
+    hasHistory: false,
+    pollIntervalMs: 10000,
+    chartType: 'line',
+    yAxisName: 'MB',
+    minY: 0, maxY: undefined,
+    series: [
+      { name: 'RSS', field: 'mcp_mem_rss', showSymbol: false, smooth: true }
+    ]
+  }
+])
 
 const timeRange = ref('5m')
-const dataSource = ref('mock') // 'sse' | 'polling' | 'mock'
-const mcpConnected = ref(false) // MCP Server 连接状态（由 SSE 数据中的 mcp_connected 字段驱动）
+const dataSource = ref('mock')
+const mcpConnected = ref(false)
 const maximizedChart = ref(null)
+
+// 可见图表列表（默认全显示，后续可扩展用户自定义可见性）
+const visibleCharts = computed(() => CHART_REGISTRY)
 
 // 每个图表容器的 DOM 引用
 const chartRefs = {}
 // echarts 实例
 const charts = {}
 
-// 原始数据点，保留时间戳对象，最多保留 2 小时
+// 原始数据点（SSE 实时 + MCP轮询共用），保留时间戳对象，最多保留 2 小时
 const rawMetrics = []
 const MAX_RETAIN_MINUTES = 120
-const MAX_RETAIN_POINTS = 2400 // 2h * 60s / 3s 约 2400 个点（SSE 3s 一次）
+const MAX_RETAIN_POINTS = 2400
+
+// MCP 轮询的独立数据缓存（如 net_conn、mcp_qps 等）
+const mcpPollData = {}  // { chartKey: [{time, timestamp, ...fields}] }
+const mcpPrevValues = {} // 用于计算 QPS 差值
 
 // 当某个卡片最大化时，让 grid 隐藏其他卡片只显示当前卡片
 const gridStyle = computed(() => {
@@ -74,12 +186,19 @@ const gridStyle = computed(() => {
   }
 })
 
-// 状态标签：根据 SSE 连接 + MCP 连接状态综合显示
+// 动态计算 grid 列数：根据可见图表数量自适应
+const gridColumns = computed(() => {
+  const count = visibleCharts.value.length
+  if (count <= 2) return count
+  if (count <= 4) return 2
+  return 3
+})
+
 const sourceTagType = computed(() => {
-  if (dataSource.value === 'sse' && mcpConnected.value) return 'success'   // SSE 实时 + MCP 在线
-  if (dataSource.value === 'sse' && !mcpConnected.value) return 'danger'   // SSE 实时 + MCP 离线
-  if (dataSource.value === 'polling') return 'warning'                     // 轮询中
-  return 'info'                                                             // 无数据/初始
+  if (dataSource.value === 'sse' && mcpConnected.value) return 'success'
+  if (dataSource.value === 'sse' && !mcpConnected.value) return 'danger'
+  if (dataSource.value === 'polling') return 'warning'
+  return 'info'
 })
 
 const sourceTagText = computed(() => {
@@ -89,11 +208,15 @@ const sourceTagText = computed(() => {
   return '等待数据'
 })
 
-// ===== 数据写入 =====
+// ============================================================
+// 数据写入
+// ============================================================
 
 function appendDataPoint(data) {
-  // 仅当 MCP 正常连接时才追加数据点，避免 MCP 断开时图表持续显示 0 值"伪实时"数据
-  if (!mcpConnected.value) return
+  if (!mcpConnected.value) {
+    console.debug('[SysMonitor] appendDataPoint skipped: mcp not connected')
+    return
+  }
 
   const ts = data.timestamp ? new Date(data.timestamp) : new Date()
   const point = {
@@ -107,8 +230,9 @@ function appendDataPoint(data) {
   }
 
   rawMetrics.push(point)
+  console.debug('[SysMonitor] appended SSE point, rawMetrics total:', rawMetrics.length,
+    'cpu:', point.cpu, 'mem:', point.mem)
 
-  // 按全局保留策略淘汰旧数据，避免内存无限增长
   const cutoff = new Date(Date.now() - MAX_RETAIN_MINUTES * 60 * 1000)
   while (rawMetrics.length > MAX_RETAIN_POINTS || rawMetrics[0]?.timestamp < cutoff) {
     rawMetrics.shift()
@@ -117,44 +241,85 @@ function appendDataPoint(data) {
   refreshAll()
 }
 
-// 根据时间范围返回要展示的数据子集
-function getDisplayMetrics() {
+// MCP 轮询数据追加
+function appendMcpPollPoint(chartKey, fields) {
+  if (!mcpPollData[chartKey]) {
+    mcpPollData[chartKey] = []
+  }
+  const ts = new Date()
+  const point = {
+    time: ts.toLocaleTimeString(),
+    timestamp: ts,
+    ...fields
+  }
+  mcpPollData[chartKey].push(point)
+  console.debug('[SysMonitor] appended MCP poll point for', chartKey,
+    'fields:', fields, 'total:', mcpPollData[chartKey].length)
+
+  // 淘汰旧数据
+  const cutoff = new Date(Date.now() - MAX_RETAIN_MINUTES * 60 * 1000)
+  const arr = mcpPollData[chartKey]
+  while (arr.length > MAX_RETAIN_POINTS || arr[0]?.timestamp < cutoff) {
+    arr.shift()
+  }
+
+  refreshAll()
+}
+
+// ============================================================
+// 根据时间范围过滤显示数据
+// ============================================================
+
+function getDisplayMetrics(chartConfig) {
   const now = Date.now()
   let ms = 5 * 60 * 1000
   if (timeRange.value === '30m') ms = 30 * 60 * 1000
   if (timeRange.value === '1h') ms = 60 * 60 * 1000
   const cutoff = new Date(now - ms)
+
+  // MCP 轮询数据源使用独立缓存
+  if (chartConfig.dataSource === 'mcp_poll') {
+    const arr = mcpPollData[chartConfig.key] || []
+    return arr.filter(p => p.timestamp >= cutoff)
+  }
+
+  // SSE 数据源使用主数据缓存
   return rawMetrics.filter(p => p.timestamp >= cutoff)
 }
 
-// ===== 图表 =====
+// ============================================================
+// 图表渲染 — 基于注册表动态构建 option
+// ============================================================
 
-function baseOption(title, color) {
-  return {
-    title: { text: title, left: 10, top: 10, textStyle: { fontSize: 14 } },
+function buildChartOption(chartConfig) {
+  const config = chartConfig
+  const base = {
+    title: { text: config.title, left: 10, top: 10, textStyle: { fontSize: 14 } },
     grid: { top: 50, left: 50, right: 30, bottom: 30 },
     xAxis: { type: 'category', data: [], boundaryGap: false },
-    yAxis: { type: 'value', name: '%', min: 0, max: 100 },
+    yAxis: { type: 'value', name: config.yAxisName || '%', min: config.minY ?? 0, max: config.maxY ?? undefined },
     tooltip: { trigger: 'axis' },
-    series: [
-      { type: 'line', data: [], smooth: true, showSymbol: false, itemStyle: { color }, areaStyle: { opacity: 0.15 } }
-    ]
+    series: config.series.map(s => ({
+      name: s.name,
+      type: 'line',
+      data: [],
+      smooth: s.smooth ?? true,
+      showSymbol: s.showSymbol ?? false,
+      itemStyle: { color: s.color || config.color },
+      areaStyle: { opacity: 0.15 }
+    }))
   }
-}
 
-function netOption() {
-  return {
-    title: { text: '网络 IO', left: 10, top: 10, textStyle: { fontSize: 14 } },
-    grid: { top: 50, left: 50, right: 30, bottom: 30 },
-    legend: { data: ['接收', '发送'], top: 10, right: 20 },
-    xAxis: { type: 'category', data: [], boundaryGap: false },
-    yAxis: { type: 'value', name: 'KB/s', min: 0 },
-    tooltip: { trigger: 'axis' },
-    series: [
-      { name: '接收', type: 'line', data: [], smooth: true, showSymbol: false, itemStyle: { color: '#8b5cf6' }, areaStyle: { opacity: 0.1 } },
-      { name: '发送', type: 'line', data: [], smooth: true, showSymbol: false, itemStyle: { color: '#06b6d4' }, areaStyle: { opacity: 0.1 } }
-    ]
+  // 多系列图表添加 legend
+  if (config.chartType === 'multi-line' && config.series.length > 1) {
+    base.legend = {
+      data: config.series.map(s => s.name),
+      top: 10,
+      right: 20
+    }
   }
+
+  return base
 }
 
 function setChartRef(el, key) {
@@ -162,31 +327,56 @@ function setChartRef(el, key) {
 }
 
 function initCharts() {
-  CHART_LIST.forEach(({ key, title, color }) => {
-    const dom = chartRefs[key]?.querySelector('.chart-content')
-    if (!dom) return
-    charts[key] = echarts.init(dom)
-    charts[key].setOption(key === 'net' ? netOption() : baseOption(title, color))
+  CHART_REGISTRY.forEach(config => {
+    const dom = chartRefs[config.key]?.querySelector('.chart-content')
+    if (!dom) {
+      console.warn(`[SysMonitor] initCharts: no DOM for ${config.key}`)
+      return
+    }
+    charts[config.key] = echarts.init(dom)
+    charts[config.key].setOption(buildChartOption(config))
+    console.debug(`[SysMonitor] initCharts: ${config.key} initialized`)
   })
+  console.debug('[SysMonitor] All charts initialized, count:', Object.keys(charts).length)
 }
 
 function refreshAll() {
-  const data = getDisplayMetrics()
-  const times = data.map(p => p.time)
+  let totalDataPoints = 0
+  CHART_REGISTRY.forEach(config => {
+    if (!charts[config.key]) return
+    const data = getDisplayMetrics(config)
+    const times = data.map(p => p.time)
 
-  charts.cpu && charts.cpu.setOption({ xAxis: { data: times }, series: [{ data: data.map(p => p.cpu) }] })
-  charts.mem && charts.mem.setOption({ xAxis: { data: times }, series: [{ data: data.map(p => p.mem) }] })
-  charts.disk && charts.disk.setOption({ xAxis: { data: times }, series: [{ data: data.map(p => p.disk) }] })
-  charts.net && charts.net.setOption({
-    xAxis: { data: times },
-    series: [
-      { data: data.map(p => p.netIn) },
-      { data: data.map(p => p.netOut) }
-    ]
+    if (data.length === 0) {
+      return
+    }
+    totalDataPoints += data.length
+
+    const seriesData = config.series.map(s =>
+      data.map(p => p[s.field] ?? 0)
+    )
+
+    const seriesUpdates = config.series.map((s, i) => ({
+      data: seriesData[i]
+    }))
+
+    try {
+      charts[config.key].setOption({
+        xAxis: { data: times },
+        series: seriesUpdates
+      })
+    } catch (e) {
+      console.error(`[SysMonitor] setOption failed for ${config.key}:`, e)
+    }
   })
+  if (totalDataPoints > 0) {
+    console.debug('[SysMonitor] refreshAll updated', totalDataPoints, 'data points across all charts')
+  }
 }
 
-// ===== SSE 连接 =====
+// ============================================================
+// SSE 连接
+// ============================================================
 
 let sseSource = null
 let pollTimer = null
@@ -203,9 +393,12 @@ function connectSse() {
           mcpConnected.value = false
           return
         }
-        // 根据后端推送的 mcp_connected 标志更新状态
+        const wasConnected = mcpConnected.value
         mcpConnected.value = data.mcp_connected === true
         dataSource.value = 'sse'
+        if (!wasConnected && mcpConnected.value) {
+          console.log('[SSE] MCP 已连接，开始接收实时数据')
+        }
         if (data.mcp_connected === true) {
           appendDataPoint(data)
         }
@@ -223,7 +416,7 @@ function connectSse() {
     }
 
     sseSource.onopen = () => {
-      console.log('[SSE] 连接已建立')
+      console.log('[SSE] 连接已建立，等待首条数据...')
       dataSource.value = 'sse'
       stopPolling()
     }
@@ -233,7 +426,9 @@ function connectSse() {
   }
 }
 
-// ===== 轮询降级 =====
+// ============================================================
+// 轮询降级（后端 REST API）
+// ============================================================
 
 async function fetchMetrics() {
   try {
@@ -271,7 +466,84 @@ function stopPolling() {
   }
 }
 
-// ===== 历史数据拉取 =====
+// ============================================================
+// MCP 轮询 — 为 mcp_poll 类型图表定时拉取实时数据
+// ============================================================
+
+let mcpPollTimers = {} // { chartKey: intervalId }
+
+async function mcpPollSingle(chartConfig) {
+  try {
+    const res = await http.get('/monitor/mcp/metrics', {
+      params: { tool: chartConfig.mcpTool, args: JSON.stringify(chartConfig.mcpArgs) },
+      timeout: 8000
+    })
+    const result = res.data?.result || res.data || {}
+
+    // 根据图表 key 提取数据
+    const fields = extractFields(chartConfig, result)
+    if (fields) {
+      appendMcpPollPoint(chartConfig.key, fields)
+    }
+  } catch (e) {
+    console.warn(`[MCP Poll] ${chartConfig.key} 拉取失败:`, e)
+  }
+}
+
+function extractFields(config, result) {
+  switch (config.key) {
+    case 'net_conn': {
+      // net_monitor returns { total: N, connections: [...] } at top level
+      const total = typeof result?.total === 'number' ? result.total
+        : (Array.isArray(result?.connections) ? result.connections.length : 0)
+      console.debug('[MCP Poll] net_conn extracted total:', total, 'from:', result)
+      return { net_conn_count: total }
+    }
+    case 'mcp_qps': {
+      const requests = result?.requests || result || {}
+      const now = Date.now()
+      const prev = mcpPrevValues[config.key] || { total: 0, errors: 0, ts: now }
+      const totalDelta = (requests.total ?? 0) - prev.total
+      const errorsDelta = (requests.errors ?? 0) - prev.errors
+      const elapsed = (now - prev.ts) / 1000
+      const qps = elapsed > 0 ? Math.round(totalDelta / elapsed) : 0
+      const eps = elapsed > 0 ? Math.round(errorsDelta / elapsed) : 0
+      mcpPrevValues[config.key] = { total: requests.total ?? 0, errors: requests.errors ?? 0, ts: now }
+      console.debug('[MCP Poll] mcp_qps extracted qps:', qps, 'eps:', eps)
+      return { mcp_success: qps, mcp_errors: eps }
+    }
+    case 'mcp_mem': {
+      const resources = result?.resources || result || {}
+      const rss = resources.memory_rss_mb ?? 0
+      console.debug('[MCP Poll] mcp_mem extracted rss:', rss)
+      return { mcp_mem_rss: rss }
+    }
+    default:
+      return null
+  }
+}
+
+function startMcpPolling() {
+  CHART_REGISTRY.forEach(config => {
+    if (config.dataSource !== 'mcp_poll') return
+    // 立即拉取一次
+    mcpPollSingle(config)
+    // 定时轮询
+    const interval = config.pollIntervalMs || 10000
+    mcpPollTimers[config.key] = setInterval(() => mcpPollSingle(config), interval)
+  })
+}
+
+function stopMcpPolling() {
+  Object.entries(mcpPollTimers).forEach(([key, id]) => {
+    clearInterval(id)
+    delete mcpPollTimers[key]
+  })
+}
+
+// ============================================================
+// 历史数据拉取（仅 hasHistory=true 的图表）
+// ============================================================
 
 async function fetchHistory(fromMs, toMs) {
   try {
@@ -284,7 +556,6 @@ async function fetchHistory(fromMs, toMs) {
     const historyData = res.data?.data || res.data?.result?.data || []
     if (!Array.isArray(historyData) || historyData.length === 0) return
 
-    // 批量回填历史数据点
     historyData.forEach(pt => {
       rawMetrics.push({
         time: new Date(pt.ts * 1000).toLocaleTimeString(),
@@ -311,7 +582,6 @@ async function fetchHistory(fromMs, toMs) {
     rawMetrics.length = 0
     rawMetrics.push(...deduped)
 
-    // 按全局保留策略淘汰旧数据
     const cutoff = new Date(Date.now() - MAX_RETAIN_MINUTES * 60 * 1000)
     while (rawMetrics.length > MAX_RETAIN_POINTS || rawMetrics[0]?.timestamp < cutoff) {
       rawMetrics.shift()
@@ -323,7 +593,9 @@ async function fetchHistory(fromMs, toMs) {
   }
 }
 
-// ===== 时间范围切换 =====
+// ============================================================
+// 时间范围切换
+// ============================================================
 
 function onRangeChange() {
   const now = Date.now()
@@ -332,46 +604,49 @@ function onRangeChange() {
   if (timeRange.value === '1h') ms = 60 * 60 * 1000
   const from = now - ms
 
-  // 检查本地缓存是否覆盖到窗口起点（留 15s 容差，对齐 MCP 采集间隔）：
-  // 缓存最早点晚于 from 说明更早的历史未加载，需要拉取补齐；
-  // 不能只看窗口内有没有点——挂载时只加载了最近 5 分钟历史，
-  // 切到 30m/1h 时窗口内有点但更早的数据缺失
-  const earliest = rawMetrics.length ? rawMetrics[0].timestamp.getTime() : Infinity
-  if (earliest > from + 15000) {
-    fetchHistory(from, now)
-  } else {
-    refreshAll()
+  // 仅对 hasHistory=true 的图表尝试拉取历史数据
+  const historyCharts = CHART_REGISTRY.filter(c => c.hasHistory)
+  if (historyCharts.length > 0) {
+    const earliest = rawMetrics.length ? rawMetrics[0].timestamp.getTime() : Infinity
+    if (earliest > from + 15000) {
+      fetchHistory(from, now)
+      return
+    }
   }
 
-  // 切换范围后确保图表尺寸正确
+  // hasHistory=false 的图表直接刷新窗口即可（仅过滤本地缓存）
+  refreshAll()
+
   setTimeout(() => Object.values(charts).forEach(c => c && c.resize()), 0)
 }
 
-// ===== 最大化 / 还原 =====
+// ============================================================
+// 最大化 / 还原
+// ============================================================
 
 function toggleMaximize(key) {
   maximizedChart.value = maximizedChart.value === key ? null : key
-  // DOM 变化后 echarts 需要重新计算尺寸
   setTimeout(() => {
     Object.values(charts).forEach(c => c && c.resize())
   }, 50)
 }
 
-// ===== 生命周期 =====
+// ============================================================
+// 生命周期
+// ============================================================
 
 function handleWindowResize() {
   Object.values(charts).forEach(c => c && c.resize())
 }
 
-onMounted(() => {
-  // 等待 DOM 渲染完成后再初始化 echarts
-  setTimeout(() => {
+onMounted(async () => {
+  setTimeout(async () => {
     initCharts()
-    // 先拉取最近5分钟历史数据填充图表
     const now = Date.now()
-    fetchHistory(now - 5 * 60 * 1000, now)
-    // 连接 SSE 持续接收实时数据
+    console.debug('[SysMonitor] onMounted: fetching history, then connecting SSE')
+    await fetchHistory(now - 5 * 60 * 1000, now)
     connectSse()
+    startMcpPolling()
   }, 0)
 
   window.addEventListener('resize', handleWindowResize)
@@ -383,6 +658,7 @@ onUnmounted(() => {
     sseSource = null
   }
   stopPolling()
+  stopMcpPolling()
   Object.values(charts).forEach(c => c && c.dispose())
   window.removeEventListener('resize', handleWindowResize)
 })
@@ -418,10 +694,11 @@ onUnmounted(() => {
   flex: 1;
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  grid-template-rows: repeat(2, 1fr);
+  grid-template-rows: repeat(auto-fill, minmax(200px, 1fr));
   gap: 16px;
   min-height: 0;
   position: relative;
+  overflow-y: auto;
 }
 .chart-box {
   min-height: 200px;
@@ -431,7 +708,6 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* 支持原生拖拽缩放 */
   resize: both;
 }
 .chart-box.maximized {
@@ -448,6 +724,12 @@ onUnmounted(() => {
   top: 4px;
   right: 4px;
   z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chart-source-tag {
+  font-size: 10px;
 }
 .chart-content {
   flex: 1;

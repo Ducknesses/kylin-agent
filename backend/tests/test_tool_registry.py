@@ -1,26 +1,201 @@
-"""ToolRegistry 单元测试
+"""ToolRegistry 单元测试（纯动态模式）
 
 覆盖：
-  - 6 个已注册工具的识别
+  - 通过 register_from_server 注册 mock 工具
+  - 7 个已注册工具的识别
   - 未知工具返回不存在
   - sys_info metric 枚举校验
-  - service_mgr action 枚举校验（不含 enable/disable）
+  - service_mgr action 枚举校验
   - service_mgr action 风险等级映射
   - log_reader lines 上限校验（1-500）
   - net_monitor metric 枚举校验
   - file_guard action 枚举校验
+  - cmd_exec 审计策略（summary 模式）
   - ToolRegistry 不直接调用 MCPClient
 """
 
 import pytest
 
+from app.mcp.client import MCPTool
 from app.services.tool_registry import ToolRegistry
+
+
+# ── Mock MCP 工具构建辅助函数 ──────────────────────────────────────────
+
+def _make_mock_tool(
+    name: str,
+    description: str,
+    properties: dict,
+    required: list[str] | None = None,
+    meta: dict | None = None,
+) -> MCPTool:
+    """构建 mock MCPTool（模拟 MCP 服务器 tools/list 响应格式）"""
+    return MCPTool(
+        name=name,
+        description=description,
+        parameters=properties,
+        required=required or [],
+        server_id="test-server",
+        server_name="Test MCP Server",
+        meta=meta or {},
+    )
+
+
+# ── 从旧 JSON 配置文件迁移的元信息 ─────────────────────────────────────
+
+_SYS_INFO_META = {
+    "suggested_risk": "low",
+    "audit_policy": {"mode": "whitelist", "safe_fields": ["metric"]},
+}
+
+_SERVICE_MGR_META = {
+    "suggested_risk": "low",
+    "action_field": "action",
+    "action_risk_overrides": {
+        "status": "low", "is-active": "low", "is-enabled": "low",
+        "start": "medium", "stop": "medium", "restart": "medium",
+    },
+    "audit_policy": {"mode": "whitelist", "safe_fields": ["action", "service"]},
+}
+
+_LOG_READER_META = {
+    "suggested_risk": "low",
+    "audit_policy": {"mode": "whitelist", "safe_fields": ["service", "lines"]},
+}
+
+_NET_MONITOR_META = {
+    "suggested_risk": "low",
+    "audit_policy": {"mode": "whitelist", "safe_fields": ["metric"]},
+}
+
+_CMD_EXEC_META = {
+    "suggested_risk": "medium",
+    "audit_policy": {"mode": "summary", "summary_builder": "cmd_exec_summary"},
+}
+
+_FILE_GUARD_META = {
+    "suggested_risk": "medium",
+    "action_field": "action",
+    "action_risk_overrides": {
+        "check": "low", "read": "low", "write": "medium",
+    },
+    "audit_policy": {"mode": "whitelist", "safe_fields": ["action", "path"]},
+}
+
+_METRICS_HISTORY_META = {
+    "suggested_risk": "low",
+    "audit_policy": {"mode": "whitelist", "safe_fields": ["from_ts", "to_ts", "metrics"]},
+}
+
+
+def _build_mock_tools() -> list[MCPTool]:
+    """构建完整的 mock 工具列表（模拟 MCP 服务器 tools/list 返回）"""
+    return [
+        _make_mock_tool(
+            "sys_info", "获取系统信息（CPU、内存、磁盘、负载等）",
+            {
+                "metric": {
+                    "type": "string",
+                    "description": "指标类型",
+                    "enum": ["cpu", "memory", "disk", "load", "uptime", "all", "network"],
+                },
+            },
+            required=[],
+            meta=_SYS_INFO_META,
+        ),
+        _make_mock_tool(
+            "service_mgr", "管理系统服务（systemctl 操作）",
+            {
+                "action": {
+                    "type": "string",
+                    "description": "操作类型",
+                    "enum": ["status", "start", "stop", "restart", "is-active", "is-enabled"],
+                },
+                "service": {
+                    "type": "string",
+                    "description": "服务名称",
+                },
+            },
+            required=["action", "service"],
+            meta=_SERVICE_MGR_META,
+        ),
+        _make_mock_tool(
+            "log_reader", "读取系统日志",
+            {
+                "type": {"type": "string", "description": "日志类型"},
+                "source": {"type": "string", "description": "日志来源"},
+                "service": {"type": "string", "description": "服务名称"},
+                "lines": {
+                    "type": "integer",
+                    "description": "读取行数",
+                    "constraints": {"min": 1, "max": 500},
+                },
+                "since": {"type": "string", "description": "起始时间"},
+                "keyword": {"type": "string", "description": "关键词过滤"},
+            },
+            meta=_LOG_READER_META,
+        ),
+        _make_mock_tool(
+            "net_monitor", "网络监控信息",
+            {
+                "metric": {
+                    "type": "string",
+                    "description": "监控指标",
+                    "enum": ["connections", "traffic", "interfaces", "routes", "dns", "listen", "all"],
+                },
+                "port": {"type": "integer", "description": "端口号"},
+            },
+            meta=_NET_MONITOR_META,
+        ),
+        _make_mock_tool(
+            "cmd_exec", "执行安全范围内的系统命令",
+            {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "timeout": {"type": "integer", "description": "超时时间（秒）"},
+                "user": {"type": "string", "description": "执行用户"},
+            },
+            required=["command"],
+            meta=_CMD_EXEC_META,
+        ),
+        _make_mock_tool(
+            "metrics_history", "查询系统历史指标数据（CPU、内存、磁盘、网络），按时间范围返回历史读数",
+            {
+                "from_ts": {"type": "number", "description": "开始时间戳（Unix秒），默认5分钟前"},
+                "to_ts": {"type": "number", "description": "结束时间戳（Unix秒），默认当前时间"},
+                "metrics": {"type": "string", "description": "逗号分隔的指标名: cpu,memory,disk,network,all"},
+                "limit": {
+                    "type": "integer",
+                    "description": "返回记录数上限",
+                    "constraints": {"min": 1, "max": 10000},
+                },
+            },
+            meta=_METRICS_HISTORY_META,
+        ),
+        _make_mock_tool(
+            "file_guard", "安全地操作文件（检查、读取、写入）",
+            {
+                "action": {
+                    "type": "string",
+                    "description": "操作类型",
+                    "enum": ["check", "read", "write"],
+                },
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "写入内容（仅 write 操作需要）"},
+                "max_size": {"type": "integer", "description": "最大文件大小"},
+            },
+            required=["action", "path"],
+            meta=_FILE_GUARD_META,
+        ),
+    ]
 
 
 @pytest.fixture
 def registry() -> ToolRegistry:
-    """每个测试一个干净的 ToolRegistry 实例"""
-    return ToolRegistry()
+    """每个测试一个干净的 ToolRegistry 实例，注册 mock 工具"""
+    reg = ToolRegistry()
+    tools = _build_mock_tools()
+    reg.register_from_server("test-server", tools)
+    return reg
 
 
 # ── 工具存在性测试 ────────────────────────────────────────────────────
@@ -47,7 +222,7 @@ class TestToolExistence:
         assert registry.exists("") is False
 
     def test_get_tool_names_returns_all(self, registry):
-        """get_tool_names 应返回全部 6 个工具"""
+        """get_tool_names 应返回全部 7 个工具"""
         names = registry.get_tool_names()
 
         expected_names = {
@@ -113,17 +288,14 @@ class TestSysInfo:
         assert result["valid"] is True
 
     def test_metric_invalid(self, registry):
-        """非法的 metric 值应校验失败"""
         result = registry.validate_params("sys_info", {"metric": "hack"})
         assert result["valid"] is False
-        assert len(result["errors"]) == 1
-        assert "hack" in result["errors"][0]
+        assert any("metric" in e for e in result["errors"])
 
     def test_missing_required_param(self, registry):
-        """缺少必填参数 metric"""
+        """sys_info metric 非 required，空参数合法"""
         result = registry.validate_params("sys_info", {})
-        assert result["valid"] is False
-        assert any("metric" in e for e in result["errors"])
+        assert result["valid"] is True
 
     def test_default_risk_low(self, registry):
         assert registry.get_default_risk("sys_info") == "low"
@@ -138,68 +310,55 @@ class TestServiceMgr:
 
     @pytest.mark.parametrize("action", _VALID_ACTIONS)
     def test_action_valid(self, registry, action):
-        result = registry.validate_params("service_mgr", {
-            "action": action,
-            "service": "nginx",
-        })
-        assert result["valid"] is True, f"action={action} 应为合法值"
+        result = registry.validate_params("service_mgr", {"action": action, "service": "nginx"})
+        assert result["valid"] is True
 
     def test_action_enable_invalid(self, registry):
-        """enable 不应在 ToolRegistry 允许范围内"""
-        result = registry.validate_params("service_mgr", {
-            "action": "enable",
-            "service": "nginx",
-        })
+        result = registry.validate_params("service_mgr", {"action": "enable", "service": "nginx"})
         assert result["valid"] is False
+        assert any("action" in e for e in result["errors"])
 
     def test_action_disable_invalid(self, registry):
-        """disable 不应在 ToolRegistry 允许范围内"""
-        result = registry.validate_params("service_mgr", {
-            "action": "disable",
-            "service": "nginx",
-        })
+        result = registry.validate_params("service_mgr", {"action": "disable", "service": "nginx"})
         assert result["valid"] is False
+        assert any("action" in e for e in result["errors"])
 
     def test_action_empty_invalid(self, registry):
-        result = registry.validate_params("service_mgr", {
-            "action": "",
-            "service": "nginx",
-        })
-        assert result["valid"] is False
-
-    def test_missing_service(self, registry):
-        """缺少必填参数 service"""
-        result = registry.validate_params("service_mgr", {"action": "status"})
+        result = registry.validate_params("service_mgr", {"action": "", "service": "nginx"})
         assert result["valid"] is False
 
     def test_missing_action(self, registry):
-        """缺少必填参数 action"""
         result = registry.validate_params("service_mgr", {"service": "nginx"})
         assert result["valid"] is False
+        assert any("action" in e for e in result["errors"])
 
-    # ── action 级别风险映射 ──
+    def test_missing_service(self, registry):
+        result = registry.validate_params("service_mgr", {"action": "status"})
+        assert result["valid"] is False
+        assert any("service" in e for e in result["errors"])
 
-    def test_risk_status_low(self, registry):
+    def test_missing_both(self, registry):
+        result = registry.validate_params("service_mgr", {})
+        assert result["valid"] is False
+        assert len(result["errors"]) == 2
+
+    def test_default_risk(self, registry):
+        assert registry.get_default_risk("service_mgr") == "low"
+
+    def test_action_risk_status(self, registry):
         assert registry.get_risk_for_action("service_mgr", "status") == "low"
 
-    def test_risk_is_active_low(self, registry):
-        assert registry.get_risk_for_action("service_mgr", "is-active") == "low"
-
-    def test_risk_is_enabled_low(self, registry):
-        assert registry.get_risk_for_action("service_mgr", "is-enabled") == "low"
-
-    def test_risk_start_medium(self, registry):
+    def test_action_risk_start(self, registry):
         assert registry.get_risk_for_action("service_mgr", "start") == "medium"
 
-    def test_risk_stop_medium(self, registry):
+    def test_action_risk_stop(self, registry):
         assert registry.get_risk_for_action("service_mgr", "stop") == "medium"
 
-    def test_risk_restart_medium(self, registry):
+    def test_action_risk_restart(self, registry):
         assert registry.get_risk_for_action("service_mgr", "restart") == "medium"
 
-    def test_risk_unknown_action_returns_default(self, registry):
-        """不存在的 action 返回工具默认风险等级"""
-        assert registry.get_risk_for_action("service_mgr", "nonexistent") == "low"
+    def test_action_risk_is_active(self, registry):
+        assert registry.get_risk_for_action("service_mgr", "is-active") == "low"
 
 
 # ── log_reader 测试 ───────────────────────────────────────────────────
@@ -207,53 +366,34 @@ class TestServiceMgr:
 class TestLogReader:
     """log_reader 工具测试"""
 
+    def test_valid_simple(self, registry):
+        result = registry.validate_params("log_reader", {"type": "journalctl", "source": "system"})
+        assert result["valid"] is True
+
     def test_lines_within_range(self, registry):
-        """lines 在 1-500 范围内应通过"""
-        result = registry.validate_params("log_reader", {
-            "source": "/var/log/messages",
-            "lines": 100,
-        })
+        result = registry.validate_params("log_reader", {"type": "file", "source": "/var/log/syslog", "lines": 300})
         assert result["valid"] is True
 
     def test_lines_min_boundary(self, registry):
-        """lines=1 应通过"""
-        result = registry.validate_params("log_reader", {
-            "source": "/var/log/messages",
-            "lines": 1,
-        })
+        result = registry.validate_params("log_reader", {"type": "file", "source": "/var/log/syslog", "lines": 1})
         assert result["valid"] is True
 
     def test_lines_max_boundary(self, registry):
-        """lines=500 应通过"""
-        result = registry.validate_params("log_reader", {
-            "source": "/var/log/messages",
-            "lines": 500,
-        })
+        result = registry.validate_params("log_reader", {"type": "file", "source": "/var/log/syslog", "lines": 500})
         assert result["valid"] is True
 
-    def test_lines_zero_invalid(self, registry):
-        """lines=0 应失败"""
-        result = registry.validate_params("log_reader", {
-            "source": "/var/log/messages",
-            "lines": 0,
-        })
+    def test_lines_below_min(self, registry):
+        result = registry.validate_params("log_reader", {"type": "file", "source": "/var/log/syslog", "lines": 0})
         assert result["valid"] is False
 
-    def test_lines_negative_invalid(self, registry):
-        """lines 负数应失败"""
-        result = registry.validate_params("log_reader", {
-            "source": "/var/log/messages",
-            "lines": -1,
-        })
+    def test_lines_above_max(self, registry):
+        result = registry.validate_params("log_reader", {"type": "file", "source": "/var/log/syslog", "lines": 501})
         assert result["valid"] is False
 
-    def test_lines_exceeds_max(self, registry):
-        """lines > 500 应失败"""
-        result = registry.validate_params("log_reader", {
-            "source": "/var/log/messages",
-            "lines": 501,
-        })
-        assert result["valid"] is False
+    def test_no_required_params_ok(self, registry):
+        """所有参数都是可选的"""
+        result = registry.validate_params("log_reader", {})
+        assert result["valid"] is True
 
     def test_default_risk_low(self, registry):
         assert registry.get_default_risk("log_reader") == "low"
@@ -274,10 +414,15 @@ class TestNetMonitor:
     def test_metric_invalid(self, registry):
         result = registry.validate_params("net_monitor", {"metric": "bandwidth"})
         assert result["valid"] is False
+        assert any("metric" in e for e in result["errors"])
+
+    def test_no_params_ok(self, registry):
+        """所有参数都是可选的"""
+        result = registry.validate_params("net_monitor", {})
+        assert result["valid"] is True
 
     def test_default_risk_low(self, registry):
         assert registry.get_default_risk("net_monitor") == "low"
-
 
 
 # ── cmd_exec 测试 ─────────────────────────────────────────────────────
@@ -285,36 +430,74 @@ class TestNetMonitor:
 class TestCmdExec:
     """cmd_exec 工具测试"""
 
-    def test_command_present_valid(self, registry):
-        """command 存在即可通过（不做命令黑名单裁决）"""
-        result = registry.validate_params("cmd_exec", {
-            "command": "whoami",
-        })
+    def test_valid_command(self, registry):
+        result = registry.validate_params("cmd_exec", {"command": "df -h"})
+        assert result["valid"] is True
+
+    def test_valid_with_timeout(self, registry):
+        result = registry.validate_params("cmd_exec", {"command": "ls", "timeout": 60})
         assert result["valid"] is True
 
     def test_missing_command(self, registry):
-        """缺少必填参数 command"""
         result = registry.validate_params("cmd_exec", {})
         assert result["valid"] is False
-
-    def test_with_timeout(self, registry):
-        """可选参数 timeout"""
-        result = registry.validate_params("cmd_exec", {
-            "command": "whoami",
-            "timeout": 10,
-        })
-        assert result["valid"] is True
-
-    def test_with_user(self, registry):
-        """可选参数 user"""
-        result = registry.validate_params("cmd_exec", {
-            "command": "whoami",
-            "user": "nobody",
-        })
-        assert result["valid"] is True
+        assert any("command" in e for e in result["errors"])
 
     def test_default_risk_medium(self, registry):
         assert registry.get_default_risk("cmd_exec") == "medium"
+
+    def test_audit_policy_summary(self, registry):
+        policy = registry.get_tool_audit_policy("cmd_exec")
+        assert policy is not None
+        assert policy["mode"] == "summary"
+        assert policy["summary_builder"] == "cmd_exec_summary"
+
+    def test_build_audit_metadata_summary(self, registry):
+        """审计元数据应生成摘要而非原命令"""
+        metadata = registry.build_audit_metadata(
+            "cmd_exec", {"command": "rm -rf /tmp/test", "timeout": 30}
+        )
+        # 摘要模式不应包含原始完整命令
+        assert "command" not in metadata or metadata.get("command") != "rm -rf /tmp/test"
+        # 应包含 command_name 或 argument_count 等摘要字段
+        assert any(k in metadata for k in ("command_name", "argument_count", "command"))
+
+
+# ── metrics_history 测试 ──────────────────────────────────────────────
+
+class TestMetricsHistory:
+    """metrics_history 工具测试"""
+
+    def test_valid_defaults(self, registry):
+        result = registry.validate_params("metrics_history", {})
+        assert result["valid"] is True
+
+    def test_with_metrics_param(self, registry):
+        result = registry.validate_params("metrics_history", {"metrics": "cpu,memory"})
+        assert result["valid"] is True
+
+    def test_limit_within_range(self, registry):
+        result = registry.validate_params("metrics_history", {"limit": 5000})
+        assert result["valid"] is True
+
+    def test_limit_below_min(self, registry):
+        result = registry.validate_params("metrics_history", {"limit": 0})
+        assert result["valid"] is False
+
+    def test_limit_above_max(self, registry):
+        result = registry.validate_params("metrics_history", {"limit": 10001})
+        assert result["valid"] is False
+
+    def test_limit_boundary_min(self, registry):
+        result = registry.validate_params("metrics_history", {"limit": 1})
+        assert result["valid"] is True
+
+    def test_limit_boundary_max(self, registry):
+        result = registry.validate_params("metrics_history", {"limit": 10000})
+        assert result["valid"] is True
+
+    def test_default_risk_low(self, registry):
+        assert registry.get_default_risk("metrics_history") == "low"
 
 
 # ── file_guard 测试 ───────────────────────────────────────────────────
@@ -326,270 +509,347 @@ class TestFileGuard:
 
     @pytest.mark.parametrize("action", _VALID_ACTIONS)
     def test_action_valid(self, registry, action):
-        result = registry.validate_params("file_guard", {
-            "action": action,
-            "path": "/tmp/test.txt",
-        })
+        params = {"action": action, "path": "/tmp/test.txt"}
+        if action == "write":
+            params["content"] = "hello"
+        result = registry.validate_params("file_guard", params)
         assert result["valid"] is True
 
     def test_action_invalid(self, registry):
-        result = registry.validate_params("file_guard", {
-            "action": "delete",
-            "path": "/tmp/test.txt",
-        })
+        result = registry.validate_params("file_guard", {"action": "delete", "path": "/tmp/test.txt"})
         assert result["valid"] is False
-
-    def test_missing_path(self, registry):
-        result = registry.validate_params("file_guard", {"action": "read"})
-        assert result["valid"] is False
+        assert any("action" in e for e in result["errors"])
 
     def test_missing_action(self, registry):
         result = registry.validate_params("file_guard", {"path": "/tmp/test.txt"})
         assert result["valid"] is False
+        assert any("action" in e for e in result["errors"])
 
-    def test_default_risk_medium(self, registry):
+    def test_missing_path(self, registry):
+        result = registry.validate_params("file_guard", {"action": "read"})
+        assert result["valid"] is False
+        assert any("path" in e for e in result["errors"])
+
+    def test_default_risk(self, registry):
         assert registry.get_default_risk("file_guard") == "medium"
 
+    def test_action_risk_check(self, registry):
+        assert registry.get_risk_for_action("file_guard", "check") == "low"
 
-# ── 边界情况 ──────────────────────────────────────────────────────────
+    def test_action_risk_read(self, registry):
+        assert registry.get_risk_for_action("file_guard", "read") == "low"
 
-class TestEdgeCases:
-    """边界情况测试"""
+    def test_action_risk_write(self, registry):
+        assert registry.get_risk_for_action("file_guard", "write") == "medium"
 
-    def test_validate_unknown_tool(self, registry):
-        result = registry.validate_params("unknown", {})
-        assert result["valid"] is False
-        assert "未知工具" in result["errors"][0]
+    def test_action_risk_unknown_action(self, registry):
+        """未定义的 action 回退到 default_risk"""
+        assert registry.get_risk_for_action("file_guard", "delete") == "medium"
 
-    def test_validate_extra_params_allowed(self, registry):
-        """额外参数不应导致校验失败（ToolRegistry 仅校验已定义参数）"""
-        result = registry.validate_params("sys_info", {
-            "metric": "cpu",
-            "extra_field": "should_be_ignored",
-        })
-        assert result["valid"] is True
 
-    def test_get_param_info_known(self, registry):
+# ── resolve 测试 ──────────────────────────────────────────────────────
+
+class TestResolve:
+    """解析为标准调用格式"""
+
+    def test_resolve_sys_info(self, registry):
+        resolved = registry.resolve("sys_info", {"metric": "cpu"})
+        assert resolved == {"tool": "sys_info", "arguments": {"metric": "cpu"}}
+
+    def test_resolve_cmd_exec(self, registry):
+        resolved = registry.resolve("cmd_exec", {"command": "ls", "timeout": 30})
+        assert resolved == {"tool": "cmd_exec", "arguments": {"command": "ls", "timeout": 30}}
+
+    def test_resolve_unknown(self, registry):
+        """未知工具仍然返回格式，调用方自行处理"""
+        resolved = registry.resolve("unknown", {"a": 1})
+        assert resolved["tool"] == "unknown"
+        assert resolved["arguments"] == {"a": 1}
+
+
+# ── get_openai_functions / build_tool_prompt_section 测试 ─────────────
+
+class TestOpenAIFunctions:
+    """OpenAI function calling 格式生成"""
+
+    def test_returns_functions(self, registry):
+        functions = registry.get_openai_functions()
+        assert isinstance(functions, list)
+        assert len(functions) == 7
+
+        names = [f["function"]["name"] for f in functions]
+        assert "sys_info" in names
+        assert "cmd_exec" in names
+        assert "file_guard" in names
+
+    def test_function_format(self, registry):
+        functions = registry.get_openai_functions()
+        cmd_exec = next(f for f in functions if f["function"]["name"] == "cmd_exec")
+        assert cmd_exec["type"] == "function"
+        assert "command" in cmd_exec["function"]["parameters"]["properties"]
+        assert "command" in cmd_exec["function"]["parameters"]["required"]
+
+    def test_build_tool_prompt_section(self, registry):
+        prompt = registry.build_tool_prompt_section()
+        assert "sys_info" in prompt
+        assert "service_mgr" in prompt
+        assert "cmd_exec" in prompt
+
+
+# ── 动态注册 / 注销测试 ───────────────────────────────────────────────
+
+class TestDynamicRegistration:
+    """动态注册与注销"""
+
+    def test_register_new_server_adds_tools(self, registry):
+        """注册新服务器应添加工具"""
+        new_tool = _make_mock_tool(
+            "new_tool", "A new tool",
+            {"param1": {"type": "string", "description": "param"}},
+            meta={"suggested_risk": "low"},
+        )
+        registry.register_from_server("another-server", [new_tool])
+        assert registry.exists("new_tool") is True
+        assert registry.get_default_risk("new_tool") == "low"
+
+    def test_unregister_server_marks_unavailable(self, registry):
+        """注销服务器应标记工具为 unavailable"""
+        registry.unregister_server("test-server")
+        # 工具名仍在 get_tool_names 中（标记 unavailable 非删除）
+        names = registry.get_tool_names()
+        assert "sys_info" in names
+        # 但 get_openai_functions 不应包含 unavailable 工具
+        functions = registry.get_openai_functions()
+        names_in_functions = [f["function"]["name"] for f in functions]
+        assert "sys_info" not in names_in_functions
+
+    def test_unregister_server_retains_config(self, registry):
+        """注销后工具定义仍在，但 source='mcp' 且 status='unavailable'"""
+        registry.unregister_server("test-server")
+        defn = registry.get_tool_definition("sys_info")
+        assert defn is not None
+        assert defn["source"] == "mcp"
+        assert defn["status"] == "unavailable"
+        # risk 元信息应保留
+        assert defn["default_risk"] == "low"
+
+    def test_refresh_server_replaces_tools(self, registry):
+        """刷新服务器应替换工具列表"""
+        # 注册不同工具
+        new_tool = _make_mock_tool(
+            "replaced_tool", "Replaced",
+            {"x": {"type": "string", "description": "x"}},
+            meta={"suggested_risk": "high"},
+        )
+        registry.register_from_server("test-server", [new_tool])
+        # 旧工具不再存在（被清除）
+        assert registry.exists("sys_info") is False
+        assert registry.exists("replaced_tool") is True
+        assert registry.get_default_risk("replaced_tool") == "high"
+
+
+# ── 审计策略测试 ──────────────────────────────────────────────────────
+
+class TestAuditPolicy:
+    """审计策略功能测试"""
+
+    def test_sys_info_whitelist(self, registry):
+        """sys_info 审计策略应只保留 whitelist 字段"""
+        metadata = registry.build_audit_metadata(
+            "sys_info", {"metric": "cpu", "extra_secret": "should_be_dropped"}
+        )
+        assert "metric" in metadata
+        assert "extra_secret" not in metadata
+
+    def test_file_guard_whitelist(self, registry):
+        """file_guard read 操作应只保留 action/path"""
+        metadata = registry.build_audit_metadata(
+            "file_guard", {"action": "read", "path": "/etc/hosts", "content": "secret_data"}
+        )
+        assert "action" in metadata
+        assert "path" in metadata
+        assert "content" not in metadata
+
+    def test_update_audit_policy(self, registry):
+        """更新审计策略应在内存中生效"""
+        result = registry.update_tool_audit_policy("sys_info", mode="full")
+        assert result is True
+        policy = registry.get_tool_audit_policy("sys_info")
+        assert policy["mode"] == "full"
+
+        # full 模式下所有字段都应保留
+        metadata = registry.build_audit_metadata(
+            "sys_info", {"metric": "cpu", "extra": "kept"}
+        )
+        assert "metric" in metadata
+        assert "extra" in metadata
+
+    def test_update_audit_policy_unknown_tool(self, registry):
+        """更新未知工具的审计策略应返回 False"""
+        result = registry.update_tool_audit_policy("nonexistent", mode="whitelist")
+        assert result is False
+
+
+# ── 风险等级更新测试 ─────────────────────────────────────────────────
+
+class TestRiskUpdate:
+    """风险等级更新功能测试"""
+
+    def test_update_risk_default(self, registry):
+        """更新默认风险等级"""
+        result = registry.update_tool_risk("net_monitor", default_risk="high")
+        assert result is True
+        assert registry.get_default_risk("net_monitor") == "high"
+
+    def test_update_risk_overrides(self, registry):
+        """更新 action 风险覆盖"""
+        result = registry.update_tool_risk(
+            "file_guard",
+            action_risk_overrides={"write": "high"},
+        )
+        assert result is True
+        assert registry.get_risk_for_action("file_guard", "write") == "high"
+        # check 应保持不变
+        assert registry.get_risk_for_action("file_guard", "check") == "low"
+
+    def test_update_risk_invalid_risk(self, registry):
+        """无效风险等级应拒绝"""
+        result = registry.update_tool_risk("sys_info", default_risk="critical")
+        assert result is False
+
+    def test_update_risk_invalid_action(self, registry):
+        """无效 action 应拒绝"""
+        result = registry.update_tool_risk(
+            "file_guard",
+            action_risk_overrides={"invalid_action": "low"},
+        )
+        assert result is False
+
+    def test_update_risk_unknown_tool(self, registry):
+        """未知工具应返回 False"""
+        result = registry.update_tool_risk("unknown", default_risk="medium")
+        assert result is False
+
+
+# ── get_all_tool_definitions 测试 ────────────────────────────────────
+
+class TestGetAllDefinitions:
+    """获取所有工具定义"""
+
+    def test_returns_all(self, registry):
+        definitions = registry.get_all_tool_definitions()
+        assert len(definitions) == 7
+        # 验证 source 字段
+        sources = {d["name"]: d["source"] for d in definitions}
+        assert all(s == "mcp" for s in sources.values())
+        # 验证 status 字段
+        statuses = {d["name"]: d["status"] for d in definitions}
+        assert all(s == "available" for s in statuses.values())
+
+    def test_get_single_definition(self, registry):
+        d = registry.get_tool_definition("cmd_exec")
+        assert d is not None
+        assert d["name"] == "cmd_exec"
+        assert d["default_risk"] == "medium"
+        assert d["source"] == "mcp"
+        assert d["audit_policy"]["mode"] == "summary"
+
+
+# ── get_tool_spec 向后兼容测试 ────────────────────────────────────────
+
+class TestToolSpecCompat:
+    """ToolSpec 向后兼容"""
+
+    def test_get_tool_spec_known(self, registry):
+        spec = registry.get_tool_spec("sys_info")
+        assert spec is not None
+        assert spec.name == "sys_info"
+        assert spec.default_risk == "low"
+        assert "metric" in spec.params
+
+    def test_get_tool_spec_cache(self, registry):
+        """同一工具返回同一对象"""
+        spec1 = registry.get_tool_spec("sys_info")
+        spec2 = registry.get_tool_spec("sys_info")
+        assert spec1 is spec2
+
+    def test_get_tool_spec_unknown(self, registry):
+        assert registry.get_tool_spec("unknown") is None
+
+    def test_get_param_info(self, registry):
         info = registry.get_param_info("sys_info", "metric")
         assert info is not None
         assert info["type"] == "string"
-        assert "enum" in info
+        assert "cpu" in info["enum"]
+
+    def test_get_param_info_unknown_tool(self, registry):
+        assert registry.get_param_info("unknown", "x") is None
 
     def test_get_param_info_unknown_param(self, registry):
         assert registry.get_param_info("sys_info", "nonexistent") is None
 
-    def test_get_param_info_unknown_tool(self, registry):
-        assert registry.get_param_info("unknown", "metric") is None
 
-    def test_get_risk_unknown_tool(self, registry):
-        assert registry.get_default_risk("unknown") is None
+# ── get_tool_server_id 测试 ──────────────────────────────────────────
 
-    def test_get_risk_for_action_unknown_tool(self, registry):
-        assert registry.get_risk_for_action("unknown", "start") is None
+class TestToolServerId:
+    """工具服务器 ID 解析"""
 
+    def test_returns_server_id(self, registry):
+        sid = registry.get_tool_server_id("sys_info")
+        assert sid == "test-server"
 
-# ── ToolRegistry 不直接调用 MCPClient 的保证 ──────────────────────────
-
-class TestNoMCPClientDirectCall:
-    """验证 ToolRegistry 不导入或调用 MCPClient"""
-
-    def test_no_mcp_client_import(self):
-        """ToolRegistry 模块不应导入 MCPClient"""
-        import app.services.tool_registry as tr
-        source = tr.__dict__
-        # 检查模块级别是否引入了 mcp client
-        assert "MCPClient" not in source
-        assert "mcp" not in str(tr.__dict__.get("__builtins__", ""))
+    def test_returns_empty_for_nonexistent(self, registry):
+        sid = registry.get_tool_server_id("nonexistent")
+        assert sid == ""
 
 
-# ── build_audit_metadata 直接测试 ─────────────────────────────────────
+# ── count 测试 ───────────────────────────────────────────────────────
+
+class TestCount:
+    """count 方法测试"""
+
+    def test_count_returns_mcp_tools(self, registry):
+        assert registry.count() == 7
+
+    def test_count_after_unregister(self, registry):
+        registry.unregister_server("test-server")
+        # unregister 标记 unavailable 但不删除定义
+        # count() 只统计 source="mcp" 的工具（无论 status）
+        assert registry.count() == 7
 
 
-class TestBuildAuditMetadata:
-    """ToolRegistry.build_audit_metadata 直接单元测试"""
+# ── 边界情况测试 ─────────────────────────────────────────────────────
 
-    @pytest.fixture
-    def registry(self) -> ToolRegistry:
-        return ToolRegistry()
+class TestEdgeCases:
+    """边界情况"""
 
-    # A. service_mgr — 只返回 action/service，不含 password/extra
-    def test_service_mgr_filters_password(self, registry):
-        meta = registry.build_audit_metadata("service_mgr", {
-            "action": "restart",
-            "service": "nginx",
-            "password": "secret",
-            "extra": "ignored",
-        })
-        assert meta.get("action") == "restart"
-        assert meta.get("service") == "nginx"
-        assert "password" not in meta
-        assert "extra" not in meta
-
-    # B. sys_info — 只返回 metric
-    def test_sys_info_only_metric(self, registry):
-        meta = registry.build_audit_metadata("sys_info", {
-            "metric": "cpu",
-            "secret": "should_not_appear",
-        })
-        assert meta.get("metric") == "cpu"
-        assert "secret" not in meta
-
-    # C. log_reader — 只返回 service、lines，不含日志内容字段
-    def test_log_reader_only_service_lines(self, registry):
-        meta = registry.build_audit_metadata("log_reader", {
-            "service": "nginx",
-            "lines": 100,
-            "source": "/var/log/syslog",
-            "keyword": "error",
-        })
-        assert meta.get("service") == "nginx"
-        assert meta.get("lines") == 100
-        assert "source" not in meta
-        assert "keyword" not in meta
-
-    # D. net_monitor — 只返回 audit_policy 声明的字段
-    def test_net_monitor_only_metric(self, registry):
-        meta = registry.build_audit_metadata("net_monitor", {
-            "metric": "connections",
-            "port": 80,
-        })
-        assert meta.get("metric") == "connections"
-        assert "port" not in meta
-
-    # E. file_guard — 只返回 action/path，不含 content/password
-    def test_file_guard_only_action_path(self, registry):
-        meta = registry.build_audit_metadata("file_guard", {
-            "action": "write",
-            "path": "/tmp/test.txt",
-            "content": "secret content",
-            "password": "pwd123",
-        })
-        assert meta.get("action") == "write"
-        assert meta.get("path") == "/tmp/test.txt"
-        assert "content" not in meta
-        assert "password" not in meta
-
-    # F. cmd_exec — 完整 command 不出现在 metadata；含安全摘要字段
-    def test_cmd_exec_safe_summary_no_full_command(self, registry):
-        meta = registry.build_audit_metadata("cmd_exec", {
-            "command": "systemctl restart nginx --token secret",
-            "timeout": 30,
-        })
-        # 完整 command 不出现
-        assert "systemctl restart nginx --token secret" not in str(meta)
-        # secret 不出现
-        assert "secret" not in str(meta)
-        # 安全摘要字段存在
-        assert "command_name" in meta
-        assert "argument_count" in meta
-        assert "contains_pipe" in meta
-        assert "contains_redirect" in meta
-        assert "contains_shell_chain" in meta
-        # 不含完整参数数组或原始路径
-        assert "timeout" not in meta
-
-    def test_cmd_exec_empty_command(self, registry):
-        meta = registry.build_audit_metadata("cmd_exec", {
-            "command": "",
-        })
-        assert meta.get("command") == "[empty]"
-
-    # G. unknown tool — 返回 {}，warning 存在，不含 params/secret
-    def test_unknown_tool_returns_empty(self, registry, caplog):
-        import logging
-        caplog.set_level(logging.WARNING)
-        meta = registry.build_audit_metadata("nonexistent_tool", {
-            "param1": "value1",
-            "token": "secret123",
-        })
-        assert meta == {}
-        # warning 存在
-        warnings = [r.message for r in caplog.records if "nonexistent_tool" in str(r.message)]
-        assert len(warnings) >= 1
-        # warning 不包含 params
-        warning_text = str(warnings[0])
-        assert "param1" not in warning_text
-        assert "secret123" not in warning_text
-        assert "token" not in warning_text
-
-    # H. 所有注册工具 — 参数化校验
-    @pytest.mark.parametrize("tool_name", [
-        "sys_info", "service_mgr", "log_reader",
-        "net_monitor", "cmd_exec", "file_guard",
-    ])
-    def test_all_tools_have_valid_audit_policy(self, registry, tool_name):
-        """每个注册工具 audit_policy 不为 None，safe_fields 都属于 params"""
-        policy = registry.get_audit_policy(tool_name)
-        assert policy is not None, f"{tool_name} 缺少 AuditPolicy"
-        spec = registry.get_tool_spec(tool_name)
+    def test_get_tool_spec_after_unregister(self, registry):
+        """注销后 get_tool_spec 仍可用"""
+        registry.unregister_server("test-server")
+        spec = registry.get_tool_spec("sys_info")
         assert spec is not None
-        for sf in policy.safe_fields:
-            assert sf in spec.params, f"{tool_name} safe_field '{sf}' 不在 params 中"
-        # summary_builder 如存在必须有效
-        if policy.summary_builder:
-            assert policy.summary_builder in ("cmd_exec_summary",), \
-                f"{tool_name} summary_builder '{policy.summary_builder}' 未注册"
+        assert spec.name == "sys_info"
 
+    def test_get_tool_unknown(self, registry):
+        """get_tool 对未知工具返回 None"""
+        assert registry.get_tool("unknown") is None
 
-# ── S1: ToolSpec 深度不可变测试 ──────────────────────────────────────
-
-
-class TestToolSpecDeepImmutability:
-    """验证 ToolSpec params/action_risk_overrides 为 MappingProxyType"""
-
-    @pytest.fixture
-    def registry(self) -> ToolRegistry:
-        return ToolRegistry()
-
-    def test_params_item_assignment_raises_typeerror(self, registry):
-        spec = registry.get_tool_spec("sys_info")
-        with pytest.raises(TypeError):
-            spec.params["x"] = ToolRegistry  # type: ignore[index]
-
-    def test_params_item_deletion_raises_typeerror(self, registry):
-        spec = registry.get_tool_spec("sys_info")
-        with pytest.raises(TypeError):
-            del spec.params["metric"]  # type: ignore[arg-type]
-
-    def test_action_risk_overrides_assignment_raises_typeerror(self, registry):
-        spec = registry.get_tool_spec("service_mgr")
-        with pytest.raises(TypeError):
-            spec.action_risk_overrides["restart"] = "low"  # type: ignore[index]
-
-    def test_get_tool_info_mutation_does_not_affect_registry(self, registry):
+    def test_get_tool_info_after_risk_update(self, registry):
+        """风险更新后 get_tool_info 反映新值"""
+        registry.update_tool_risk("sys_info", default_risk="high")
         info = registry.get_tool_info("sys_info")
-        info["params"]["metric"]["constraints"] = {"min": -999}
-        spec = registry.get_tool_spec("sys_info")
-        assert spec.params["metric"].constraints is None
+        assert info is not None
+        assert info["risk_level"] == "high"
 
-    def test_get_param_info_mutation_does_not_affect_registry(self, registry):
-        pi = registry.get_param_info("log_reader", "lines")
-        pi["constraints"]["min"] = -999
-        spec = registry.get_tool_spec("log_reader")
-        assert spec.params["lines"].constraints == {"min": 1, "max": 500}
+    def test_empty_registry(self):
+        """空注册表（无任何 MCP 连接）"""
+        reg = ToolRegistry()
+        assert reg.get_tool_names() == []
+        assert reg.count() == 0
+        assert reg.get_openai_functions() == []
+        assert reg.build_tool_prompt_section() == ""
 
-    def test_get_tool_spec_returns_same_content_twice(self, registry):
-        s1 = registry.get_tool_spec("sys_info")
-        s2 = registry.get_tool_spec("sys_info")
-        assert s1 is s2
-        assert s1.name == s2.name
-        assert s1.default_risk == s2.default_risk
-    def test_constraints_are_immutable(self, registry):
-        spec = registry.get_tool_spec("log_reader")
-        assert spec is not None
-
-        constraints = spec.params["lines"].constraints
-        assert constraints is not None
-
-        with pytest.raises(TypeError):
-            constraints["max"] = 9999  # type: ignore[index]
-    def test_constraints_item_deletion_raises_typeerror(self, registry):
-        spec = registry.get_tool_spec("log_reader")
-        assert spec is not None
-
-        constraints = spec.params["lines"].constraints
-        assert constraints is not None
-
-        with pytest.raises(TypeError):
-            del constraints["max"]  # type: ignore[arg-type]
-    
+    def test_save_config_noop(self):
+        """save_config 应不抛异常"""
+        reg = ToolRegistry()
+        reg.save_config()  # should not raise

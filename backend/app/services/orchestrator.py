@@ -39,7 +39,7 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
     trace_id = str(uuid.uuid4())[:16]
 
     if _match_any(user_input, _CPU_KEYWORDS):
-        yield {"type": "status", "content": "正在查询 CPU 使用率...", "trace_id": trace_id}
+        yield {"type": "status", "message": "正在查询 CPU 使用率...", "trace_id": trace_id}
         yield {"type": "tool_call", "tool": "sys_info", "tool_call_id": f"tc_{str(uuid.uuid4())[:8]}",
                "params": {"metric": "cpu"}, "result": _MOCK_CPU_RESULT, "trace_id": trace_id}
         yield {"type": "chunk", "content": f"当前 CPU 使用率约为 {_MOCK_CPU_RESULT['cpu_percent']}%，系统负载为 {', '.join(str(v) for v in _MOCK_CPU_RESULT['load_avg'])}。", "trace_id": trace_id}
@@ -47,7 +47,7 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
         return
 
     if _match_any(user_input, _RESTART_NGINX_KEYWORDS):
-        yield {"type": "status", "content": "已收到确认，正在模拟重启 nginx...", "trace_id": trace_id}
+        yield {"type": "status", "message": "已收到确认，正在模拟重启 nginx...", "trace_id": trace_id}
         yield {"type": "tool_call", "tool": "service_mgr", "tool_call_id": f"tc_{str(uuid.uuid4())[:8]}",
                "params": {"action": "restart", "service": "nginx"}, "result": _MOCK_NGINX_RESTART_RESULT, "trace_id": trace_id}
         yield {"type": "chunk", "content": "已模拟提交 nginx 重启操作。当前仍为 Mock 流程，未调用真实 MCP。", "trace_id": trace_id}
@@ -55,7 +55,7 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
         return
 
     if _match_any(user_input, _NGINX_STATUS_KEYWORDS):
-        yield {"type": "status", "content": "正在查询 nginx 服务状态...", "trace_id": trace_id}
+        yield {"type": "status", "message": "正在查询 nginx 服务状态...", "trace_id": trace_id}
         yield {"type": "tool_call", "tool": "service_mgr", "tool_call_id": f"tc_{str(uuid.uuid4())[:8]}",
                "params": {"action": "status", "service": "nginx"}, "result": _MOCK_NGINX_STATUS_RESULT, "trace_id": trace_id}
         si = _MOCK_NGINX_STATUS_RESULT
@@ -63,7 +63,7 @@ async def mock_orchestrate(user_input: str) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "done", "trace_id": trace_id}
         return
 
-    yield {"type": "status", "content": "正在分析意图...", "trace_id": trace_id}
+    yield {"type": "status", "message": "正在分析意图...", "trace_id": trace_id}
     yield {"type": "chunk", "content": f"已收到您的输入：「{user_input}」。当前为 Mock 模式，暂不支持真实运维操作。", "trace_id": trace_id}
     yield {"type": "done", "trace_id": trace_id}
 
@@ -259,6 +259,7 @@ class Orchestrator:
     async def handle_chat(
         self, session_id: str, user_input: str, role: str = "viewer",
         confirmed: bool = False, trace_id: str | None = None,
+        safety_result: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         from app.services.agent_context import AgentContext
 
@@ -269,7 +270,11 @@ class Orchestrator:
 
         try:
             # ── 2. 安全检查 ──
-            safety = self.safety_guard.analyze_user_input(user_input)
+            # 复用 chat 层预计算的 safety 结果，避免重复调用 analyze_user_input
+            if safety_result is not None:
+                safety = safety_result
+            else:
+                safety = self.safety_guard.analyze_user_input(user_input)
             ctx.risk_level = safety.get("risk_level", "low")
 
             if not safety.get("allowed", False):
@@ -294,10 +299,10 @@ class Orchestrator:
                 intent_result = await self.intent_agent.detect_with_llm(user_input)
             else:
                 intent_result = self.intent_agent.detect(user_input)
-            ctx.intent = intent_result.get("intent")
+            ctx.intent = intent_result.get("raw_intent", intent_result.get("intent", "unknown"))
             ctx.intent_result = intent_result
-            # 保存 intent_result 供后续 FixPlanner 使用
-            intent = ctx.intent or "unknown"
+            # raw_intent 为分类标签（给机器用），intent 为自然语言描述（给用户看）
+            intent = ctx.intent
             target_service = intent_result.get("target_service")
 
             # ── 4. DiagnoseAgent ──
@@ -335,7 +340,7 @@ class Orchestrator:
                 if result.get("requires_confirm"):
                     yield {
                         "type": "status", "trace_id": trace_id,
-                        "content": "该工具操作存在风险，正在等待用户确认...",
+                        "message": "该工具操作存在风险，正在等待用户确认...",
                     }
                     yield {
                         "type": "pending_confirmation", "trace_id": trace_id,
@@ -374,7 +379,7 @@ class Orchestrator:
             ctx.final_response = report
 
             # ── 7. FixPlannerAgent → FixOptionStore → fix_options 帧 ──
-            yield {"type": "status", "trace_id": trace_id, "content": "正在分析诊断结果，生成修复建议..."}
+            yield {"type": "status", "trace_id": trace_id, "message": "正在分析诊断结果，生成修复建议..."}
             if settings.LLM_ENABLED:
                 fix_options = await self.fix_planner.plan_with_llm(
                     intent=intent,

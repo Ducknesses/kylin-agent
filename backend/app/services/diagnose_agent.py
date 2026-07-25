@@ -57,7 +57,7 @@ class DiagnoseAgent:
         self.knowledge_service = knowledge_service
 
     def plan(self, intent_result: dict) -> dict[str, Any]:
-        intent = intent_result.get("intent", "unknown")
+        intent = intent_result.get("raw_intent", intent_result.get("intent", "unknown"))
         target_service = intent_result.get("target_service")
         entities = intent_result.get("entities", {})
         original_input = intent_result.get("original_input", "")
@@ -77,6 +77,8 @@ class DiagnoseAgent:
         elif intent == "network_query":
             plans = self._plan_network(entities)
             reason = "查询网络状态"
+        elif intent == "system_monitor_query":
+            plans, reason = self._plan_system_monitor(entities)
         elif intent == "service_status_query":
             plans, reason = self._plan_service_status(target_service)
         elif intent == "log_query":
@@ -107,6 +109,22 @@ class DiagnoseAgent:
         if port is not None:
             return [{"tool": "net_monitor", "params": {"metric": "listen", "port": port}}]
         return [{"tool": "net_monitor", "params": {"metric": "all"}}]
+
+    @staticmethod
+    def _plan_system_monitor(entities: dict) -> tuple[list[dict], str]:
+        """实体驱动的系统资源监控计划 —— 根据 entities.resources 生成 sys_info 调用"""
+        resources = entities.get("resources", [])
+        if isinstance(resources, list) and resources:
+            # 单个资源 → 精准查询；多个 → all
+            valid_metrics = {"cpu", "memory", "disk", "load", "network", "uptime"}
+            matched = [r for r in resources if isinstance(r, str) and r.lower() in valid_metrics]
+            if len(matched) == 1:
+                metric = matched[0].lower()
+                return [{"tool": "sys_info", "params": {"metric": metric}}], f"查询系统{metric}指标"
+            if matched:
+                return [{"tool": "sys_info", "params": {"metric": "all"}}], f"查询系统指标: {', '.join(matched)}"
+        # 回退：查询全部
+        return [{"tool": "sys_info", "params": {"metric": "all"}}], "查询系统全部指标"
 
     @staticmethod
     def _plan_service_status(target_service: str | None) -> tuple[list[dict], str]:
@@ -208,17 +226,14 @@ class DiagnoseAgent:
         try:
             client = LLMClient()
             tool_names = self._get_tool_names()
+            tool_section = self._get_tool_prompt_section()
             system_prompt = (
                 "你是一个诊断规划器。根据意图识别结果，生成需要调用的工具列表。\n"
                 "只输出 JSON 数组，不输出任何解释文字。\n"
                 "每项包含 tool（工具名）和 params（参数字典）。\n"
                 f"可用工具：{', '.join(tool_names)}\n"
                 "工具参数说明：\n"
-                "- sys_info: metric (cpu/memory/disk/load/network/uptime/all)\n"
-                "- service_mgr: action (status/start/stop/restart), service (服务名)\n"
-                "- log_reader: type (journalctl), service (服务名), lines (行数 1-500)\n"
-                "- net_monitor: metric (connections/traffic/interfaces/routes/dns/listen/all), port (可选)\n"
-                "- cmd_exec: command (命令字符串，限只读命令)\n"
+                f"{tool_section}\n"
                 "禁止生成 rm、mkfs、chmod 777、dd、curl pipe 等危险命令。"
             )
             user_prompt = json.dumps(intent_result, ensure_ascii=False)
@@ -316,3 +331,16 @@ class DiagnoseAgent:
         if self.tool_registry is not None:
             return self.tool_registry.get_tool_names()
         return ["sys_info", "service_mgr", "log_reader", "net_monitor", "cmd_exec"]
+
+    def _get_tool_prompt_section(self) -> str:
+        """从 ToolRegistry 动态生成工具参数说明"""
+        if self.tool_registry is not None and hasattr(self.tool_registry, "build_tool_prompt_section"):
+            return self.tool_registry.build_tool_prompt_section()
+        # 降级：返回硬编码说明
+        return (
+            "- sys_info: metric (cpu/memory/disk/load/network/uptime/all)\n"
+            "- service_mgr: action (status/start/stop/restart), service (服务名)\n"
+            "- log_reader: type (journalctl), service (服务名), lines (行数 1-500)\n"
+            "- net_monitor: metric (connections/traffic/interfaces/routes/dns/listen/all), port (可选)\n"
+            "- cmd_exec: command (命令字符串，限只读命令)"
+        )

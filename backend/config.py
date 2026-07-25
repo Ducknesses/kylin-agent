@@ -28,12 +28,13 @@ class Settings:
     LOCAL_LLM_MODEL: str = os.getenv("LOCAL_LLM_MODEL", "local-model")
     LOCAL_LLM_API_KEY: str = os.getenv("LOCAL_LLM_API_KEY", "")
 
-    # MCP Server（VirtualBox 麒麟 V11）
-    MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://192.168.56.101:8001")
-    # 执行器 C 通过 Bearer Token 校验后端身份，生产环境必须配置
+    # MCP Server（支持多服务器，JSON 数组格式）
+    # 示例：[{"id":"kylin","name":"麒麟 V11","url":"http://192.168.56.101:8001","transport":"sse"}]
+    # 兼容旧配置：MCP_SERVER_URL + MCP_AUTH_TOKEN 单服务器自动升级
+    MCP_SERVERS: str = os.getenv("MCP_SERVERS", "")
+    # 向后兼容 —— 单服务器配置
+    MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "")
     MCP_AUTH_TOKEN: str = os.getenv("MCP_AUTH_TOKEN", "")
-    # MCP 模式：mock（默认，B 独立开发）/ real（对接执行器 C）
-    MCP_MODE: str = os.getenv("MCP_MODE", "mock")
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
